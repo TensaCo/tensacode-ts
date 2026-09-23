@@ -114,6 +114,16 @@ deliberate. See [Parity with Python](docs/parity.md) for what remains.
   `tokenizers` library.
 - The tokenizer class chosen from `model_type` follows transformers 5.17
   (DistilBERT checkpoints use `BertTokenizer`'s input names).
+- `BertTokenizer` (also for ELECTRA and DistilBERT), `RobertaTokenizer` and
+  `CLIPTokenizer` rebuild their pipeline from the vocabulary and their flags,
+  as transformers 5 does, and every tokenizer registers its
+  `added_tokens_decoder`, special and extra special tokens and installs its
+  class post-processor. `special_tokens_map.json` takes precedence over
+  `tokenizer_config.json` unless the latter has `added_tokens_decoder`, as in
+  `_from_pretrained`. Tokenizers whose files differ from what the class builds
+  (for example a `BertProcessing` post-processor or a `do_lower_case` flag the
+  normalizer does not follow) now give Python's backend JSON, and
+  `Scene.fromFoundation` persists the tokenizer Python persists.
 
 ## 0.4.0-alpha.3
 

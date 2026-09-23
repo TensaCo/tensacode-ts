@@ -420,10 +420,138 @@ function rebuildT5(root: RawNode): void {
   rawSet(root, 'decoder', rawFromValue({ type: 'Metaspace', replacement: '▁', prepend_scheme: 'always', split: true }));
 }
 
+/**
+ * The tokenizer.json vocabulary as ``convert_to_native_format`` hands it to a
+ * WordPiece or BPE class: a token-to-id object (list vocabularies are
+ * numbered by position).
+ */
+function vocabularyObject(root: RawNode): RawNode {
+  const vocab = rawGet(rawGet(root, 'model'), 'vocab');
+  if (vocab?.t === 'o') return vocab;
+  const entries: [string, RawNode][] = [];
+  if (vocab?.t === 'a') {
+    vocab.items.forEach((item, index) => {
+      const token = item.t === 'a' ? rawString(item.items[0]) : rawString(item);
+      if (token !== undefined) entries.push([token, rawFromValue(index)]);
+    });
+  }
+  return { t: 'o', entries };
+}
+
+function mergesList(root: RawNode): RawNode {
+  const merges = rawGet(rawGet(root, 'model'), 'merges');
+  return merges?.t === 'a' ? merges : { t: 'a', items: [] };
+}
+
+function setModel(root: RawNode, fields: [string, unknown][], tail: [string, RawNode][]): void {
+  rawSet(root, 'model', { t: 'o', entries: [...fields.map(([key, value]): [string, RawNode] => [key, rawFromValue(value)]), ...tail] });
+}
+
+/**
+ * transformers 5 ``BertTokenizer.__init__`` (also used for ELECTRA and
+ * DistilBERT): ``WordPiece(vocab, unk_token)`` with the default prefix and
+ * word length, ``BertNormalizer`` from ``do_lower_case`` /
+ * ``tokenize_chinese_chars`` / ``strip_accents``, ``BertPreTokenizer`` and
+ * a ``WordPiece`` decoder; the post-processor is set after token registration.
+ */
+function rebuildBert(root: RawNode, flags: TokenizerFlags): void {
+  setModel(root, [
+    ['type', 'WordPiece'], ['unk_token', text(flags, 'unk_token', '[UNK]')], ['continuing_subword_prefix', '##'],
+    ['max_input_chars_per_word', 100],
+  ], [['vocab', vocabularyObject(root)]]);
+  rawSet(root, 'normalizer', rawFromValue({
+    type: 'BertNormalizer', clean_text: true, handle_chinese_chars: flag(flags, 'tokenize_chinese_chars', true),
+    strip_accents: typeof flags.strip_accents === 'boolean' ? flags.strip_accents : null, lowercase: flag(flags, 'do_lower_case', true),
+  }));
+  rawSet(root, 'pre_tokenizer', rawFromValue({ type: 'BertPreTokenizer' }));
+  rawSet(root, 'decoder', rawFromValue({ type: 'WordPiece', prefix: '##', cleanup: true }));
+}
+
+/** transformers 5 ``RobertaTokenizer.__init__``: byte-level BPE from the vocabulary and merges. */
+function rebuildRoberta(root: RawNode, flags: TokenizerFlags): void {
+  setModel(root, [
+    ['type', 'BPE'], ['dropout', null], ['unk_token', null], ['continuing_subword_prefix', ''], ['end_of_word_suffix', ''],
+    ['fuse_unk', false], ['byte_fallback', false], ['ignore_merges', false],
+  ], [['vocab', vocabularyObject(root)], ['merges', mergesList(root)]]);
+  rawSet(root, 'normalizer', rawFromValue(null));
+  rawSet(root, 'pre_tokenizer', rawFromValue({
+    type: 'ByteLevel', add_prefix_space: flag(flags, 'add_prefix_space', false), trim_offsets: true, use_regex: true,
+  }));
+  rawSet(root, 'decoder', rawFromValue({ type: 'ByteLevel', add_prefix_space: true, trim_offsets: true, use_regex: true }));
+}
+
+/** transformers 5 ``CLIPTokenizer.__init__``: BPE with ``</w>`` word ends, CLIP normalization and splitting. */
+function rebuildClip(root: RawNode, flags: TokenizerFlags): void {
+  setModel(root, [
+    ['type', 'BPE'], ['dropout', null], ['unk_token', text(flags, 'unk_token', '<|endoftext|>')], ['continuing_subword_prefix', ''],
+    ['end_of_word_suffix', '</w>'], ['fuse_unk', false], ['byte_fallback', false], ['ignore_merges', false],
+  ], [['vocab', vocabularyObject(root)], ['merges', mergesList(root)]]);
+  rawSet(root, 'normalizer', rawFromValue({
+    type: 'Sequence', normalizers: [{ type: 'NFC' }, { type: 'Replace', pattern: { Regex: '\\s+' }, content: ' ' }, { type: 'Lowercase' }],
+  }));
+  rawSet(root, 'pre_tokenizer', rawFromValue({
+    type: 'Sequence',
+    pretokenizers: [
+      {
+        type: 'Split', pattern: { Regex: "<\\|startoftext\\|>|<\\|endoftext\\|>|'s|'t|'re|'ve|'m|'ll|'d|[\\p{L}]+|[\\p{N}]|[^\\s\\p{L}\\p{N}]+" },
+        behavior: 'Removed', invert: true,
+      },
+      { type: 'ByteLevel', add_prefix_space: false, trim_offsets: true, use_regex: true },
+    ],
+  }));
+  rawSet(root, 'decoder', rawFromValue({ type: 'ByteLevel', add_prefix_space: true, trim_offsets: true, use_regex: true }));
+}
+
+/**
+ * The post-processor a tokenizer class installs at the end of its
+ * ``__init__`` (after ``TokenizersBackend`` registered its special tokens),
+ * with ids looked up in ``root``; ``null`` for classes that keep the file's.
+ */
+export function classPostProcessor(root: RawNode, tokenizerClass: string | null, flags: TokenizerFlags): unknown {
+  const base = tokenizerClass?.replace(/Fast$/, '') ?? null;
+  const id = (token: string): number | null => {
+    const found = tokenId(root, token);
+    return found === 0 && vocabularyId(root, token) === null && unigramPieces(root).indexOf(token) < 0
+      && !addedTokenId(root, token) ? null : found;
+  };
+  if (base === 'BertTokenizer') {
+    const cls = text(flags, 'cls_token', '[CLS]');
+    const sep = text(flags, 'sep_token', '[SEP]');
+    return clsSepTemplate(cls, id(cls) ?? 2, sep, id(sep) ?? 3);
+  }
+  if (base === 'RobertaTokenizer') {
+    const cls = text(flags, 'cls_token', '<s>');
+    const sep = text(flags, 'sep_token', '</s>');
+    return {
+      type: 'RobertaProcessing', sep: [sep, id(sep)], cls: [cls, id(cls)],
+      trim_offsets: flag(flags, 'trim_offsets', true), add_prefix_space: flag(flags, 'add_prefix_space', false),
+    };
+  }
+  if (base === 'CLIPTokenizer') {
+    const bos = text(flags, 'bos_token', '<|startoftext|>');
+    const eos = text(flags, 'eos_token', '<|endoftext|>');
+    return { type: 'RobertaProcessing', sep: [eos, id(eos)], cls: [bos, id(bos)], trim_offsets: false, add_prefix_space: false };
+  }
+  if (base === 'T5Tokenizer') {
+    const eos = text(flags, 'eos_token', '</s>');
+    const a = { Sequence: { id: 'A', type_id: 0 } };
+    const b = { Sequence: { id: 'B', type_id: 0 } };
+    const special = { SpecialToken: { id: '</s>', type_id: 0 } };
+    return { type: 'TemplateProcessing', single: [a, special], pair: [a, special, b, special], special_tokens: { '</s>': { id: '</s>', ids: [id(eos)], tokens: ['</s>'] } } };
+  }
+  return null;
+}
+
+function addedTokenId(root: RawNode, token: string): boolean {
+  const added = rawGet(root, 'added_tokens');
+  return added?.t === 'a' && added.items.some((entry) => rawString(rawGet(entry, 'content')) === token);
+}
+
 /** Tokenizer classes whose transformers 5 construction is emulated. */
 export const REBUILT_TOKENIZER_CLASSES = new Set([
   'T5Tokenizer', 'T5TokenizerFast', 'DebertaV2Tokenizer', 'DebertaV2TokenizerFast', 'AlbertTokenizer', 'AlbertTokenizerFast',
-  'GPT2Tokenizer', 'GPT2TokenizerFast', 'LlamaTokenizer', 'LlamaTokenizerFast',
+  'GPT2Tokenizer', 'GPT2TokenizerFast', 'LlamaTokenizer', 'LlamaTokenizerFast', 'BertTokenizer', 'BertTokenizerFast',
+  'RobertaTokenizer', 'RobertaTokenizerFast', 'CLIPTokenizer', 'CLIPTokenizerFast',
 ]);
 
 /**
@@ -453,6 +581,9 @@ export function canonicalBackendJson(
   else if (base === 'AlbertTokenizer') rebuildAlbert(root, options.flags ?? {});
   else if (base === 'GPT2Tokenizer') rebuildGPT2(root, options.flags ?? {});
   else if (base === 'LlamaTokenizer') rebuildLlama(root, options.flags ?? {});
+  else if (base === 'BertTokenizer') rebuildBert(root, options.flags ?? {});
+  else if (base === 'RobertaTokenizer') rebuildRoberta(root, options.flags ?? {});
+  else if (base === 'CLIPTokenizer') rebuildClip(root, options.flags ?? {});
   for (const key of ['normalizer', 'pre_tokenizer', 'post_processor', 'decoder']) normalizeComponent(rawGet(root, key));
   return emitJsonRaw(root, { sortKeys: true, separators: [',', ':'] });
 }

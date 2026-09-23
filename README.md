@@ -125,7 +125,7 @@ network returns a `Promise`. Pure computation is synchronous.
 | `Scene` language mode (Idefics3/SmolVLM) | Yes | `Scene.fromLanguageFoundation` and `interpret` with transformers' `generate` (beam search, guidance, watermarking, every logits processor); the processor and saved processor assets match Python byte for byte. A SmolVLM-256M interpretation takes seconds on a multi-core CPU |
 | `Trainer`, checkpoints | Yes | SGD, Adam, AdamW. Directory and standalone checkpoints are interchangeable, including PyTorch and CPython random states |
 | Native architectures | ALBERT, BERT, RoBERTa, Electra, DistilBERT, DeBERTa-v2, T5, ViT, CLIP, Llama, Idefics3 | transformers 5.17 parameter names; safetensors and `pytorch_model.bin` weights (weights-only unpickler), as transformers loads them. Python loads any transformers `AutoModel` for text foundations; TypeScript implements these |
-| Tokenizers | `tokenizer.json` runtime | WordPiece, BPE, Unigram, WordLevel, plus transformers 5's class rebuilds and class-default tokenizers; slow vocabulary files are not converted |
+| Tokenizers | `tokenizer.json` runtime | WordPiece, BPE, Unigram, WordLevel, plus transformers 5's class rebuilds (BERT, RoBERTa, CLIP, T5, DeBERTa-v2, ALBERT, GPT2, Llama) and class-default tokenizers; slow vocabulary files are not converted |
 | Integrations | OpenAI-compatible, Jev, Transformers.js `LocalModel` | Blocking `complete` like Python's, plus `acomplete`. No implicit retries or redirects |
 | Random numbers | Bitwise | `manualSeed(n)` is `torch.manual_seed(n)`: fresh weights, dropout masks and sampled tokens equal Python's |
 | Compute | CPU: WebAssembly SIMD kernels on worker threads, no native dependencies | No GPU. Results agree with PyTorch within float tolerance |

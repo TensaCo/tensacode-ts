@@ -204,12 +204,14 @@ describe('Scene with owned CLIP foundation perception', () => {
       expect(weight.equal(expected.get(name)!), name).toBe(true);
     }
     expect(imported.configuration().foundation_source).toEqual({ repo_id: path, revision: 'pinned' });
-    // Python persists ``backend_tokenizer.to_str()`` and hashes it.
-    expect(imported.configuration().tokenizer_sha256).toBe(source.configuration().tokenizer_sha256);
+    // Python persists ``CLIPTokenizerFast``'s ``backend_tokenizer.to_str()`` (rebuilt as CLIP's
+    // byte-level BPE) and hashes it (scripts/fixtures/scene_clip_foundation_fixtures.py).
+    const python = JSON.parse(readFileSync(new URL('../fixtures/vec/scene_clip_foundation.json', import.meta.url), 'utf8'));
+    expect(imported.configuration().tokenizer_sha256).toBe(python.tokenizer_sha256);
     const directory = mkdtempSync(join(tmpdir(), 'tensorcode-scene-tokenizer-'));
     try {
       await imported.savePretrained(directory);
-      expect(readFileSync(join(directory, 'tokenizer.json'), 'utf8')).toBe(readFileSync(join(fixturePath('scene_foundation_python'), 'tokenizer.json'), 'utf8'));
+      expect(sha256Hex(readFileSync(join(directory, 'tokenizer.json'), 'utf8'))).toBe(python.saved_tokenizer_sha256);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

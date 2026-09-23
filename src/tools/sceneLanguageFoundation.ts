@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import type { Tensor } from '../nn/tensor.js';
 import { NotImplementedError, ValueError } from '../errors.js';
 import {
-  deepCopy, emitJsonRaw, isPlainObject, parseJsonRaw, parseJsonStrict, pythonJsonDumps, rawFromValue, rawSet, sha256Hex, type JsonObject, type JsonValue,
+  deepCopy, isPlainObject, parseJsonStrict, pythonJsonDumps, sha256Hex, type JsonObject, type JsonValue,
 } from '../_internal/json.js';
 import { hubOffline, resolveArtifactDirectory, type HubOptions } from '../_internal/hub.js';
 import { pathExists } from '../_internal/files.js';
@@ -18,7 +18,7 @@ import { loadNativeFoundation } from '../_internal/native/foundation.js';
 import { TRANSFORMERS_VERSION, generationConfigFromModel } from '../_internal/native/config.js';
 import { GENERATION_CONFIG_DEFAULTS } from '../_internal/native/defaults.generated.js';
 import {
-  IDEFICS3_IMAGE_PROCESSOR_DEFAULTS, addSpecialTokens, addTokens, specialAddedToken, withBackendJson, type AddedTokenSpec,
+  IDEFICS3_IMAGE_PROCESSOR_DEFAULTS, addSpecialTokens,
 } from '../_internal/native/idefics3Processing.js';
 import { FastTokenizer, VERY_LARGE_INTEGER } from '../_internal/tokenizers/index.js';
 import { rustTokenizerString } from '../_internal/tokenizers/serialization.js';
@@ -188,93 +188,6 @@ function savedTokenizerConfig(
   return config;
 }
 
-/** Special token values of a class instance: configuration, special_tokens_map.json, then class defaults. */
-function classSpecialTokens(config: JsonObject, specialMap: JsonObject, spec: TokenizerClassSpec): [string, JsonValue][] {
-  return SPECIAL_KEYS.map((key) => {
-    const fallback = spec.forwarded[key];
-    const value = key in config ? config[key] : key in specialMap ? specialMap[key] : typeof fallback === 'function' ? null : fallback ?? null;
-    return [key, value as JsonValue];
-  });
-}
-
-function addedTokenSpec(value: JsonValue): AddedTokenSpec | null {
-  if (typeof value === 'string') return specialAddedToken(value);
-  if (isPlainObject(value) && typeof value.content === 'string') {
-    return {
-      content: value.content, lstrip: value.lstrip === true, normalized: value.normalized === true, rstrip: value.rstrip === true,
-      single_word: value.single_word === true, special: true,
-    };
-  }
-  return null;
-}
-
-/**
- * The backend ``TokenizersBackend.__init__`` leaves: tokens of
- * ``added_tokens_decoder``, the special tokens and the extra special tokens are
- * added when missing, the T5 template is installed, and a missing
- * post-processor becomes the plain ``$A``/``$A $B`` template.
- */
-function initializedBackend(tokenizer: FastTokenizer, className: string, config: JsonObject, specialMap: JsonObject): FastTokenizer {
-  const spec = TOKENIZER_CLASS_SPECS[className];
-  if (!spec) return tokenizer;
-  const existing = new Set((JSON.parse(tokenizer.jsonText).added_tokens as { content: string }[] ?? []).map((token) => token.content));
-  const tokens: AddedTokenSpec[] = [];
-  if (isPlainObject(config.added_tokens_decoder)) {
-    const entries = Object.entries(config.added_tokens_decoder as JsonObject).sort(([a], [b]) => Number(a) - Number(b));
-    for (const [, entry] of entries) {
-      if (!isPlainObject(entry) || typeof entry.content !== 'string') continue;
-      tokens.push({
-        content: entry.content, lstrip: entry.lstrip === true, normalized: entry.normalized === true, rstrip: entry.rstrip === true,
-        single_word: entry.single_word === true, special: entry.special === true,
-      });
-    }
-  }
-  const encoder = new Set([...existing, ...tokens.map((token) => token.content)]);
-  for (const [, value] of classSpecialTokens(config, specialMap, spec)) {
-    const token = value === null ? null : addedTokenSpec(value);
-    if (token && !encoder.has(token.content)) {
-      tokens.push(token);
-      encoder.add(token.content);
-    }
-  }
-  let extras: JsonValue[] = [];
-  if (Array.isArray(config.extra_special_tokens)) extras = config.extra_special_tokens;
-  else if (Array.isArray(config.additional_special_tokens)) extras = config.additional_special_tokens;
-  else if (className === 'T5Tokenizer') {
-    const count = typeof config.extra_ids === 'number' ? config.extra_ids : 100;
-    extras = Array.from({ length: count }, (_, index) => `<extra_id_${index}>`);
-  }
-  for (const value of extras) {
-    const token = addedTokenSpec(value);
-    if (token && !encoder.has(token.content)) {
-      tokens.push(token);
-      encoder.add(token.content);
-    }
-  }
-  let result = tokens.length ? addTokens(tokenizer, tokens) : tokenizer;
-  const root = JSON.parse(result.jsonText) as JsonObject;
-  let post: JsonValue | undefined;
-  if (className === 'T5Tokenizer') {
-    const eos = tokenText(classSpecialTokens(config, specialMap, spec).find(([key]) => key === 'eos_token')![1]) ?? '</s>';
-    const eosId = result.backend.tokenToId(eos) ?? null;
-    const special = { SpecialToken: { id: eos, type_id: 0 } };
-    const a = { Sequence: { id: 'A', type_id: 0 } };
-    const b = { Sequence: { id: 'B', type_id: 0 } };
-    post = { type: 'TemplateProcessing', single: [a, special], pair: [a, special, b, special], special_tokens: { [eos]: { id: eos, ids: [eosId], tokens: [eos] } } };
-  } else if (root.post_processor === null || root.post_processor === undefined) {
-    post = {
-      type: 'TemplateProcessing', single: [{ Sequence: { id: 'A', type_id: 0 } }],
-      pair: [{ Sequence: { id: 'A', type_id: 0 } }, { Sequence: { id: 'B', type_id: 1 } }], special_tokens: {},
-    };
-  }
-  if (post !== undefined) {
-    const raw = parseJsonRaw(result.jsonText);
-    rawSet(raw, 'post_processor', rawFromValue(post));
-    result = withBackendJson(result, emitJsonRaw(raw, { sortKeys: true, separators: [',', ':'] }));
-  }
-  return result;
-}
-
 /** The files ``Idefics3Processor.from_pretrained(directory).save_pretrained(...)`` writes. */
 export async function idefics3ProcessorAssets(directory: string, options: { isLocal: boolean; localFilesOnly: boolean }): Promise<Record<string, string>> {
   const loaded = await FastTokenizer.fromDirectory(directory);
@@ -285,7 +198,7 @@ export async function idefics3ProcessorAssets(directory: string, options: { isLo
     : typeof modelConfig.model_type === 'string' ? loaded.tokenizerClass : null;
   const className = resolvedTokenizerClass(declared);
   // ``Idefics3Processor.__init__`` adds its image tokens to the tokenizer.
-  const tokenizer = addSpecialTokens(initializedBackend(loaded, className, tokenizerConfig, specialMap), IDEFICS3_EXTRA_SPECIAL);
+  const tokenizer = addSpecialTokens(loaded, IDEFICS3_EXTRA_SPECIAL);
   const processorConfig = await readJson(directory, 'processor_config.json') ?? {};
   const imageFile = isPlainObject(processorConfig.image_processor)
     ? processorConfig.image_processor as JsonObject : await readJson(directory, 'preprocessor_config.json') ?? {};

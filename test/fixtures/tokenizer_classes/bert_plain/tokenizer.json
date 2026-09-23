@@ -1,0 +1,58 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": {
+    "type": "BertNormalizer",
+    "clean_text": true,
+    "handle_chinese_chars": true,
+    "strip_accents": null,
+    "lowercase": false
+  },
+  "pre_tokenizer": {
+    "type": "BertPreTokenizer"
+  },
+  "post_processor": {
+    "type": "BertProcessing",
+    "sep": [
+      "[SEP]",
+      3
+    ],
+    "cls": [
+      "[CLS]",
+      2
+    ]
+  },
+  "decoder": {
+    "type": "WordPiece",
+    "prefix": "##",
+    "cleanup": true
+  },
+  "model": {
+    "type": "WordPiece",
+    "unk_token": "[UNK]",
+    "continuing_subword_prefix": "##",
+    "max_input_chars_per_word": 50,
+    "vocab": {
+      "[PAD]": 0,
+      "[UNK]": 1,
+      "[CLS]": 2,
+      "[SEP]": 3,
+      "[MASK]": 4,
+      "hello": 5,
+      "world": 6,
+      "##s": 7,
+      "naive": 8,
+      "naïve": 9,
+      "Hello": 10,
+      "WORLD": 11,
+      "中": 12,
+      "文": 13,
+      "a": 14,
+      "pair": 15,
+      "of": 16,
+      "words": 17
+    }
+  }
+}

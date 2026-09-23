@@ -1,0 +1,59 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Metaspace",
+    "replacement": "▁",
+    "prepend_scheme": "always",
+    "split": true
+  },
+  "post_processor": null,
+  "decoder": {
+    "type": "Metaspace",
+    "replacement": "▁",
+    "prepend_scheme": "always",
+    "split": true
+  },
+  "model": {
+    "type": "Unigram",
+    "unk_id": 2,
+    "vocab": [
+      [
+        "<pad>",
+        0.0
+      ],
+      [
+        "</s>",
+        0.0
+      ],
+      [
+        "<unk>",
+        0.0
+      ],
+      [
+        "▁",
+        -2.0
+      ],
+      [
+        "▁hello",
+        -3.0
+      ],
+      [
+        "▁a",
+        -4.0
+      ],
+      [
+        "<extra_id_1>",
+        0.0
+      ],
+      [
+        "<extra_id_0>",
+        0.0
+      ]
+    ],
+    "byte_fallback": false
+  }
+}

@@ -9,7 +9,7 @@
  */
 import { Tensor, tensor } from '../../nn/tensor.js';
 import { NotImplementedError, ValueError } from '../../errors.js';
-import { deepCopy, emitJsonRaw, isPlainObject, parseJsonRaw, parseJsonStrict, rawFromValue, rawGet, rawSet, type JsonObject, type JsonValue, type RawNode } from '../json.js';
+import { deepCopy, isPlainObject, parseJsonStrict, type JsonObject, type JsonValue } from '../json.js';
 import { FastTokenizer } from '../tokenizers/index.js';
 import { ChatTemplate } from '../text/jinja.js';
 import { PIL_RESAMPLING, resizeImage, type InterpolationMode } from '../vec/imageProcessing.js';
@@ -279,78 +279,9 @@ export interface Idefics3CallOptions {
   imageSeqLen?: number | null;
 }
 
-/** ``AddedToken`` flags (``tokenizers`` field names). */
-export interface AddedTokenSpec {
-  content: string;
-  lstrip: boolean;
-  normalized: boolean;
-  rstrip: boolean;
-  single_word: boolean;
-  special: boolean;
-}
+import { addTokens, specialAddedToken } from '../tokenizers/tokenizer.js';
 
-/** The ``AddedToken`` transformers creates for a special token string. */
-export function specialAddedToken(content: string): AddedTokenSpec {
-  return { content, lstrip: false, normalized: false, rstrip: false, single_word: false, special: true };
-}
-
-/**
- * ``Tokenizer.add_tokens``/``add_special_tokens`` of the ``tokenizers``
- * ``AddedVocabulary``: an identical added token is kept, an existing added or
- * vocabulary token keeps its id (taking the new flags), and new tokens take the
- * next id. Returns the tokenizer unchanged when nothing is added.
- */
-export function addTokens(tokenizer: FastTokenizer, tokens: readonly AddedTokenSpec[]): FastTokenizer {
-  const root = parseJsonRaw(tokenizer.jsonText);
-  const list = rawGet(root, 'added_tokens');
-  const items = list?.t === 'a' ? [...list.items] : [];
-  const value = (node: RawNode, key: string): unknown => {
-    const item = rawGet(node, key);
-    if (!item) return undefined;
-    if (item.t === 'n') return Number(item.raw);
-    if (item.t === 's' || item.t === 'l') return item.v;
-    return undefined;
-  };
-  const flags = ['lstrip', 'normalized', 'rstrip', 'single_word', 'special'] as const;
-  const same = (node: RawNode, token: AddedTokenSpec): boolean => value(node, 'content') === token.content
-    && flags.every((key) => value(node, key) === token[key]);
-  const modelSize = tokenizer.backend.baseVocabSize();
-  let changed = false;
-  for (const token of tokens) {
-    if (!token.content || items.some((node) => same(node, token))) continue;
-    const existing = items.find((node) => value(node, 'content') === token.content);
-    let id: number;
-    if (existing) id = value(existing, 'id') as number;
-    else {
-      // Rust ``Model::token_to_id`` (the TypeScript Unigram lookup falls back to the unknown id).
-      const found = tokenizer.backend.model.tokenToId(token.content);
-      const inVocabulary = found !== undefined && tokenizer.backend.model.idToToken(found) === token.content ? found : undefined;
-      if (inVocabulary !== undefined) id = inVocabulary;
-      else {
-        const ids = items.map((node) => value(node, 'id') as number);
-        const max = ids.length ? Math.max(...ids) : null;
-        id = max === null ? modelSize : (max >= modelSize || modelSize === 0 ? max + 1 : modelSize);
-      }
-    }
-    const node = rawFromValue({ ...token, id });
-    const index = items.findIndex((item) => value(item, 'id') === id);
-    if (index >= 0) items[index] = node;
-    else items.push(node);
-    changed = true;
-  }
-  if (!changed) return tokenizer;
-  items.sort((a, b) => (value(a, 'id') as number) - (value(b, 'id') as number));
-  rawSet(root, 'added_tokens', { t: 'a', items });
-  return withBackendJson(tokenizer, emitJsonRaw(root, { sortKeys: true, separators: [',', ':'] }));
-}
-
-/** The tokenizer with a replaced canonical backend JSON (same special tokens and options). */
-export function withBackendJson(tokenizer: FastTokenizer, json: string): FastTokenizer {
-  return new FastTokenizer(json, {
-    specialTokens: tokenizer.specialTokens, options: tokenizer.options, paddingSide: tokenizer.paddingSide,
-    truncationSide: tokenizer.truncationSide, canonical: true, tokenizerClass: tokenizer.tokenizerClass,
-  });
-}
+export { addTokens, specialAddedToken, withBackendJson, type AddedTokenSpec } from '../tokenizers/tokenizer.js';
 
 /** ``tokenizer.add_special_tokens({'additional_special_tokens': tokens})`` (see {@link addTokens}). */
 export function addSpecialTokens(tokenizer: FastTokenizer, tokens: readonly string[]): FastTokenizer {

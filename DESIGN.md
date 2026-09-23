@@ -391,11 +391,15 @@ others with `ValueError`.
   order, `serde_json` float formatting, unescaped non-ASCII text). Wherever
   Python builds the backend with Rust `Tokenizer.from_str`/`from_file`,
   TypeScript reproduces the Rust `serde_json` float parsing, which can move
-  Unigram scores by one ULP (`rustJsonF64`). For `T5Tokenizer`,
-  `DebertaV2Tokenizer`, `AlbertTokenizer`, `GPT2Tokenizer` and
-  `LlamaTokenizer` the pipeline that transformers 5 rebuilds from
-  `tokenizer_config.json` flags is reproduced as well
-  (`src/_internal/tokenizers/serialization.ts`).
+  Unigram scores by one ULP (`rustJsonF64`). For `BertTokenizer`,
+  `RobertaTokenizer`, `CLIPTokenizer`, `T5Tokenizer`, `DebertaV2Tokenizer`,
+  `AlbertTokenizer`, `GPT2Tokenizer` and `LlamaTokenizer` the pipeline that
+  transformers 5 rebuilds from the vocabulary and `tokenizer_config.json`
+  flags is reproduced as well (`src/_internal/tokenizers/serialization.ts`),
+  followed by `TokenizersBackend.__init__`'s registration of
+  `added_tokens_decoder`, special and extra special tokens and the class's
+  post-processor (`FastTokenizer.fromFiles`), with `_from_pretrained`'s
+  precedence between `tokenizer_config.json` and `special_tokens_map.json`.
 - **Threads.** Python's `RLock`s become single-threaded execution plus a promise
   queue that serializes session persistence.
 

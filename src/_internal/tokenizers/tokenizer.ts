@@ -16,8 +16,8 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Tensor, tensor } from '../../nn/tensor.js';
 import { ValueError } from '../../errors.js';
-import { parseJsonStrict, type JsonObject } from '../json.js';
-import { canonicalBackendJson, loadsThroughRust, rustTokenizerString } from './serialization.js';
+import { emitJsonRaw, parseJsonRaw, parseJsonStrict, rawFromValue, rawGet, rawSet, type JsonObject, type RawNode } from '../json.js';
+import { REBUILT_TOKENIZER_CLASSES, canonicalBackendJson, classPostProcessor, loadsThroughRust, rustTokenizerString } from './serialization.js';
 import { buildModel, type TokenModel } from './models.js';
 import {
   buildDecoder, buildNormalizer, buildPostProcessor, buildPreTokenizer,
@@ -420,6 +420,7 @@ export class FastTokenizer {
       'tokenizer.json': json,
       'tokenizer_config.json': await readOptional('tokenizer_config.json'),
       'special_tokens_map.json': await readOptional('special_tokens_map.json'),
+      'added_tokens.json': await readOptional('added_tokens.json'),
       'config.json': await readOptional('config.json'),
     });
   }
@@ -471,9 +472,12 @@ export class FastTokenizer {
       return null;
     };
     const defaults = (tokenizerClass && CLASS_SPECIAL_TOKENS[tokenizerClass]) || {};
+    const legacy = !('added_tokens_decoder' in config);
     const specialTokens: Record<string, string | string[]> = {};
     for (const key of SPECIAL_KEYS) {
-      const value = text(config[key]) ?? text(map[key]) ?? defaults[key] ?? null;
+      // ``_from_pretrained``: without ``added_tokens_decoder`` (the legacy
+      // layout), special_tokens_map.json values override tokenizer_config.json.
+      const value = (legacy && key in map ? text(map[key]) : null) ?? text(config[key]) ?? defaults[key] ?? null;
       if (value !== null) specialTokens[key] = value;
     }
     // transformers 5 keeps sentinel/extra tokens as special added tokens but
@@ -490,11 +494,15 @@ export class FastTokenizer {
     // Class-level ``padding_side = "left"`` (LlamaTokenizer and relatives) applies when the file sets none.
     const paddingSide = side(config.padding_side) ?? (tokenizerClass && LEFT_PADDING_CLASSES.has(tokenizerClass) ? 'left' : undefined);
     const truncationSide = side(config.truncation_side);
-    return new FastTokenizer(json, {
-      specialTokens, options, tokenizerClass, rustParsed: loadsThroughRust(tokenizerClass), flags: config,
+    // Construction flags: special tokens from special_tokens_map.json or the
+    // class defaults, then tokenizer_config.json.
+    const flags: Record<string, unknown> = { ...specialTokens, ...config };
+    const constructed = new FastTokenizer(json, {
+      specialTokens, options, tokenizerClass, rustParsed: loadsThroughRust(tokenizerClass), flags,
       ...(paddingSide ? { paddingSide } : {}),
       ...(truncationSide ? { truncationSide } : {}),
     });
+    return initializedTokenizer(constructed, tokenizerClass, config, legacy ? map : {}, flags, readOptional('added_tokens.json'));
   }
 
   #rustJsonText: string | null = null;
@@ -661,4 +669,175 @@ export class FastTokenizer {
       : sequences;
     return rows.map((row) => this.decode(row, options));
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// ``TokenizersBackend.__init__``: added and special token registration.
+// ---------------------------------------------------------------------------
+
+/** ``AddedToken`` flags (``tokenizers`` field names). */
+export interface AddedTokenSpec {
+  content: string;
+  lstrip: boolean;
+  normalized: boolean;
+  rstrip: boolean;
+  single_word: boolean;
+  special: boolean;
+}
+
+/** The ``AddedToken`` transformers creates for a special token string. */
+export function specialAddedToken(content: string): AddedTokenSpec {
+  return { content, lstrip: false, normalized: false, rstrip: false, single_word: false, special: true };
+}
+
+/** The tokenizer with a replaced canonical backend JSON (same special tokens and options). */
+export function withBackendJson(tokenizer: FastTokenizer, json: string): FastTokenizer {
+  return new FastTokenizer(json, {
+    specialTokens: tokenizer.specialTokens, options: tokenizer.options, paddingSide: tokenizer.paddingSide,
+    truncationSide: tokenizer.truncationSide, canonical: true, tokenizerClass: tokenizer.tokenizerClass,
+  });
+}
+
+function rawValue(node: RawNode, key: string): unknown {
+  const item = rawGet(node, key);
+  if (!item) return undefined;
+  if (item.t === 'n') return Number(item.raw);
+  if (item.t === 's' || item.t === 'l') return item.v;
+  return undefined;
+}
+
+/**
+ * ``Tokenizer.add_tokens``/``add_special_tokens`` of the ``tokenizers``
+ * ``AddedVocabulary``: an identical added token is kept, an existing added or
+ * vocabulary token keeps its id (taking the new flags), and new tokens take the
+ * next id. Returns the tokenizer unchanged when nothing is added.
+ */
+export function addTokens(tokenizer: FastTokenizer, tokens: readonly AddedTokenSpec[]): FastTokenizer {
+  const root = parseJsonRaw(tokenizer.jsonText);
+  const list = rawGet(root, 'added_tokens');
+  const items = list?.t === 'a' ? [...list.items] : [];
+  const flags = ['lstrip', 'normalized', 'rstrip', 'single_word', 'special'] as const;
+  const same = (node: RawNode, token: AddedTokenSpec): boolean => rawValue(node, 'content') === token.content
+    && flags.every((key) => rawValue(node, key) === token[key]);
+  const modelSize = tokenizer.backend.baseVocabSize();
+  let changed = false;
+  for (const token of tokens) {
+    if (!token.content || items.some((node) => same(node, token))) continue;
+    const existing = items.find((node) => rawValue(node, 'content') === token.content);
+    let id: number;
+    if (existing) id = rawValue(existing, 'id') as number;
+    else {
+      const found = tokenizer.backend.model.tokenToId(token.content);
+      const inVocabulary = found !== undefined && tokenizer.backend.model.idToToken(found) === token.content ? found : undefined;
+      if (inVocabulary !== undefined) id = inVocabulary;
+      else {
+        const ids = items.map((node) => rawValue(node, 'id') as number);
+        const max = ids.length ? Math.max(...ids) : null;
+        id = max === null ? modelSize : (max >= modelSize || modelSize === 0 ? max + 1 : modelSize);
+      }
+    }
+    const node = rawFromValue({ ...token, id });
+    const index = items.findIndex((item) => rawValue(item, 'id') === id);
+    if (index >= 0) items[index] = node;
+    else items.push(node);
+    changed = true;
+  }
+  if (!changed) return tokenizer;
+  items.sort((a, b) => (rawValue(a, 'id') as number) - (rawValue(b, 'id') as number));
+  rawSet(root, 'added_tokens', { t: 'a', items });
+  return withBackendJson(tokenizer, emitJsonRaw(root, { sortKeys: true, separators: [',', ':'] }));
+}
+
+/** An ``AddedToken`` from a special-token value (a string or an ``AddedToken`` dictionary). */
+function addedTokenFrom(value: unknown, special: boolean): AddedTokenSpec | null {
+  if (typeof value === 'string') return special ? specialAddedToken(value) : null;
+  if (value && typeof value === 'object' && typeof (value as { content?: unknown }).content === 'string') {
+    const token = value as Record<string, unknown>;
+    return {
+      content: token.content as string, lstrip: token.lstrip === true, normalized: token.normalized === true,
+      rstrip: token.rstrip === true, single_word: token.single_word === true, special: special || token.special === true,
+    };
+  }
+  return null;
+}
+
+const NAMED_SPECIAL_KEYS = ['bos_token', 'eos_token', 'unk_token', 'sep_token', 'pad_token', 'cls_token', 'mask_token'] as const;
+
+/**
+ * The tokenizer ``from_pretrained`` returns after ``TokenizersBackend.__init__``:
+ * tokens of ``added_tokens_decoder`` (by id), then special and extra special
+ * tokens missing from the added vocabulary are registered, and the class's
+ * own post-processor (or, for a backend without one, the plain ``$A``/``$A $B``
+ * template) is installed.
+ */
+function initializedTokenizer(
+  tokenizer: FastTokenizer, tokenizerClass: string | null, config: Record<string, unknown>, map: Record<string, unknown>,
+  flags: Record<string, unknown>, addedTokensFile: Record<string, unknown>,
+): FastTokenizer {
+  const rebuilt = tokenizerClass !== null && REBUILT_TOKENIZER_CLASSES.has(tokenizerClass);
+  const fileTokens = (JSON.parse(tokenizer.jsonText).added_tokens as (AddedTokenSpec & { id: number })[] | undefined) ?? [];
+  // ``added_tokens_decoder``: tokenizer_config.json's, else (legacy) added_tokens.json and tokenizer.json's added tokens.
+  const decoder = new Map<number, AddedTokenSpec>();
+  const declared = config.added_tokens_decoder;
+  if (declared && typeof declared === 'object' && !Array.isArray(declared)) {
+    for (const [id, entry] of Object.entries(declared as Record<string, unknown>)) {
+      const token = addedTokenFrom(entry, false);
+      if (token) decoder.set(Number(id), { ...token, special: (entry as { special?: unknown }).special === true });
+    }
+  } else {
+    const specials = new Set(Object.values(tokenizer.specialTokens).flat().map(String));
+    for (const [content, id] of Object.entries(addedTokensFile)) {
+      if (typeof id !== 'number') continue;
+      const special = specials.has(content);
+      decoder.set(id, { content, lstrip: false, normalized: !special, rstrip: false, single_word: false, special });
+    }
+    for (const { id, ...token } of fileTokens) decoder.set(id, token);
+  }
+  // Classes with their own ``__init__`` build a fresh backend: only the decoder's tokens return.
+  let base = tokenizer;
+  if (rebuilt && fileTokens.length) {
+    const root = parseJsonRaw(tokenizer.jsonText);
+    rawSet(root, 'added_tokens', { t: 'a', items: [] });
+    base = withBackendJson(tokenizer, emitJsonRaw(root, { sortKeys: true, separators: [',', ':'] }));
+  }
+  const existing = new Set(rebuilt ? [] : fileTokens.map((token) => token.content));
+  const same = (a: AddedTokenSpec, b: AddedTokenSpec): boolean => a.content === b.content && a.lstrip === b.lstrip
+    && a.normalized === b.normalized && a.rstrip === b.rstrip && a.single_word === b.single_word && a.special === b.special;
+  const tokens: AddedTokenSpec[] = [...decoder.entries()].sort(([a], [b]) => a - b).map(([, token]) => token)
+    .filter((token) => rebuilt || !fileTokens.some((file) => same(file, token)));
+  const encoder = new Set([...existing, ...tokens.map((token) => token.content)]);
+  const register = (token: AddedTokenSpec | null): void => {
+    if (!token || encoder.has(token.content)) return;
+    tokens.push(token);
+    encoder.add(token.content);
+  };
+  for (const key of NAMED_SPECIAL_KEYS) {
+    const value = key in map ? map[key] : key in config ? config[key] : tokenizer.specialTokens[key];
+    if (value !== null && value !== undefined) register(addedTokenFrom(value, true));
+  }
+  let extras: unknown[] = [];
+  const listed = map.additional_special_tokens ?? map.extra_special_tokens ?? config.extra_special_tokens ?? config.additional_special_tokens;
+  if (Array.isArray(listed)) extras = listed;
+  if (tokenizerClass === 'T5Tokenizer' && !extras.some((token) => String(addedTokenFrom(token, true)?.content ?? '').includes('<extra_id_'))) {
+    const count = typeof config.extra_ids === 'number' ? config.extra_ids : 100;
+    extras = [...extras, ...Array.from({ length: count }, (_, index) => `<extra_id_${index}>`)];
+  }
+  for (const value of extras) register(addedTokenFrom(value, true));
+  tokenizer = base;
+  let result = tokens.length ? addTokens(tokenizer, tokens) : tokenizer;
+  const root = parseJsonRaw(result.jsonText);
+  let post = classPostProcessor(root, tokenizerClass, flags);
+  const current = rawGet(root, 'post_processor');
+  if (post === null && (!current || current.t === 'l') && !rebuilt) {
+    post = {
+      type: 'TemplateProcessing', single: [{ Sequence: { id: 'A', type_id: 0 } }],
+      pair: [{ Sequence: { id: 'A', type_id: 0 } }, { Sequence: { id: 'B', type_id: 1 } }], special_tokens: {},
+    };
+  }
+  if (post !== null) {
+    rawSet(root, 'post_processor', rawFromValue(post));
+    result = withBackendJson(result, emitJsonRaw(root, { sortKeys: true, separators: [',', ':'] }));
+  }
+  return result;
 }

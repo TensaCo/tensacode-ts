@@ -1,0 +1,62 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "ByteLevel",
+    "add_prefix_space": true,
+    "trim_offsets": true,
+    "use_regex": true
+  },
+  "post_processor": null,
+  "decoder": {
+    "type": "ByteLevel",
+    "add_prefix_space": true,
+    "trim_offsets": true,
+    "use_regex": true
+  },
+  "model": {
+    "type": "BPE",
+    "dropout": null,
+    "unk_token": null,
+    "continuing_subword_prefix": null,
+    "end_of_word_suffix": "</w>",
+    "fuse_unk": false,
+    "byte_fallback": false,
+    "ignore_merges": false,
+    "vocab": {
+      "<|startoftext|>": 0,
+      "<|endoftext|>": 1,
+      "h": 2,
+      "e": 3,
+      "l": 4,
+      "o": 5,
+      "o</w>": 6,
+      "hello</w>": 7,
+      "a</w>": 8,
+      "he": 9,
+      "ll": 10,
+      "hell": 11
+    },
+    "merges": [
+      [
+        "h",
+        "e"
+      ],
+      [
+        "l",
+        "l"
+      ],
+      [
+        "he",
+        "ll"
+      ],
+      [
+        "hell",
+        "o</w>"
+      ]
+    ]
+  }
+}

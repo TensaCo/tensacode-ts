@@ -50,7 +50,7 @@ the two languages and the few places where they still differ.
 | Foundation-built tools | Match | Configurations, including embedded tokenizer JSON, equal Python's (Investigator from ELECTRA, Flan-T5 and DeBERTa-v3; Chatbot; Scene from CLIP and SmolVLM) |
 | Foundation weights | Match | safetensors (single or sharded), `pytorch_model.bin` through a weights-only unpickler, and the Hub's safetensors conversion pull request, each where transformers uses it |
 | Real foundations | Match within float tolerance | DeBERTa-v3 NLI logits within 7e-6; hosted decision and planner artifacts within 4e-5 relative |
-| Tokenizers | Match | `tokenizer.json` runtime with WordPiece, BPE, Unigram and WordLevel models, plus the T5, DeBERTa-v2, ALBERT, GPT2 and Llama rebuilds that transformers 5 performs |
+| Tokenizers | Match | `tokenizer.json` runtime with WordPiece, BPE, Unigram and WordLevel models, plus the BERT, RoBERTa, CLIP, T5, DeBERTa-v2, ALBERT, GPT2 and Llama class rebuilds and the special-token registration transformers 5 performs |
 | Native architectures | Listed models | ALBERT, BERT, RoBERTa, Electra, DistilBERT, DeBERTa-v2, T5, ViT, CLIP, Llama and Idefics3, with transformers 5.17 parameter names. See [native architectures](#native-architectures) |
 | Integrations | Match | OpenAI-compatible, Jev, and a Transformers.js `LocalModel`, blocking (`complete`) and asynchronous (`acomplete`). No implicit retries or redirects |
 | Plans and actions | Match | Step arguments bind like `inspect.signature(action).bind(...)`; error observations record Python exception names |

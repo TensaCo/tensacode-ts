@@ -1,0 +1,74 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "ByteLevel",
+    "add_prefix_space": true,
+    "trim_offsets": true,
+    "use_regex": true
+  },
+  "post_processor": null,
+  "decoder": {
+    "type": "ByteLevel",
+    "add_prefix_space": true,
+    "trim_offsets": true,
+    "use_regex": true
+  },
+  "model": {
+    "type": "BPE",
+    "dropout": null,
+    "unk_token": null,
+    "continuing_subword_prefix": null,
+    "end_of_word_suffix": null,
+    "fuse_unk": false,
+    "byte_fallback": false,
+    "ignore_merges": false,
+    "vocab": {
+      "<s>": 0,
+      "<pad>": 1,
+      "</s>": 2,
+      "<unk>": 3,
+      "Ġ": 4,
+      "h": 5,
+      "e": 6,
+      "l": 7,
+      "o": 8,
+      "Ġh": 9,
+      "ll": 10,
+      "Ġhe": 11,
+      "Ġhell": 12,
+      "Ġhello": 13,
+      "a": 14,
+      "Ġa": 15
+    },
+    "merges": [
+      [
+        "Ġ",
+        "h"
+      ],
+      [
+        "l",
+        "l"
+      ],
+      [
+        "Ġh",
+        "e"
+      ],
+      [
+        "Ġhe",
+        "ll"
+      ],
+      [
+        "Ġhell",
+        "o"
+      ],
+      [
+        "Ġ",
+        "a"
+      ]
+    ]
+  }
+}
