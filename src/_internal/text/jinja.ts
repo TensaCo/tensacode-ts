@@ -6,11 +6,14 @@
  *
  * Supported: text, ``{{ }}``, ``{# #}``, whitespace control (``-``),
  * ``for``/``else``/``break``/``continue`` (with ``loop``), ``if``/``elif``/``else``,
- * ``set`` (including ``namespace`` attributes), ``generation`` blocks, macros,
- * Python-style expressions (arithmetic, comparisons, ``in``, ``is`` tests,
- * conditional expressions, slicing, filters and string/dict methods).
- * Unsupported syntax raises a {@link TemplateError}; templates never execute
- * host code.
+ * ``set`` (including ``namespace`` attributes), ``generation``, ``filter``,
+ * ``with`` and ``raw`` blocks, macros, Python-style expressions (arithmetic,
+ * comparisons, ``in``, ``is`` tests, conditional expressions, slicing, filters
+ * and string/dict methods). Not supported: recursive loops, ``call`` blocks
+ * and the filters ``attr``, ``filesizeformat``, ``groupby``, ``pprint``,
+ * ``random``, ``slice``, ``striptags``, ``urlencode``, ``urlize``, ``wordwrap``
+ * and ``xmlattr`` (tests ``escaped``, ``filter``, ``test``). Unsupported syntax
+ * raises a {@link TemplateError}; templates never execute host code.
  */
 
 export class TemplateError extends Error {
@@ -70,6 +73,7 @@ function lex(template: string): Segment[] {
     if (stripBefore || keepBefore) inner += 1;
     const end = findTagEnd(template, inner, closer);
     let body = template.slice(inner, end);
+    const raw = opener === '%' ? /^\s*raw\s*-?$/.exec(body) : null;
     const stripAfter = body.endsWith('-');
     if (stripAfter || body.endsWith('+')) body = body.slice(0, -1);
     let text = template.slice(position, start);
@@ -83,8 +87,28 @@ function lex(template: string): Segment[] {
     }
     pushText(text);
     if (opener === '{') segments.push({ kind: 'output', source: body.trim() });
-    else if (opener === '%') segments.push({ kind: 'statement', source: body.trim() });
+    else if (opener === '%' && !raw) segments.push({ kind: 'statement', source: body.trim() });
     position = end + 2;
+    if (raw) {
+      // {% raw %}...{% endraw %}: the enclosed text is output verbatim.
+      const close = /\{%([-+]?)\s*endraw\s*([-+]?)%\}/g;
+      close.lastIndex = position;
+      const found = close.exec(template);
+      if (!found) throw new TemplateError('missing endraw');
+      let verbatim = template.slice(position, found.index);
+      if (stripAfter) verbatim = verbatim.replace(/^\s+/, '');
+      else if (verbatim.startsWith('\n')) verbatim = verbatim.slice(1);
+      if (found[1] === '-') verbatim = verbatim.replace(/\s+$/, '');
+      else if (found[1] !== '+') {
+        const lineStart = verbatim.lastIndexOf('\n');
+        if (/^[ \t]*$/.test(verbatim.slice(lineStart + 1)) && lineStart >= 0) verbatim = verbatim.slice(0, lineStart + 1);
+      }
+      if (verbatim) segments.push({ kind: 'text', value: verbatim });
+      position = found.index + found[0].length;
+      stripNextWhitespace = found[2] === '-';
+      trimNextNewline = found[2] !== '-' && found[2] !== '+';
+      continue;
+    }
     if (stripAfter) stripNextWhitespace = true;
     else if (block) trimNextNewline = true; // trim_blocks
   }
@@ -491,8 +515,35 @@ type Node =
   | { type: 'for'; targets: string[]; iterable: Expr; filter: Expr | null; body: Node[]; otherwise: Node[] }
   | { type: 'set'; target: string; attribute: string | null; value: Expr | null; body: Node[] | null }
   | { type: 'macro'; name: string; params: { name: string; fallback: Expr | null }[]; body: Node[] }
+  | { type: 'filterBlock'; filter: Expr; body: Node[] }
+  | { type: 'with'; bindings: [string, Expr][]; body: Node[] }
   | { type: 'break' }
   | { type: 'continue' };
+
+const FILTER_BODY = '__tensorcode_filter_body__';
+
+/** Split ``a = f(1, 2), b = [3, 4]`` at top-level commas. */
+function splitTopLevel(source: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let start = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]!;
+    if (quote) {
+      if (char === '\\') index += 1;
+      else if (char === quote) quote = null;
+    } else if (char === '"' || char === "'") quote = char;
+    else if ('([{'.includes(char)) depth += 1;
+    else if (')]}'.includes(char)) depth -= 1;
+    else if (char === ',' && depth === 0) {
+      parts.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(source.slice(start));
+  return parts.filter((part) => part.trim());
+}
 
 function statementHead(source: string): [string, string] {
   const match = /^([A-Za-z_]+)\s*([\s\S]*)$/.exec(source);
@@ -589,6 +640,25 @@ function parseTemplate(segments: Segment[]): Node[] {
           nodes.push({ type: 'macro', name: signature[1]!, params, body });
           break;
         }
+        case 'filter': {
+          // Applied to the rendered body, bound to a reserved name: ``body | upper | trim``.
+          const [body, end] = parseBlock(['endfilter']);
+          if (end !== 'endfilter') throw new TemplateError('missing endfilter');
+          nodes.push({ type: 'filterBlock', filter: parseExpression(`${FILTER_BODY} | ${rest}`), body });
+          break;
+        }
+        case 'with': {
+          const bindings: [string, Expr][] = [];
+          for (const part of splitTopLevel(rest)) {
+            const binding = /^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\s\S]+)$/.exec(part.trim());
+            if (!binding) throw new TemplateError(`invalid with statement ${JSON.stringify(rest)}`);
+            bindings.push([binding[1]!, parseExpression(binding[2]!)]);
+          }
+          const [body, end] = parseBlock(['endwith']);
+          if (end !== 'endwith') throw new TemplateError('missing endwith');
+          nodes.push({ type: 'with', bindings, body });
+          break;
+        }
         case 'generation': {
           const [body, end] = parseBlock(['endgeneration']);
           if (end !== 'endgeneration') throw new TemplateError('missing endgeneration');
@@ -671,6 +741,14 @@ function floatRepr(value: number): string {
 }
 
 /** ``str(value)`` as Python/Jinja renders it. */
+/** Arrays that are Python tuples (rendered ``(a, b)``; otherwise used like lists). */
+const TUPLES = new WeakSet<Value[]>();
+
+function tuple(items: Value[]): Value[] {
+  TUPLES.add(items);
+  return items;
+}
+
 function toText(value: Value, nested = false): string {
   if (value instanceof PyFloat) return floatRepr(value.value);
   if (value === null || value === undefined) return 'None';
@@ -678,7 +756,11 @@ function toText(value: Value, nested = false): string {
   if (typeof value === 'string') return nested ? pythonRepr(value) : value;
   if (typeof value === 'boolean') return value ? 'True' : 'False';
   if (typeof value === 'number') return String(value);
-  if (Array.isArray(value)) return `[${value.map((item) => (typeof item === 'string' ? pythonRepr(item) : toText(item, true))).join(', ')}]`;
+  if (Array.isArray(value)) {
+    const items = value.map((item) => (typeof item === 'string' ? pythonRepr(item) : toText(item, true)));
+    if (TUPLES.has(value)) return `(${items.join(', ')}${items.length === 1 ? ',' : ''})`;
+    return `[${items.join(', ')}]`;
+  }
   if (value instanceof Namespace) return '<Namespace>';
   if (typeof value === 'object') {
     return `{${Object.entries(value as Record<string, Value>).map(([key, item]) => `${pythonRepr(key)}: ${typeof item === 'string' ? pythonRepr(item) : toText(item, true)}`).join(', ')}}`;
@@ -817,7 +899,7 @@ function listMethod(value: Value[], name: string): Value {
 
 function dictMethod(value: Record<string, Value>, name: string): Value | null {
   switch (name) {
-    case 'items': return { __callable__: () => Object.entries(value).map(([key, entry]) => [key, entry]) };
+    case 'items': return { __callable__: () => Object.entries(value).map(([key, entry]) => tuple([key, entry])) };
     case 'keys': return { __callable__: () => Object.keys(value) };
     case 'values': return { __callable__: () => Object.values(value) };
     case 'get': return { __callable__: ([key, fallback]: Value[]) => (Object.prototype.hasOwnProperty.call(value, String(unwrap(key))) ? value[String(unwrap(key))] : (fallback ?? null)) };
@@ -894,6 +976,20 @@ const TESTS: Record<string, (value: Value, args: Value[]) => boolean> = {
   ne: (value, [other]) => !equals(value, other),
   in: (value, [other]) => contains(other, value),
   lower: (value) => typeof value === 'string' && value === value.toLowerCase(),
+  divisibleby: (value, [num]) => Number(unwrap(value)) % Number(unwrap(num)) === 0,
+  '==': (value, [other]) => equals(value, other),
+  '!=': (value, [other]) => !equals(value, other),
+  '>': (value, [other]) => compare(value, other) > 0,
+  '>=': (value, [other]) => compare(value, other) >= 0,
+  '<': (value, [other]) => compare(value, other) < 0,
+  '<=': (value, [other]) => compare(value, other) <= 0,
+  gt: (value, [other]) => compare(value, other) > 0,
+  greaterthan: (value, [other]) => compare(value, other) > 0,
+  ge: (value, [other]) => compare(value, other) >= 0,
+  lt: (value, [other]) => compare(value, other) < 0,
+  lessthan: (value, [other]) => compare(value, other) < 0,
+  le: (value, [other]) => compare(value, other) <= 0,
+  sameas: (value, [other]) => value === other,
   upper: (value) => typeof value === 'string' && value === value.toUpperCase(),
 };
 
@@ -914,6 +1010,70 @@ function compare(a: Value, b: Value): number {
   const ny = typeof y === 'boolean' ? Number(y) : y;
   if (typeof nx === 'number' && typeof ny === 'number') return nx - ny;
   throw new TemplateError('unorderable types');
+}
+
+/** markupsafe ``escape``. */
+function htmlEscape(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&#34;').replace(/'/g, '&#39;');
+}
+
+/** ``+`` on template values (numbers, strings and lists). */
+function add(a: Value, b: Value): Value {
+  const x = unwrap(a);
+  const y = unwrap(b);
+  if (typeof x === 'number' && typeof y === 'number') return a instanceof PyFloat || b instanceof PyFloat ? new PyFloat(x + y) : x + y;
+  if (typeof x === 'string' && typeof y === 'string') return x + y;
+  if (Array.isArray(x) && Array.isArray(y)) return [...x, ...y];
+  throw new TemplateError('unsupported operand type(s) for +');
+}
+
+/** Python ``text % args`` for ``%s``, ``%r``, ``%d``/``%i``, ``%f``/``%e``/``%g`` (with flags, width and precision) and ``%%``. */
+function percentFormat(text: string, args: Value[]): string {
+  let next = 0;
+  const result = text.replace(/%([-+ 0#]*)(\d+)?(?:\.(\d+))?([sridfeEgGxXo%])/g, (_match, flags: string, width: string | undefined, precision: string | undefined, kind: string) => {
+    if (kind === '%') return '%';
+    if (next >= args.length) throw new TemplateError('not enough arguments for format string');
+    const argument = args[next++];
+    const raw = unwrap(argument);
+    let body: string;
+    switch (kind) {
+      case 's': body = toText(argument); if (precision !== undefined) body = body.slice(0, Number(precision)); break;
+      case 'r': body = pythonRepr(argument); break;
+      case 'd': case 'i': body = String(Math.trunc(Number(raw))); break;
+      case 'x': body = Math.trunc(Number(raw)).toString(16); break;
+      case 'X': body = Math.trunc(Number(raw)).toString(16).toUpperCase(); break;
+      case 'o': body = Math.trunc(Number(raw)).toString(8); break;
+      case 'f': body = Number(raw).toFixed(precision === undefined ? 6 : Number(precision)); break;
+      case 'e': case 'E': {
+        body = Number(raw).toExponential(precision === undefined ? 6 : Number(precision)).replace(/e([+-])(\d)$/, 'e$10$2');
+        if (kind === 'E') body = body.toUpperCase();
+        break;
+      }
+      default: {
+        const digits = precision === undefined ? 6 : Math.max(Number(precision), 1);
+        const exponent = Number(raw) === 0 ? 0 : Math.floor(Math.log10(Math.abs(Number(raw))));
+        body = exponent < -4 || exponent >= digits
+          ? Number(raw).toExponential(digits - 1).replace(/\.?0+e/, 'e').replace(/e([+-])(\d)$/, 'e$10$2')
+          : String(Number(Number(raw).toPrecision(digits)));
+        if (kind === 'G') body = body.toUpperCase();
+      }
+    }
+    if ('difeEgGxXo'.includes(kind) && Number(raw) >= 0) {
+      if (flags.includes('+')) body = `+${body}`;
+      else if (flags.includes(' ')) body = ` ${body}`;
+    }
+    const size = width === undefined ? 0 : Number(width);
+    if (body.length < size) {
+      if (flags.includes('-')) body = body.padEnd(size);
+      else if (flags.includes('0') && 'difeEgGxXo'.includes(kind)) {
+        const sign = /^[-+ ]/.test(body) ? body[0]! : '';
+        body = sign + body.slice(sign.length).padStart(size - sign.length, '0');
+      } else body = body.padStart(size);
+    }
+    return body;
+  });
+  if (next < args.length) throw new TemplateError('not all arguments converted during string formatting');
+  return result;
 }
 
 function filterValue(name: string, value: Value, args: Value[], kwargs: Record<string, Value>, env: Renderer): Value {
@@ -944,7 +1104,7 @@ function filterValue(name: string, value: Value, args: Value[], kwargs: Record<s
     case 'list': return [...iterate(v)];
     case 'reverse': return typeof v === 'string' ? [...v].reverse().join('') : [...iterate(v)].reverse();
     case 'replace': return replaceCount(toText(v), toText(args[0]), toText(args[1]), args[2] === undefined ? -1 : Number(args[2]));
-    case 'items': return Object.entries((v ?? {}) as Record<string, Value>).map(([key, entry]) => [key, entry]);
+    case 'items': return Object.entries((v ?? {}) as Record<string, Value>).map(([key, entry]) => tuple([key, entry]));
     case 'unique': { const seen: Value[] = []; for (const entry of iterate(v)) if (!seen.some((other) => equals(other, entry))) seen.push(entry); return seen; }
     case 'sort': {
       const attributeName = kwargs.attribute as string | undefined;
@@ -979,7 +1139,80 @@ function filterValue(name: string, value: Value, args: Value[], kwargs: Record<s
       const lines = toText(v).split('\n');
       return lines.map((line, index) => ((index === 0 && !first) || !line ? line : pad + line)).join('\n');
     }
-    case 'safe': case 'e': case 'escape': return name === 'safe' ? value : toText(v);
+    case 'safe': return value;
+    case 'e': case 'escape': case 'forceescape': return htmlEscape(toText(v));
+    case 'center': {
+      // Python str.center(width).
+      const text = toText(v);
+      const width = Number(unwrap(args[0] ?? kwargs.width ?? 80));
+      const margin = width - text.length;
+      if (margin <= 0) return text;
+      const left = Math.floor(margin / 2) + (margin & width & 1);
+      return ' '.repeat(left) + text + ' '.repeat(margin - left);
+    }
+    case 'truncate': {
+      // jinja2 do_truncate with the default policy leeway of 5.
+      const text = toText(v);
+      const size = Number(unwrap(args[0] ?? kwargs.length ?? 255));
+      const killwords = truthy(args[1] ?? kwargs.killwords ?? false);
+      const end = toText(args[2] ?? kwargs.end ?? '...');
+      const leeway = Number(unwrap(args[3] ?? kwargs.leeway ?? 5));
+      if (!(size >= end.length)) throw new TemplateError(`expected length >= ${end.length}, got ${size}`);
+      if (!(leeway >= 0)) throw new TemplateError(`expected leeway >= 0, got ${leeway}`);
+      if (text.length <= size + leeway) return text;
+      const head = text.slice(0, Math.max(size - end.length, 0));
+      if (killwords) return head + end;
+      const space = head.lastIndexOf(' ');
+      return (space >= 0 ? head.slice(0, space) : head) + end;
+    }
+    case 'max': case 'min': {
+      const attributeName = kwargs.attribute as string | undefined;
+      const caseSensitive = truthy(args[0] ?? kwargs.case_sensitive ?? false);
+      const key = (entry: Value): Value => {
+        const field = attributeName !== undefined ? attribute(entry, attributeName) : entry;
+        return !caseSensitive && typeof field === 'string' ? field.toLowerCase() : field;
+      };
+      const items = iterate(v);
+      if (!items.length) return new Undefined(`No aggregated item, sequence was empty.`);
+      let best = items[0];
+      for (const entry of items.slice(1)) {
+        const order = compare(key(entry), key(best));
+        if (name === 'max' ? order > 0 : order < 0) best = entry;
+      }
+      return best;
+    }
+    case 'sum': {
+      const attributeName = (kwargs.attribute ?? args[0]) as string | undefined;
+      let total: Value = kwargs.start ?? args[1] ?? 0;
+      for (const entry of iterate(v)) total = add(total, attributeName !== undefined && attributeName !== null ? attribute(entry, attributeName) : entry);
+      return total;
+    }
+    case 'dictsort': {
+      const caseSensitive = truthy(args[0] ?? kwargs.case_sensitive ?? false);
+      const by = toText(args[1] ?? kwargs.by ?? 'key');
+      const reverse = truthy(args[2] ?? kwargs.reverse ?? false);
+      if (by !== 'key' && by !== 'value') throw new TemplateError('You can only sort by either "key" or "value"');
+      const position = by === 'key' ? 0 : 1;
+      const key = (entry: Value[]): Value => {
+        const field = entry[position];
+        return !caseSensitive && typeof field === 'string' ? field.toLowerCase() : field;
+      };
+      const entries = Object.entries((v ?? {}) as Record<string, Value>).map(([k, entry]) => tuple([k, entry]));
+      entries.sort((a, b) => compare(key(a), key(b)));
+      return reverse ? entries.reverse() : entries;
+    }
+    case 'format': return percentFormat(toText(v), args);
+    case 'batch': {
+      const size = Number(unwrap(args[0] ?? kwargs.linecount));
+      const fill = args[1] ?? kwargs.fill_with ?? null;
+      const rows: Value[][] = [];
+      for (const entry of iterate(v)) {
+        if (!rows.length || rows[rows.length - 1]!.length === size) rows.push([]);
+        rows[rows.length - 1]!.push(entry);
+      }
+      if (fill !== null && rows.length) while (rows[rows.length - 1]!.length < size) rows[rows.length - 1]!.push(fill);
+      return rows;
+    }
     case 'wordcount': return toText(v).split(/\s+/).filter(Boolean).length;
     case 'round': {
       const precision = Number(args[0] ?? 0);
@@ -1047,6 +1280,20 @@ class Renderer {
           break;
         }
         case 'macro': scope.set(node.name, new Macro(node.params, node.body, scope)); break;
+        case 'filterBlock': {
+          const buffer: string[] = [];
+          this.renderNodes(node.body, scope, buffer);
+          const inner = scope.child();
+          inner.set(FILTER_BODY, buffer.join(''));
+          output.push(toText(this.evaluate(node.filter, inner)));
+          break;
+        }
+        case 'with': {
+          const inner = scope.child();
+          for (const [name, value] of node.bindings) inner.set(name, this.evaluate(value, scope));
+          this.renderNodes(node.body, inner, output);
+          break;
+        }
         case 'break': throw new LoopControl('break');
         case 'continue': throw new LoopControl('continue');
       }
@@ -1100,7 +1347,7 @@ class Renderer {
       case 'literal': return expr.value;
       case 'name': return scope.get(expr.name);
       case 'list': return expr.items.map((entry) => this.evaluate(entry, scope));
-      case 'tuple': return expr.items.map((entry) => this.evaluate(entry, scope));
+      case 'tuple': return tuple(expr.items.map((entry) => this.evaluate(entry, scope)));
       case 'dict': return Object.fromEntries(expr.entries.map(([key, value]) => [toText(this.evaluate(key, scope)), this.evaluate(value, scope)]));
       case 'attr': return attribute(this.evaluate(expr.target, scope), expr.name);
       case 'item': return item(this.evaluate(expr.target, scope), this.evaluate(expr.key, scope));
