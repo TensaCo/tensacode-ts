@@ -3,14 +3,17 @@
  * selection (Python ``tensorcode/integrations/local.py``).
  *
  * ``@huggingface/transformers`` is an optional peer dependency. It is never
- * imported at module load: only ``LocalModel.fromPretrained`` and the default
- * image decoder import it, and they raise {@link MissingDependencyError} when
- * it is absent.
+ * imported at module load: only ``LocalModel.fromPretrained``, the default
+ * image decoder and the synchronous ``complete`` import it, and they raise
+ * {@link MissingDependencyError} when it is absent.
  */
 import { MissingDependencyError, ValueError } from '../errors.js';
-import { isPlainObject, pythonJsonDumps } from '../_internal/json.js';
+import { isPlainObject, pythonJsonDumps, pythonJsonLoads, type JsonValue } from '../_internal/json.js';
 import { ImagePart, TextPart } from '../ops/text/messages.js';
+import { openImage, type RasterImage } from '../_internal/image/index.js';
 import { ModelOutput, type ModelRequest } from '../ops/text/model.js';
+import { blockingCall, moduleUrl, postWithoutWaiting, resolveModuleUrl } from './blocking.js';
+import { runLocalEngine, type LocalEngineResult, type LocalImageInput } from './localEngine.js';
 
 /** A supplied image/text generation model (Transformers.js ``PreTrainedModel`` shape). */
 export interface LocalGenerationModel {
@@ -28,6 +31,22 @@ export interface LocalProcessor {
   tokenizer?: ((text: string, options?: Record<string, unknown>) => unknown) | null;
 }
 
+/**
+ * How the synchronous ``complete`` obtains the model in its worker thread.
+ *
+ * A model object lives on one thread, so a blocking call cannot use the
+ * supplied instance. ``module`` (a path or URL) is imported in the worker and
+ * its ``exportName`` export (default ``default``) is called with ``args``; it
+ * returns ``{ model, processor, loadImage? }`` like the constructor's
+ * arguments. ``LocalModel.fromPretrained`` fills this in automatically.
+ */
+export interface LocalWorkerLoader {
+  readonly module: string | URL;
+  readonly exportName?: string;
+  /** Structured-clonable argument for the loader. */
+  readonly args?: unknown;
+}
+
 export interface LocalModelOptions {
   /** Identifies the supplied model (reported in configuration and metadata). */
   modelId: string;
@@ -36,6 +55,8 @@ export interface LocalModelOptions {
   maxNewTokens?: number;
   /** Decode supplied image bytes for the processor (default: Transformers.js ``RawImage``). */
   loadImage?: (part: ImagePart) => unknown;
+  /** Worker-thread loader used by the synchronous ``complete`` (see {@link LocalWorkerLoader}). */
+  worker?: LocalWorkerLoader | null;
 }
 
 const TRANSFORMERS = '@huggingface/transformers';
@@ -50,29 +71,45 @@ async function importTransformers(): Promise<Record<string, unknown>> {
   }
 }
 
-/** Decode image bytes with Transformers.js ``RawImage`` (RGB). */
+/**
+ * Decode image bytes like Python's ``Image.open(BytesIO(data)).convert('RGB')``
+ * (TensorCode's Pillow-exact decoder) into a Transformers.js ``RawImage``;
+ * formats that decoder does not read fall back to ``RawImage.fromBlob``.
+ */
 async function rawImage(part: ImagePart): Promise<unknown> {
   const transformers = await importTransformers();
-  const RawImage = transformers.RawImage as { fromBlob(blob: Blob): Promise<{ rgb(): unknown }> };
+  const RawImage = transformers.RawImage as {
+    new (data: Uint8Array, width: number, height: number, channels: number): unknown;
+    fromBlob(blob: Blob): Promise<{ rgb(): unknown }>;
+  };
+  let decoded: RasterImage | null = null;
+  try {
+    decoded = openImage(part.data!).convert('RGB');
+  } catch {
+    decoded = null;
+  }
+  if (decoded) return new RawImage(decoded.data as Uint8Array, decoded.width, decoded.height, 3);
   const image = await RawImage.fromBlob(new Blob([part.data!], part.mediaType ? { type: part.mediaType } : {}));
   return image.rgb();
 }
 
-function rows(value: unknown): number[][] {
-  const list = typeof (value as { tolist?: unknown })?.tolist === 'function' ? (value as { tolist(): unknown }).tolist() : value;
-  if (!Array.isArray(list)) throw new TypeError('model.generate must return token ids');
-  const matrix = Array.isArray(list[0]) ? list : [list];
-  return (matrix as unknown[][]).map((row) => row.map((id) => Number(id)));
+interface PreparedRequest {
+  readonly messages: Record<string, unknown>[];
+  readonly images: ImagePart[];
 }
 
-function promptLength(inputs: Record<string, unknown>): number {
-  const ids = inputs.input_ids as { dims?: number[]; shape?: number[]; tolist?: () => unknown } | unknown[] | undefined;
-  if (Array.isArray(ids)) return Array.isArray(ids[0]) ? (ids[0] as unknown[]).length : ids.length;
-  const dims = ids?.dims ?? ids?.shape;
-  if (Array.isArray(dims) && dims.length) return dims[dims.length - 1]!;
-  if (ids && typeof ids.tolist === 'function') return rows(ids)[0]!.length;
-  throw new TypeError('processor inputs must include input_ids');
+/** ``fromPretrained`` arguments, replayed in the worker for ``complete``. */
+interface PretrainedSource {
+  readonly modelId: string;
+  readonly settings: Record<string, unknown>;
 }
+
+let nextWorkerHandle = 1;
+
+/** Releases a collected adapter's worker-thread model copy. */
+const workerModels = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry<number>((handle) => postWithoutWaiting({ kind: 'local-dispose', handle }))
+  : null;
 
 /**
  * Adapt a supplied image/text generation model and processor.
@@ -81,7 +118,12 @@ function promptLength(inputs: Record<string, unknown>): number {
  * directory. Image URLs are not fetched: supply image bytes. Structured
  * answers are generated JSON, never repaired or assigned invented confidence;
  * operation-level validators still validate their schemas. Inference is
- * serialized for shared model safety. The adapter is asynchronous.
+ * serialized for shared model safety.
+ *
+ * ``complete``/``completeBatch`` block like Python's: they run the same
+ * generation in a worker thread (with its own copy of the model, loaded on
+ * first use) while the calling thread waits. ``acomplete``/``acompleteBatch``
+ * use the supplied model directly.
  */
 export class LocalModel {
   static readonly qualifiedName: string = 'tensorcode.integrations.local.LocalModel';
@@ -91,6 +133,9 @@ export class LocalModel {
   readonly revision: string | null;
   readonly maxNewTokens: number;
   readonly #loadImage: (part: ImagePart) => unknown;
+  readonly #worker: LocalWorkerLoader | null;
+  #pretrained: PretrainedSource | null = null;
+  #workerHandle: number | null = null;
   #queue: Promise<unknown> = Promise.resolve();
 
   constructor(model: LocalGenerationModel, processor: LocalProcessor, options: LocalModelOptions) {
@@ -107,6 +152,11 @@ export class LocalModel {
     this.revision = revision;
     this.maxNewTokens = maxNewTokens;
     this.#loadImage = options.loadImage ?? rawImage;
+    const worker = options.worker ?? null;
+    if (worker !== null && (typeof worker !== 'object' || !(typeof worker.module === 'string' || worker.module instanceof URL))) {
+      throw new TypeError('worker must be { module, exportName?, args? }');
+    }
+    this.#worker = worker;
   }
 
   /**
@@ -115,19 +165,24 @@ export class LocalModel {
    */
   static async fromPretrained(modelId: string, options: {
     revision?: string | null; localFilesOnly?: boolean; device?: string; maxNewTokens?: number;
+    /** Transformers.js weight precision (for example ``fp32`` or ``q8``); default: the library's choice. */
+    dtype?: string | Record<string, string> | null;
   } = {}): Promise<LocalModel> {
     const transformers = await importTransformers();
     const settings: Record<string, unknown> = { local_files_only: options.localFilesOnly ?? true, device: options.device ?? 'cpu' };
     if (options.revision) settings.revision = options.revision;
+    if (options.dtype) settings.dtype = options.dtype;
     const processorClass = transformers.AutoProcessor as { from_pretrained(id: string, o: unknown): Promise<LocalProcessor> };
     const modelClass = (transformers.AutoModelForImageTextToText ?? transformers.AutoModelForVision2Seq) as
       { from_pretrained(id: string, o: unknown): Promise<LocalGenerationModel> } | undefined;
     if (!modelClass) throw new MissingDependencyError('the installed @huggingface/transformers has no image-text-to-text models');
     const processor = await processorClass.from_pretrained(modelId, settings);
     const model = await modelClass.from_pretrained(modelId, settings);
-    return new LocalModel(model, processor, {
+    const local = new LocalModel(model, processor, {
       modelId, revision: options.revision ?? null, ...(options.maxNewTokens === undefined ? {} : { maxNewTokens: options.maxNewTokens }),
     });
+    local.#pretrained = { modelId, settings };
+    return local;
   }
 
   /** JSON description of this adapter; never includes credentials. */
@@ -135,7 +190,25 @@ export class LocalModel {
     return { model_id: this.modelId, revision: this.revision, max_new_tokens: this.maxNewTokens };
   }
 
-  /** Send one request and return a ``ModelOutput`` (inference is serialized). */
+  /** Send one request and return a ``ModelOutput`` (blocks until generation finishes). */
+  complete(request: ModelRequest): ModelOutput {
+    const prepared = this.prepare(request);
+    const handle = this.workerModel();
+    const images: LocalImageInput[] = prepared.images.map((part) => ({
+      data: part.data!, mediaType: part.mediaType, url: part.url, detail: part.detail, sourceRef: part.sourceRef,
+    }));
+    const result = blockingCall<LocalEngineResult>({
+      kind: 'local-run', handle, input: { messages: prepared.messages, images, maxNewTokens: this.maxNewTokens },
+    });
+    return this.finish(request, result);
+  }
+
+  /** Explicit sequential fallback; no claim of native batched generation. */
+  completeBatch(requests: readonly ModelRequest[]): readonly ModelOutput[] {
+    return Object.freeze(requests.map((request) => this.complete(request)));
+  }
+
+  /** Asynchronous {@link complete} with the supplied model (inference is serialized). */
   acomplete(request: ModelRequest): Promise<ModelOutput> {
     const result = this.#queue.then(() => this.run(request));
     this.#queue = result.catch(() => undefined);
@@ -149,9 +222,38 @@ export class LocalModel {
     return Object.freeze(outputs);
   }
 
-  private async run(request: ModelRequest): Promise<ModelOutput> {
+  /** Load (once) this model in the blocking worker; returns its handle. */
+  private workerModel(): number {
+    if (this.#workerHandle !== null) return this.#workerHandle;
+    const transformersUrl = resolveModuleUrl(TRANSFORMERS, import.meta.url);
+    const handle = nextWorkerHandle;
+    nextWorkerHandle += 1;
+    if (this.#worker !== null) {
+      blockingCall({
+        kind: 'local-load', handle, loaderUrl: moduleUrl(this.#worker.module), exportName: this.#worker.exportName ?? 'default',
+        args: (this.#worker.args ?? null) as JsonValue, transformersUrl,
+      });
+    } else if (this.#pretrained !== null) {
+      if (transformersUrl === null) {
+        throw new MissingDependencyError("LocalModel requires the optional peer dependency '@huggingface/transformers'; install it explicitly");
+      }
+      blockingCall({ kind: 'local-load', handle, transformersUrl, modelId: this.#pretrained.modelId, settings: this.#pretrained.settings });
+    } else {
+      throw new TypeError(
+        'LocalModel.complete runs the model in a worker thread and cannot use a supplied model object; '
+        + 'create the adapter with LocalModel.fromPretrained, pass options.worker = { module, exportName } that loads it, '
+        + 'or use await acomplete(...)',
+      );
+    }
+    this.#workerHandle = handle;
+    workerModels?.register(this, handle);
+    return handle;
+  }
+
+  /** Messages with image placeholders, and the image parts in order (Python's message loop). */
+  private prepare(request: ModelRequest): PreparedRequest {
     const messages: Record<string, unknown>[] = [];
-    const images: unknown[] = [];
+    const images: ImagePart[] = [];
     let instructions = request.instructions ?? '';
     if (request.responseSchema !== null) {
       instructions += '\nReturn only a JSON object, without Markdown fences or explanation, matching this schema:\n'
@@ -165,40 +267,34 @@ export class LocalModel {
         if (part instanceof TextPart) content.push({ type: 'text', text: part.text });
         else if (part instanceof ImagePart) {
           if (part.data === null) throw new ValueError('LocalModel requires image bytes; fetch URLs explicitly');
-          images.push(await this.#loadImage(part));
+          images.push(part);
           content.push({ type: 'image' });
         } else throw new TypeError('Unsupported message part');
       }
       messages.push({ role: message.role, content });
     }
-    const prompt = await this.processor.apply_chat_template(messages, { add_generation_prompt: true, tokenize: false });
-    if (typeof prompt !== 'string') throw new TypeError('processor.apply_chat_template must return the prompt text');
-    // Text-only prompts go through the processor's tokenizer, which is what a
-    // Python processor does without images. Transformers.js multimodal
-    // processors (for example Idefics3/SmolVLM) fail when called without images.
-    const tokenizer = this.processor.tokenizer;
-    const inputs = await (images.length || typeof tokenizer !== 'function'
-      ? this.processor(prompt, images.length ? images : null)
-      : tokenizer(prompt)) as Record<string, unknown>;
-    if (inputs === null || typeof inputs !== 'object') throw new TypeError('processor must return model inputs');
-    const length = promptLength(inputs);
-    const output = await this.model.generate({ ...inputs, max_new_tokens: this.maxNewTokens, do_sample: false });
-    const generated = rows(output).map((row) => row.slice(length));
-    const eos = this.model.generation_config?.eos_token_id ?? null;
-    const stopTokens = eos === null ? [] : Array.isArray(eos) ? eos.map(Number) : [Number(eos)];
-    const count = generated[0]?.length ?? 0;
-    const finished = count > 0 && stopTokens.includes(generated[0]![count - 1]!);
-    if (count >= this.maxNewTokens && !finished) throw new ValueError('Local model reached the token limit before finishing its answer');
-    const decoded = await this.processor.batch_decode(generated, { skip_special_tokens: true });
-    const answer = String(decoded[0] ?? '').trim();
+    return { messages, images };
+  }
+
+  private async run(request: ModelRequest): Promise<ModelOutput> {
+    const prepared = this.prepare(request);
+    const result = await runLocalEngine(this.model, this.processor as never, (image) => this.#loadImage(image as ImagePart), {
+      messages: prepared.messages, images: prepared.images, maxNewTokens: this.maxNewTokens,
+    });
+    return this.finish(request, result);
+  }
+
+  private finish(request: ModelRequest, result: LocalEngineResult): ModelOutput {
+    if (result.answer === null) throw new ValueError('Local model reached the token limit before finishing its answer');
+    const answer = result.answer;
     const providerMetadata = {
       model_id: this.modelId, revision: this.revision, backend: 'transformers.js', source: 'supplied_pretrained_model',
-      generated_tokens: count, finish_reason: 'stop',
+      generated_tokens: result.count, finish_reason: 'stop',
     };
     if (request.responseSchema !== null) {
       let structured: unknown;
       try {
-        structured = JSON.parse(answer);
+        structured = pythonJsonLoads(answer);
       } catch (error) {
         throw new ValueError('Local model did not return valid JSON', { cause: error });
       }

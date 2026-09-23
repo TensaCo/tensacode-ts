@@ -3,7 +3,7 @@ import { ValueError } from '../errors.js';
 import { isPlainObject } from '../_internal/json.js';
 import { ImagePart, TextPart, type Message } from '../ops/text/messages.js';
 import { ModelOutput, ModelRequest } from '../ops/text/model.js';
-import { ProviderProtocolError, endpoint, postJson, pythonRepr, validateTimeout, type FetchLike } from './http.js';
+import { ProviderProtocolError, endpoint, postJson, postJsonSync, pythonRepr, validateTimeout, type FetchLike } from './http.js';
 
 export interface JevModelOptions {
   apiKey: string;
@@ -152,8 +152,9 @@ function messagesEqual(a: readonly Message[], b: readonly Message[]): boolean {
  *
  * Jev is a typed evaluation model rather than a chat model. This adapter
  * supports classification, decisions and rubric scores; labels exactly
- * ``true``/``false`` use Jev's yes/no question. ``acompleteQuestions`` sends
- * several questions about the same messages in one request. Unsupported
+ * ``true``/``false`` use Jev's yes/no question. ``completeQuestions`` (and
+ * ``acompleteQuestions``) sends several questions about the same messages in
+ * one request. Unsupported
  * request shapes fail before making an HTTP request.
  */
 export class JevModel {
@@ -186,18 +187,36 @@ export class JevModel {
     return { type: 'jev', base_url: this.baseUrl, model: this.model, timeout: this.timeout };
   }
 
-  /** Send one request and return a ``ModelOutput``. */
+  /** Send one request and return a ``ModelOutput`` (blocks). */
+  complete(request: ModelRequest): ModelOutput {
+    return this.completeQuestions({ result: request }).result!;
+  }
+
+  /** Asynchronous {@link complete}. */
   async acomplete(request: ModelRequest): Promise<ModelOutput> {
     return (await this.acompleteQuestions({ result: request })).result!;
   }
 
-  /** Send named decision requests about identical messages in one call. */
+  /** Send named decision requests about identical messages in one call (blocks). */
+  completeQuestions(requests: Readonly<Record<string, ModelRequest>>): Readonly<Record<string, ModelOutput>> {
+    const [entries, questions, payload] = this.questions(requests, 'completeQuestions');
+    const response = postJsonSync(endpoint(this.baseUrl, 'v1/systemone'), payload, { apiKey: this.#apiKey, timeout: this.timeout, fetch: this.#fetch });
+    return this.answers(entries, questions, response);
+  }
+
+  /** Asynchronous {@link completeQuestions}. */
   async acompleteQuestions(requests: Readonly<Record<string, ModelRequest>>): Promise<Readonly<Record<string, ModelOutput>>> {
+    const [entries, questions, payload] = this.questions(requests, 'acompleteQuestions');
+    const response = await postJson(endpoint(this.baseUrl, 'v1/systemone'), payload, { apiKey: this.#apiKey, timeout: this.timeout, fetch: this.#fetch });
+    return this.answers(entries, questions, response);
+  }
+
+  private questions(requests: Readonly<Record<string, ModelRequest>>, method: string): [[string, ModelRequest][], Record<string, [Json, QuestionKind]>, Json] {
     if (!isPlainObject(requests) || !Object.keys(requests).length) {
-      throw new TypeError('acompleteQuestions expects a nonempty mapping of ModelRequest');
+      throw new TypeError(`${method} expects a nonempty mapping of ModelRequest`);
     }
     const entries = Object.entries(requests);
-    if (!entries.every(([, request]) => request instanceof ModelRequest)) throw new TypeError('acompleteQuestions expects ModelRequest values');
+    if (!entries.every(([, request]) => request instanceof ModelRequest)) throw new TypeError(`${method} expects ModelRequest values`);
     const first = entries[0]![1];
     if (entries.some(([, request]) => !messagesEqual(request.messages, first.messages))) {
       throw new ProviderProtocolError('Jev questions in one request must share the same messages');
@@ -208,9 +227,10 @@ export class JevModel {
       model: this.model,
       questions: Object.fromEntries(Object.entries(questions).map(([name, [question]]) => [name, question])),
     };
-    const response = await postJson(endpoint(this.baseUrl, 'v1/systemone'), payload, {
-      apiKey: this.#apiKey, timeout: this.timeout, fetch: this.#fetch,
-    });
+    return [entries, questions, payload];
+  }
+
+  private answers(entries: [string, ModelRequest][], questions: Record<string, [Json, QuestionKind]>, response: Json): Readonly<Record<string, ModelOutput>> {
     if (!Object.hasOwn(response, 'answers')) throw new ProviderProtocolError('Jev response has no answers');
     const answers = response.answers;
     if (!isPlainObject(answers) || Object.keys(answers).length !== entries.length || !entries.every(([name]) => Object.hasOwn(answers, name))) {
