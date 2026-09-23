@@ -1,0 +1,366 @@
+{
+ "texts": [
+  "Hello WORLD na\u00efve \u4e2d\u6587 [MASK] hellos",
+  "a pair"
+ ],
+ "cases": {
+  "bert": {
+   "class": "BertTokenizer",
+   "to_str": "{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[{\"id\":0,\"content\":\"[PAD]\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":1,\"content\":\"[UNK]\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":2,\"content\":\"[CLS]\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":3,\"content\":\"[SEP]\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":4,\"content\":\"[MASK]\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true}],\"normalizer\":{\"type\":\"BertNormalizer\",\"clean_text\":true,\"handle_chinese_chars\":true,\"strip_accents\":null,\"lowercase\":true},\"pre_tokenizer\":{\"type\":\"BertPreTokenizer\"},\"post_processor\":{\"type\":\"TemplateProcessing\",\"single\":[{\"SpecialToken\":{\"id\":\"[CLS]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":0}}],\"pair\":[{\"SpecialToken\":{\"id\":\"[CLS]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"B\",\"type_id\":1}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":1}}],\"special_tokens\":{\"[CLS]\":{\"id\":\"[CLS]\",\"ids\":[2],\"tokens\":[\"[CLS]\"]},\"[SEP]\":{\"id\":\"[SEP]\",\"ids\":[3],\"tokens\":[\"[SEP]\"]}}},\"decoder\":{\"type\":\"WordPiece\",\"prefix\":\"##\",\"cleanup\":true},\"model\":{\"type\":\"WordPiece\",\"unk_token\":\"[UNK]\",\"continuing_subword_prefix\":\"##\",\"max_input_chars_per_word\":100,\"vocab\":{\"[PAD]\":0,\"[UNK]\":1,\"[CLS]\":2,\"[SEP]\":3,\"[MASK]\":4,\"world\":6,\"##s\":7,\"naive\":8,\"na\u00efve\":9,\"Hello\":10,\"WORLD\":11,\"\u4e2d\":12,\"\u6587\":13,\"a\":14,\"pair\":15,\"hello\":16}}}",
+   "config": {
+    "json": "{\"added_tokens\":[{\"content\":\"[PAD]\",\"id\":0,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"[UNK]\",\"id\":1,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"[CLS]\",\"id\":2,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"[SEP]\",\"id\":3,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"[MASK]\",\"id\":4,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true}],\"decoder\":{\"cleanup\":true,\"prefix\":\"##\",\"type\":\"WordPiece\"},\"model\":{\"continuing_subword_prefix\":\"##\",\"max_input_chars_per_word\":100,\"type\":\"WordPiece\",\"unk_token\":\"[UNK]\",\"vocab\":{\"##s\":7,\"Hello\":10,\"WORLD\":11,\"[CLS]\":2,\"[MASK]\":4,\"[PAD]\":0,\"[SEP]\":3,\"[UNK]\":1,\"a\":14,\"hello\":16,\"naive\":8,\"na\\u00efve\":9,\"pair\":15,\"world\":6,\"\\u4e2d\":12,\"\\u6587\":13}},\"normalizer\":{\"clean_text\":true,\"handle_chinese_chars\":true,\"lowercase\":true,\"strip_accents\":null,\"type\":\"BertNormalizer\"},\"padding\":null,\"post_processor\":{\"pair\":[{\"SpecialToken\":{\"id\":\"[CLS]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"B\",\"type_id\":1}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":1}}],\"single\":[{\"SpecialToken\":{\"id\":\"[CLS]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":0}}],\"special_tokens\":{\"[CLS]\":{\"id\":\"[CLS]\",\"ids\":[2],\"tokens\":[\"[CLS]\"]},\"[SEP]\":{\"id\":\"[SEP]\",\"ids\":[3],\"tokens\":[\"[SEP]\"]}},\"type\":\"TemplateProcessing\"},\"pre_tokenizer\":{\"type\":\"BertPreTokenizer\"},\"truncation\":null,\"version\":\"1.0\"}",
+    "options": {
+     "clean_up_tokenization_spaces": false,
+     "model_max_length": 1000000000000000019884624838656,
+     "model_input_names": [
+      "input_ids",
+      "token_type_ids",
+      "attention_mask"
+     ],
+     "split_special_tokens": false
+    },
+    "special_tokens": {
+     "unk_token": "[UNK]",
+     "sep_token": "[SEP]",
+     "pad_token": "[PAD]",
+     "cls_token": "[CLS]",
+     "mask_token": "[MASK]"
+    },
+    "padding_side": "right",
+    "truncation_side": "right"
+   },
+   "single": [
+    2,
+    16,
+    6,
+    8,
+    12,
+    13,
+    4,
+    16,
+    7,
+    3
+   ],
+   "pair": [
+    2,
+    16,
+    6,
+    8,
+    12,
+    13,
+    4,
+    16,
+    7,
+    3,
+    14,
+    15,
+    3
+   ]
+  },
+  "bert_cased": {
+   "class": "BertTokenizer",
+   "to_str": "{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[{\"id\":0,\"content\":\"[PAD]\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":1,\"content\":\"[UNK]\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":2,\"content\":\"[CLS]\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":3,\"content\":\"[SEP]\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":4,\"content\":\"[MASK]\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":16,\"content\":\"<note>\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":true,\"special\":false}],\"normalizer\":{\"type\":\"BertNormalizer\",\"clean_text\":true,\"handle_chinese_chars\":true,\"strip_accents\":null,\"lowercase\":false},\"pre_tokenizer\":{\"type\":\"BertPreTokenizer\"},\"post_processor\":{\"type\":\"TemplateProcessing\",\"single\":[{\"SpecialToken\":{\"id\":\"[CLS]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":0}}],\"pair\":[{\"SpecialToken\":{\"id\":\"[CLS]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"B\",\"type_id\":1}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":1}}],\"special_tokens\":{\"[CLS]\":{\"id\":\"[CLS]\",\"ids\":[2],\"tokens\":[\"[CLS]\"]},\"[SEP]\":{\"id\":\"[SEP]\",\"ids\":[3],\"tokens\":[\"[SEP]\"]}}},\"decoder\":{\"type\":\"WordPiece\",\"prefix\":\"##\",\"cleanup\":true},\"model\":{\"type\":\"WordPiece\",\"unk_token\":\"[UNK]\",\"continuing_subword_prefix\":\"##\",\"max_input_chars_per_word\":100,\"vocab\":{\"[PAD]\":0,\"[UNK]\":1,\"[CLS]\":2,\"[SEP]\":3,\"[MASK]\":4,\"world\":6,\"##s\":7,\"naive\":8,\"na\u00efve\":9,\"Hello\":10,\"WORLD\":11,\"\u4e2d\":12,\"\u6587\":13,\"a\":14,\"pair\":15,\"hello\":16}}}",
+   "config": {
+    "json": "{\"added_tokens\":[{\"content\":\"[PAD]\",\"id\":0,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"[UNK]\",\"id\":1,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"[CLS]\",\"id\":2,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"[SEP]\",\"id\":3,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"[MASK]\",\"id\":4,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"<note>\",\"id\":16,\"lstrip\":false,\"normalized\":true,\"rstrip\":false,\"single_word\":false,\"special\":false}],\"decoder\":{\"cleanup\":true,\"prefix\":\"##\",\"type\":\"WordPiece\"},\"model\":{\"continuing_subword_prefix\":\"##\",\"max_input_chars_per_word\":100,\"type\":\"WordPiece\",\"unk_token\":\"[UNK]\",\"vocab\":{\"##s\":7,\"Hello\":10,\"WORLD\":11,\"[CLS]\":2,\"[MASK]\":4,\"[PAD]\":0,\"[SEP]\":3,\"[UNK]\":1,\"a\":14,\"hello\":16,\"naive\":8,\"na\\u00efve\":9,\"pair\":15,\"world\":6,\"\\u4e2d\":12,\"\\u6587\":13}},\"normalizer\":{\"clean_text\":true,\"handle_chinese_chars\":true,\"lowercase\":false,\"strip_accents\":null,\"type\":\"BertNormalizer\"},\"padding\":null,\"post_processor\":{\"pair\":[{\"SpecialToken\":{\"id\":\"[CLS]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"B\",\"type_id\":1}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":1}}],\"single\":[{\"SpecialToken\":{\"id\":\"[CLS]\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"[SEP]\",\"type_id\":0}}],\"special_tokens\":{\"[CLS]\":{\"id\":\"[CLS]\",\"ids\":[2],\"tokens\":[\"[CLS]\"]},\"[SEP]\":{\"id\":\"[SEP]\",\"ids\":[3],\"tokens\":[\"[SEP]\"]}},\"type\":\"TemplateProcessing\"},\"pre_tokenizer\":{\"type\":\"BertPreTokenizer\"},\"truncation\":null,\"version\":\"1.0\"}",
+    "options": {
+     "clean_up_tokenization_spaces": false,
+     "model_max_length": 32,
+     "model_input_names": [
+      "input_ids",
+      "token_type_ids",
+      "attention_mask"
+     ],
+     "split_special_tokens": false
+    },
+    "special_tokens": {
+     "unk_token": "[UNK]",
+     "sep_token": "[SEP]",
+     "pad_token": "[PAD]",
+     "cls_token": "[CLS]",
+     "mask_token": "[MASK]"
+    },
+    "padding_side": "right",
+    "truncation_side": "right"
+   },
+   "single": [
+    2,
+    10,
+    11,
+    9,
+    12,
+    13,
+    4,
+    16,
+    7,
+    3
+   ],
+   "pair": [
+    2,
+    10,
+    11,
+    9,
+    12,
+    13,
+    4,
+    16,
+    7,
+    3,
+    14,
+    15,
+    3
+   ]
+  },
+  "roberta": {
+   "class": "RobertaTokenizer",
+   "to_str": "{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[{\"id\":0,\"content\":\"<s>\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":1,\"content\":\"<pad>\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":2,\"content\":\"</s>\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":3,\"content\":\"<unk>\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":16,\"content\":\"<mask>\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true}],\"normalizer\":null,\"pre_tokenizer\":{\"type\":\"ByteLevel\",\"add_prefix_space\":true,\"trim_offsets\":true,\"use_regex\":true},\"post_processor\":{\"type\":\"RobertaProcessing\",\"sep\":[\"</s>\",2],\"cls\":[\"<s>\",0],\"trim_offsets\":true,\"add_prefix_space\":true},\"decoder\":{\"type\":\"ByteLevel\",\"add_prefix_space\":true,\"trim_offsets\":true,\"use_regex\":true},\"model\":{\"type\":\"BPE\",\"dropout\":null,\"unk_token\":null,\"continuing_subword_prefix\":\"\",\"end_of_word_suffix\":\"\",\"fuse_unk\":false,\"byte_fallback\":false,\"ignore_merges\":false,\"vocab\":{\"<s>\":0,\"<pad>\":1,\"</s>\":2,\"<unk>\":3,\"\u0120\":4,\"h\":5,\"e\":6,\"l\":7,\"o\":8,\"\u0120h\":9,\"ll\":10,\"\u0120he\":11,\"\u0120hell\":12,\"\u0120hello\":13,\"a\":14,\"\u0120a\":15,\"<mask>\":16},\"merges\":[[\"\u0120\",\"h\"],[\"l\",\"l\"],[\"\u0120h\",\"e\"],[\"\u0120he\",\"ll\"],[\"\u0120hell\",\"o\"],[\"\u0120\",\"a\"]]}}",
+   "config": {
+    "json": "{\"added_tokens\":[{\"content\":\"<s>\",\"id\":0,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"<pad>\",\"id\":1,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"</s>\",\"id\":2,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"<unk>\",\"id\":3,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"<mask>\",\"id\":16,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true}],\"decoder\":{\"add_prefix_space\":true,\"trim_offsets\":true,\"type\":\"ByteLevel\",\"use_regex\":true},\"model\":{\"byte_fallback\":false,\"continuing_subword_prefix\":\"\",\"dropout\":null,\"end_of_word_suffix\":\"\",\"fuse_unk\":false,\"ignore_merges\":false,\"merges\":[[\"\\u0120\",\"h\"],[\"l\",\"l\"],[\"\\u0120h\",\"e\"],[\"\\u0120he\",\"ll\"],[\"\\u0120hell\",\"o\"],[\"\\u0120\",\"a\"]],\"type\":\"BPE\",\"unk_token\":null,\"vocab\":{\"</s>\":2,\"<mask>\":16,\"<pad>\":1,\"<s>\":0,\"<unk>\":3,\"a\":14,\"e\":6,\"h\":5,\"l\":7,\"ll\":10,\"o\":8,\"\\u0120\":4,\"\\u0120a\":15,\"\\u0120h\":9,\"\\u0120he\":11,\"\\u0120hell\":12,\"\\u0120hello\":13}},\"normalizer\":null,\"padding\":null,\"post_processor\":{\"add_prefix_space\":true,\"cls\":[\"<s>\",0],\"sep\":[\"</s>\",2],\"trim_offsets\":true,\"type\":\"RobertaProcessing\"},\"pre_tokenizer\":{\"add_prefix_space\":true,\"trim_offsets\":true,\"type\":\"ByteLevel\",\"use_regex\":true},\"truncation\":null,\"version\":\"1.0\"}",
+    "options": {
+     "clean_up_tokenization_spaces": false,
+     "model_max_length": 1000000000000000019884624838656,
+     "model_input_names": [
+      "input_ids",
+      "attention_mask"
+     ],
+     "split_special_tokens": false
+    },
+    "special_tokens": {
+     "bos_token": "<s>",
+     "eos_token": "</s>",
+     "unk_token": "<unk>",
+     "sep_token": "</s>",
+     "pad_token": "<pad>",
+     "cls_token": "<s>",
+     "mask_token": "<mask>"
+    },
+    "padding_side": "right",
+    "truncation_side": "right"
+   },
+   "single": [
+    0,
+    4,
+    6,
+    10,
+    8,
+    4,
+    15,
+    6,
+    4,
+    4,
+    13,
+    2
+   ],
+   "pair": [
+    0,
+    4,
+    6,
+    10,
+    8,
+    4,
+    15,
+    6,
+    4,
+    4,
+    13,
+    2,
+    2,
+    15,
+    15,
+    2
+   ]
+  },
+  "clip": {
+   "class": "CLIPTokenizer",
+   "to_str": "{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[{\"id\":0,\"content\":\"<|startoftext|>\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true},{\"id\":1,\"content\":\"<|endoftext|>\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true}],\"normalizer\":{\"type\":\"Sequence\",\"normalizers\":[{\"type\":\"NFC\"},{\"type\":\"Replace\",\"pattern\":{\"Regex\":\"\\\\s+\"},\"content\":\" \"},{\"type\":\"Lowercase\"}]},\"pre_tokenizer\":{\"type\":\"Sequence\",\"pretokenizers\":[{\"type\":\"Split\",\"pattern\":{\"Regex\":\"<\\\\|startoftext\\\\|>|<\\\\|endoftext\\\\|>|'s|'t|'re|'ve|'m|'ll|'d|[\\\\p{L}]+|[\\\\p{N}]|[^\\\\s\\\\p{L}\\\\p{N}]+\"},\"behavior\":\"Removed\",\"invert\":true},{\"type\":\"ByteLevel\",\"add_prefix_space\":false,\"trim_offsets\":true,\"use_regex\":true}]},\"post_processor\":{\"type\":\"RobertaProcessing\",\"sep\":[\"<|endoftext|>\",1],\"cls\":[\"<|startoftext|>\",0],\"trim_offsets\":false,\"add_prefix_space\":false},\"decoder\":{\"type\":\"ByteLevel\",\"add_prefix_space\":true,\"trim_offsets\":true,\"use_regex\":true},\"model\":{\"type\":\"BPE\",\"dropout\":null,\"unk_token\":\"<|endoftext|>\",\"continuing_subword_prefix\":\"\",\"end_of_word_suffix\":\"</w>\",\"fuse_unk\":false,\"byte_fallback\":false,\"ignore_merges\":false,\"vocab\":{\"<|startoftext|>\":0,\"<|endoftext|>\":1,\"h\":2,\"e\":3,\"l\":4,\"o\":5,\"o</w>\":6,\"hello</w>\":7,\"a</w>\":8,\"he\":9,\"ll\":10,\"hell\":11},\"merges\":[[\"h\",\"e\"],[\"l\",\"l\"],[\"he\",\"ll\"],[\"hell\",\"o</w>\"]]}}",
+   "config": {
+    "json": "{\"added_tokens\":[{\"content\":\"<|startoftext|>\",\"id\":0,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"<|endoftext|>\",\"id\":1,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true}],\"decoder\":{\"add_prefix_space\":true,\"trim_offsets\":true,\"type\":\"ByteLevel\",\"use_regex\":true},\"model\":{\"byte_fallback\":false,\"continuing_subword_prefix\":\"\",\"dropout\":null,\"end_of_word_suffix\":\"</w>\",\"fuse_unk\":false,\"ignore_merges\":false,\"merges\":[[\"h\",\"e\"],[\"l\",\"l\"],[\"he\",\"ll\"],[\"hell\",\"o</w>\"]],\"type\":\"BPE\",\"unk_token\":\"<|endoftext|>\",\"vocab\":{\"<|endoftext|>\":1,\"<|startoftext|>\":0,\"a</w>\":8,\"e\":3,\"h\":2,\"he\":9,\"hell\":11,\"hello</w>\":7,\"l\":4,\"ll\":10,\"o\":5,\"o</w>\":6}},\"normalizer\":{\"normalizers\":[{\"type\":\"NFC\"},{\"content\":\" \",\"pattern\":{\"Regex\":\"\\\\s+\"},\"type\":\"Replace\"},{\"type\":\"Lowercase\"}],\"type\":\"Sequence\"},\"padding\":null,\"post_processor\":{\"add_prefix_space\":false,\"cls\":[\"<|startoftext|>\",0],\"sep\":[\"<|endoftext|>\",1],\"trim_offsets\":false,\"type\":\"RobertaProcessing\"},\"pre_tokenizer\":{\"pretokenizers\":[{\"behavior\":\"Removed\",\"invert\":true,\"pattern\":{\"Regex\":\"<\\\\|startoftext\\\\|>|<\\\\|endoftext\\\\|>|'s|'t|'re|'ve|'m|'ll|'d|[\\\\p{L}]+|[\\\\p{N}]|[^\\\\s\\\\p{L}\\\\p{N}]+\"},\"type\":\"Split\"},{\"add_prefix_space\":false,\"trim_offsets\":true,\"type\":\"ByteLevel\",\"use_regex\":true}],\"type\":\"Sequence\"},\"truncation\":null,\"version\":\"1.0\"}",
+    "options": {
+     "clean_up_tokenization_spaces": false,
+     "model_max_length": 1000000000000000019884624838656,
+     "model_input_names": [
+      "input_ids",
+      "attention_mask"
+     ],
+     "split_special_tokens": false
+    },
+    "special_tokens": {
+     "bos_token": "<|startoftext|>",
+     "eos_token": "<|endoftext|>",
+     "unk_token": "<|endoftext|>",
+     "pad_token": "<|endoftext|>"
+    },
+    "padding_side": "right",
+    "truncation_side": "right"
+   },
+   "single": [
+    0,
+    7,
+    1,
+    5,
+    1,
+    4,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    11,
+    5,
+    1,
+    1
+   ],
+   "pair": [
+    0,
+    7,
+    1,
+    5,
+    1,
+    4,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    11,
+    5,
+    1,
+    1,
+    1,
+    8,
+    1,
+    1,
+    1,
+    1,
+    1
+   ]
+  },
+  "gpt2": {
+   "class": "GPT2Tokenizer",
+   "to_str": "{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[{\"id\":0,\"content\":\"<|endoftext|>\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true}],\"normalizer\":null,\"pre_tokenizer\":{\"type\":\"ByteLevel\",\"add_prefix_space\":false,\"trim_offsets\":true,\"use_regex\":true},\"post_processor\":{\"type\":\"TemplateProcessing\",\"single\":[{\"Sequence\":{\"id\":\"A\",\"type_id\":0}}],\"pair\":[{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"Sequence\":{\"id\":\"B\",\"type_id\":1}}],\"special_tokens\":{}},\"decoder\":{\"type\":\"ByteLevel\",\"add_prefix_space\":true,\"trim_offsets\":true,\"use_regex\":true},\"model\":{\"type\":\"BPE\",\"dropout\":null,\"unk_token\":null,\"continuing_subword_prefix\":\"\",\"end_of_word_suffix\":\"\",\"fuse_unk\":false,\"byte_fallback\":false,\"ignore_merges\":false,\"vocab\":{\"<|endoftext|>\":0,\"\u0120\":1,\"h\":2,\"e\":3,\"l\":4,\"o\":5,\"\u0120h\":6,\"ll\":7,\"\u0120he\":8,\"\u0120hell\":9,\"\u0120hello\":10,\"a\":11,\"\u0120a\":12},\"merges\":[[\"\u0120\",\"h\"],[\"l\",\"l\"],[\"\u0120h\",\"e\"],[\"\u0120he\",\"ll\"],[\"\u0120hell\",\"o\"],[\"\u0120\",\"a\"]]}}",
+   "config": {
+    "json": "{\"added_tokens\":[{\"content\":\"<|endoftext|>\",\"id\":0,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true}],\"decoder\":{\"add_prefix_space\":true,\"trim_offsets\":true,\"type\":\"ByteLevel\",\"use_regex\":true},\"model\":{\"byte_fallback\":false,\"continuing_subword_prefix\":\"\",\"dropout\":null,\"end_of_word_suffix\":\"\",\"fuse_unk\":false,\"ignore_merges\":false,\"merges\":[[\"\\u0120\",\"h\"],[\"l\",\"l\"],[\"\\u0120h\",\"e\"],[\"\\u0120he\",\"ll\"],[\"\\u0120hell\",\"o\"],[\"\\u0120\",\"a\"]],\"type\":\"BPE\",\"unk_token\":null,\"vocab\":{\"<|endoftext|>\":0,\"a\":11,\"e\":3,\"h\":2,\"l\":4,\"ll\":7,\"o\":5,\"\\u0120\":1,\"\\u0120a\":12,\"\\u0120h\":6,\"\\u0120he\":8,\"\\u0120hell\":9,\"\\u0120hello\":10}},\"normalizer\":null,\"padding\":null,\"post_processor\":{\"pair\":[{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"Sequence\":{\"id\":\"B\",\"type_id\":1}}],\"single\":[{\"Sequence\":{\"id\":\"A\",\"type_id\":0}}],\"special_tokens\":{},\"type\":\"TemplateProcessing\"},\"pre_tokenizer\":{\"add_prefix_space\":false,\"trim_offsets\":true,\"type\":\"ByteLevel\",\"use_regex\":true},\"truncation\":null,\"version\":\"1.0\"}",
+    "options": {
+     "clean_up_tokenization_spaces": false,
+     "model_max_length": 1000000000000000019884624838656,
+     "model_input_names": [
+      "input_ids",
+      "attention_mask"
+     ],
+     "split_special_tokens": false
+    },
+    "special_tokens": {
+     "bos_token": "<|endoftext|>",
+     "eos_token": "<|endoftext|>",
+     "unk_token": "<|endoftext|>"
+    },
+    "padding_side": "right",
+    "truncation_side": "right"
+   },
+   "single": [
+    3,
+    7,
+    5,
+    1,
+    12,
+    3,
+    1,
+    1,
+    10
+   ],
+   "pair": [
+    3,
+    7,
+    5,
+    1,
+    12,
+    3,
+    1,
+    1,
+    10,
+    11,
+    12
+   ]
+  },
+  "gpt2_bos": {
+   "class": "GPT2Tokenizer",
+   "to_str": "{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[{\"id\":0,\"content\":\"<|endoftext|>\",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true}],\"normalizer\":null,\"pre_tokenizer\":{\"type\":\"ByteLevel\",\"add_prefix_space\":false,\"trim_offsets\":true,\"use_regex\":true},\"post_processor\":{\"type\":\"TemplateProcessing\",\"single\":[{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":0}}],\"pair\":[{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":1}},{\"Sequence\":{\"id\":\"B\",\"type_id\":1}},{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":1}}],\"special_tokens\":{\"<|endoftext|>\":{\"id\":\"<|endoftext|>\",\"ids\":[0],\"tokens\":[\"<|endoftext|>\"]}}},\"decoder\":{\"type\":\"ByteLevel\",\"add_prefix_space\":true,\"trim_offsets\":true,\"use_regex\":true},\"model\":{\"type\":\"BPE\",\"dropout\":null,\"unk_token\":null,\"continuing_subword_prefix\":\"\",\"end_of_word_suffix\":\"\",\"fuse_unk\":false,\"byte_fallback\":false,\"ignore_merges\":false,\"vocab\":{\"<|endoftext|>\":0,\"\u0120\":1,\"h\":2,\"e\":3,\"l\":4,\"o\":5,\"\u0120h\":6,\"ll\":7,\"\u0120he\":8,\"\u0120hell\":9,\"\u0120hello\":10,\"a\":11,\"\u0120a\":12},\"merges\":[[\"\u0120\",\"h\"],[\"l\",\"l\"],[\"\u0120h\",\"e\"],[\"\u0120he\",\"ll\"],[\"\u0120hell\",\"o\"],[\"\u0120\",\"a\"]]}}",
+   "config": {
+    "json": "{\"added_tokens\":[{\"content\":\"<|endoftext|>\",\"id\":0,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true}],\"decoder\":{\"add_prefix_space\":true,\"trim_offsets\":true,\"type\":\"ByteLevel\",\"use_regex\":true},\"model\":{\"byte_fallback\":false,\"continuing_subword_prefix\":\"\",\"dropout\":null,\"end_of_word_suffix\":\"\",\"fuse_unk\":false,\"ignore_merges\":false,\"merges\":[[\"\\u0120\",\"h\"],[\"l\",\"l\"],[\"\\u0120h\",\"e\"],[\"\\u0120he\",\"ll\"],[\"\\u0120hell\",\"o\"],[\"\\u0120\",\"a\"]],\"type\":\"BPE\",\"unk_token\":null,\"vocab\":{\"<|endoftext|>\":0,\"a\":11,\"e\":3,\"h\":2,\"l\":4,\"ll\":7,\"o\":5,\"\\u0120\":1,\"\\u0120a\":12,\"\\u0120h\":6,\"\\u0120he\":8,\"\\u0120hell\":9,\"\\u0120hello\":10}},\"normalizer\":null,\"padding\":null,\"post_processor\":{\"pair\":[{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":1}},{\"Sequence\":{\"id\":\"B\",\"type_id\":1}},{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":1}}],\"single\":[{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"SpecialToken\":{\"id\":\"<|endoftext|>\",\"type_id\":0}}],\"special_tokens\":{\"<|endoftext|>\":{\"id\":\"<|endoftext|>\",\"ids\":[0],\"tokens\":[\"<|endoftext|>\"]}},\"type\":\"TemplateProcessing\"},\"pre_tokenizer\":{\"add_prefix_space\":false,\"trim_offsets\":true,\"type\":\"ByteLevel\",\"use_regex\":true},\"truncation\":null,\"version\":\"1.0\"}",
+    "options": {
+     "clean_up_tokenization_spaces": false,
+     "model_max_length": 1000000000000000019884624838656,
+     "model_input_names": [
+      "input_ids",
+      "attention_mask"
+     ],
+     "split_special_tokens": false
+    },
+    "special_tokens": {
+     "bos_token": "<|endoftext|>",
+     "eos_token": "<|endoftext|>",
+     "unk_token": "<|endoftext|>"
+    },
+    "padding_side": "right",
+    "truncation_side": "right"
+   },
+   "single": [
+    0,
+    3,
+    7,
+    5,
+    1,
+    12,
+    3,
+    1,
+    1,
+    10,
+    0
+   ],
+   "pair": [
+    0,
+    3,
+    7,
+    5,
+    1,
+    12,
+    3,
+    1,
+    1,
+    10,
+    0,
+    0,
+    11,
+    12,
+    0
+   ]
+  }
+ }
+}

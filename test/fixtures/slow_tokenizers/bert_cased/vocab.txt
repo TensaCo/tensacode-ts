@@ -1,0 +1,17 @@
+[PAD]
+[UNK]
+[CLS]
+[SEP]
+[MASK]
+hello
+world
+##s
+naive
+naïve
+Hello
+WORLD
+中
+文
+a
+pair
+hello  

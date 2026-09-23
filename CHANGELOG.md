@@ -109,7 +109,9 @@ deliberate. See [Parity with Python](docs/parity.md) for what remains.
   processor, as in transformers, instead of raising `NotImplementedError`.
 - transformers' legacy `LayerNorm.gamma` / `LayerNorm.beta` weight names load.
 - A foundation without any tokenizer files gets the class-default tokenizer
-  `AutoTokenizer` builds, instead of none.
+  `AutoTokenizer` builds, instead of none, and one with only slow vocabulary
+  files (`vocab.txt` for BERT-family models, `vocab.json`/`merges.txt` for
+  RoBERTa, CLIP and GPT-2) gets the tokenizer transformers builds from them.
 - A piece repeated in a Unigram vocabulary maps to its last id, as in the Rust
   `tokenizers` library.
 - The tokenizer class chosen from `model_type` follows transformers 5.17

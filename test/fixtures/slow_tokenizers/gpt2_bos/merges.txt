@@ -1,0 +1,7 @@
+#version: 0.2
+Ġ h
+l l
+Ġh e
+Ġhe ll
+Ġhell o
+Ġ a

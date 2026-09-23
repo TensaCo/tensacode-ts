@@ -160,6 +160,9 @@ function normalizeModel(model: RawNode | undefined): void {
 
 type TokenizerFlags = Record<string, unknown>;
 
+/** Construction flag marking a backend assembled from slow vocabulary files (no tokenizer.json). */
+export const SLOW_VOCABULARY_FLAG = '__tensorcode_slow_vocabulary__';
+
 function flag(flags: TokenizerFlags, key: string, fallback: boolean): boolean {
   return typeof flags[key] === 'boolean' ? flags[key] as boolean : fallback;
 }
@@ -253,11 +256,13 @@ function rebuildGPT2(root: RawNode, flags: TokenizerFlags): void {
   }));
   rawSet(root, 'decoder', rawFromValue({ type: 'ByteLevel', add_prefix_space: true, trim_offsets: true, use_regex: true }));
   // ``_from_pretrained`` drops ``add_bos_token``/``add_eos_token`` when a
-  // tokenizer.json exists, so only a missing post-processor is rebuilt, plainly.
+  // tokenizer.json exists, so only a missing post-processor is rebuilt, plainly;
+  // slow vocabulary files keep the flags.
   const post = rawGet(root, 'post_processor');
   if (!post || post.t === 'l') {
-    const addBos = false;
-    const addEos = false;
+    const slow = flags[SLOW_VOCABULARY_FLAG] === true;
+    const addBos = slow && flag(flags, 'add_bos_token', false);
+    const addEos = slow && flag(flags, 'add_eos_token', false);
     const bos = text(flags, 'bos_token', '<|endoftext|>');
     const eos = text(flags, 'eos_token', '<|endoftext|>');
     const token = (id: string, typeId: number): unknown => ({ SpecialToken: { id, type_id: typeId } });

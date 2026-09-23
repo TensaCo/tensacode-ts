@@ -44,14 +44,22 @@ export const FOUNDATION_FILES = [
 
 /**
  * The foundation's tokenizer, as ``AutoTokenizer.from_pretrained`` builds it:
- * from ``tokenizer.json``, or, for a checkpoint without any tokenizer files,
- * the model type's class defaults. Slow vocabulary files without a
- * ``tokenizer.json`` are not converted (``null``).
+ * from ``tokenizer.json``; from ``vocab.txt`` or ``vocab.json``/``merges.txt``
+ * for the BERT, RoBERTa and CLIP classes; or, for a checkpoint without any
+ * tokenizer files, the model type's class defaults. ``null`` when none applies
+ * (for example a SentencePiece model, which Python converts only with the
+ * optional ``sentencepiece`` package).
  */
 async function foundationTokenizer(path: string): Promise<FastTokenizer | null> {
   if (await pathExists(join(path, 'tokenizer.json'))) return FastTokenizer.fromDirectory(path);
-  for (const name of TOKENIZER_FILES) if (await pathExists(join(path, name))) return null;
-  return FastTokenizer.blankForModel(await readFile(join(path, 'config.json'), 'utf8'));
+  let present = false;
+  for (const name of TOKENIZER_FILES) if (await pathExists(join(path, name))) present = true;
+  if (!present) return FastTokenizer.blankForModel(await readFile(join(path, 'config.json'), 'utf8'));
+  try {
+    return await FastTokenizer.fromDirectory(path);
+  } catch {
+    return null;
+  }
 }
 
 export interface FoundationOptions extends Omit<HubOptions, 'allowPatterns'> {

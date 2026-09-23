@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { Tensor, tensor } from '../../nn/tensor.js';
 import { ValueError } from '../../errors.js';
 import { emitJsonRaw, parseJsonRaw, parseJsonStrict, rawFromValue, rawGet, rawSet, type JsonObject, type RawNode } from '../json.js';
-import { REBUILT_TOKENIZER_CLASSES, canonicalBackendJson, classPostProcessor, loadsThroughRust, rustTokenizerString } from './serialization.js';
+import { REBUILT_TOKENIZER_CLASSES, SLOW_VOCABULARY_FLAG, canonicalBackendJson, classPostProcessor, loadsThroughRust, rustTokenizerString } from './serialization.js';
 import { buildModel, type TokenModel } from './models.js';
 import {
   buildDecoder, buildNormalizer, buildPostProcessor, buildPreTokenizer,
@@ -406,9 +406,12 @@ export class FastTokenizer {
     return new FastTokenizer(json, { specialTokens, canonical: false, rustParsed: true });
   }
 
-  /** ``AutoTokenizer.from_pretrained(directory, use_fast=True)`` for a downloaded snapshot. */
+  /**
+   * ``AutoTokenizer.from_pretrained(directory, use_fast=True)`` for a
+   * downloaded snapshot: from ``tokenizer.json``, or from the slow vocabulary
+   * files of the classes {@link FastTokenizer.fromSlowFiles} builds.
+   */
   static async fromDirectory(directory: string): Promise<FastTokenizer> {
-    const json = await readFile(join(directory, 'tokenizer.json'), 'utf8');
     const readOptional = async (name: string): Promise<string | null> => {
       try {
         return await readFile(join(directory, name), 'utf8');
@@ -416,13 +419,74 @@ export class FastTokenizer {
         return null;
       }
     };
-    return FastTokenizer.fromFiles({
-      'tokenizer.json': json,
-      'tokenizer_config.json': await readOptional('tokenizer_config.json'),
-      'special_tokens_map.json': await readOptional('special_tokens_map.json'),
-      'added_tokens.json': await readOptional('added_tokens.json'),
-      'config.json': await readOptional('config.json'),
+    const files: Record<string, string | null> = {};
+    for (const name of ['tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json', 'added_tokens.json', 'config.json',
+      'vocab.txt', 'vocab.json', 'merges.txt']) files[name] = await readOptional(name);
+    if (files['tokenizer.json'] === null) {
+      const slow = FastTokenizer.fromSlowFiles(files);
+      if (slow) return slow;
+      throw new ValueError(`no tokenizer.json in ${directory}`);
+    }
+    return FastTokenizer.fromFiles(files);
+  }
+
+  /**
+   * ``AutoTokenizer.from_pretrained`` for a checkpoint with slow vocabulary
+   * files and no ``tokenizer.json``: ``vocab.txt`` for ``BertTokenizer``
+   * (also ELECTRA and DistilBERT), ``vocab.json`` and ``merges.txt`` for
+   * ``RobertaTokenizer`` and ``CLIPTokenizer``, read as the Rust
+   * ``WordPiece``/``BPE`` ``from_file`` readers do. These classes build their
+   * whole pipeline from the vocabulary. ``null`` for other classes or files.
+   */
+  static fromSlowFiles(files: Record<string, string | null | undefined>): FastTokenizer | null {
+    const object = (name: string): Record<string, unknown> => {
+      const text = files[name];
+      if (typeof text !== 'string') return {};
+      try {
+        const value = parseJsonStrict(text);
+        return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+      } catch {
+        return {};
+      }
+    };
+    const declared = object('tokenizer_config.json').tokenizer_class;
+    const modelType = object('config.json').model_type;
+    const tokenizerClass = baseTokenizerClass(typeof declared === 'string' ? declared
+      : typeof modelType === 'string' ? MODEL_TYPE_TOKENIZERS[modelType] ?? null : null);
+    let model: Record<string, unknown>;
+    if (tokenizerClass === 'BertTokenizer' && typeof files['vocab.txt'] === 'string') {
+      // ``WordPiece::read_file``: one token per line, trailing whitespace trimmed, a repeated token keeps its last index.
+      const vocab: Record<string, number> = {};
+      const lines = files['vocab.txt'].split('\n');
+      if (lines[lines.length - 1] === '') lines.pop();
+      lines.forEach((line, index) => {
+        vocab[line.replace(/\r$/, '').trimEnd()] = index;
+      });
+      model = { type: 'WordPiece', vocab };
+    } else if ((tokenizerClass === 'RobertaTokenizer' || tokenizerClass === 'CLIPTokenizer' || tokenizerClass === 'GPT2Tokenizer')
+      && typeof files['vocab.json'] === 'string' && typeof files['merges.txt'] === 'string') {
+      // ``BPE::read_file``: the JSON vocabulary and one ``a b`` merge per line after an optional ``#version`` line.
+      const vocab = parseJsonStrict(files['vocab.json']);
+      if (!vocab || typeof vocab !== 'object' || Array.isArray(vocab)) throw new ValueError('vocab.json must contain an object');
+      const lines = files['merges.txt'].split('\n');
+      if (lines[lines.length - 1] === '') lines.pop();
+      const merges: [string, string][] = [];
+      lines.forEach((raw, rank) => {
+        const line = raw.replace(/\r$/, '');
+        if (line.startsWith('#version')) return;
+        const parts = line.split(' ');
+        if (parts.length !== 2) throw new ValueError(`Merges text file invalid at line ${rank + 1}`);
+        merges.push([parts[0]!, parts[1]!]);
+      });
+      model = { type: 'BPE', vocab, merges };
+    } else {
+      return null;
+    }
+    const json = JSON.stringify({
+      version: '1.0', truncation: null, padding: null, added_tokens: [], normalizer: null, pre_tokenizer: null,
+      post_processor: null, decoder: null, model,
     });
+    return FastTokenizer.fromFiles({ ...files, 'tokenizer.json': json }, { slowVocabulary: true });
   }
 
   /**
@@ -448,7 +512,13 @@ export class FastTokenizer {
    * plus optional ``tokenizer_config.json``, ``special_tokens_map.json`` and
    * the model ``config.json``); see {@link FastTokenizer.fromDirectory}.
    */
-  static fromFiles(files: Record<string, string | null | undefined>): FastTokenizer {
+  static fromFiles(files: Record<string, string | null | undefined>, settings: {
+    /**
+     * The ``tokenizer.json`` was assembled from slow vocabulary files:
+     * ``_from_pretrained`` then keeps ``add_bos_token``/``add_eos_token``.
+     */
+    slowVocabulary?: boolean;
+  } = {}): FastTokenizer {
     const json = files['tokenizer.json'];
     if (typeof json !== 'string') throw new ValueError('tokenizer files require tokenizer.json');
     const readOptional = (name: string): Record<string, unknown> => {
@@ -496,7 +566,7 @@ export class FastTokenizer {
     const truncationSide = side(config.truncation_side);
     // Construction flags: special tokens from special_tokens_map.json or the
     // class defaults, then tokenizer_config.json.
-    const flags: Record<string, unknown> = { ...specialTokens, ...config };
+    const flags: Record<string, unknown> = { ...specialTokens, ...config, ...(settings.slowVocabulary ? { [SLOW_VOCABULARY_FLAG]: true } : {}) };
     const constructed = new FastTokenizer(json, {
       specialTokens, options, tokenizerClass, rustParsed: loadsThroughRust(tokenizerClass), flags,
       ...(paddingSide ? { paddingSide } : {}),
