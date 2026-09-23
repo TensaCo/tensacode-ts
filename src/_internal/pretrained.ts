@@ -249,7 +249,15 @@ export function restoreArtifactDtypes(module: Module, contents: SafetensorsConte
   }
 }
 
-export function defaultModelCard(identity: string, className: string, importPath: string): string {
+/** Public TypeScript entry point that exports the class with this Python identity, if any. */
+function typescriptImportPath(identity: string): string | null {
+  if (identity.startsWith('tensorcode.tools.')) return 'tensorcode/tools';
+  if (identity.startsWith('tensorcode.ops.vec.') || identity.startsWith('tensorcode._internal.vec.')) return 'tensorcode/ops/vec';
+  if (identity.startsWith('tensorcode.ops.text.') || identity.startsWith('tensorcode._internal.text.')) return 'tensorcode/ops/text';
+  return null;
+}
+
+export function defaultModelCard(identity: string, className: string, importPath: string | null = typescriptImportPath(identity)): string {
   const pythonModule = identity.slice(0, identity.lastIndexOf('.'));
   return '---\nlibrary_name: tensorcode\ntags:\n- tensorcode\n---\n\n'
     + `# ${className}\n\n`
@@ -259,7 +267,8 @@ export function defaultModelCard(identity: string, className: string, importPath
     + 'then load this local directory or its Hugging Face repository ID:\n\n'
     + `\`\`\`python\nfrom ${pythonModule} import ${className}\n\n`
     + `model = ${className}.from_pretrained("./model")\n\`\`\`\n\n`
-    + `\`\`\`ts\nimport { ${className} } from '${importPath}';\n\n`
+    + '```ts\n'
+    + (importPath === null ? `// ${className} is the class that saved this artifact.\n` : `import { ${className} } from '${importPath}';\n\n`)
     + `const model = await ${className}.fromPretrained('./model');\n\`\`\`\n\n`
     + '## Training and evaluation\n\n'
     + 'This generated card does not establish training provenance, task '
@@ -369,7 +378,7 @@ export abstract class PretrainedModule<I = unknown, O = unknown> extends Module 
 
   defaultModelCard(): string {
     const cls = this.constructor as typeof PretrainedModule;
-    return defaultModelCard(cls.toolIdentity(), cls.name, 'tensorcode');
+    return defaultModelCard(cls.toolIdentity(), cls.name);
   }
 
   /** Stage a complete model directory then atomically replace ``directory``. */

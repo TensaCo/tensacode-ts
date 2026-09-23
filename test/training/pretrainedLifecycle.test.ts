@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   Linear, Tensor, deserializeSafetensors, noGrad, ones, randn, serializeSafetensors, zeros,
 } from '../../src/nn/index.js';
-import { PretrainedModule } from '../../src/_internal/pretrained.js';
+import { defaultModelCard, PretrainedModule } from '../../src/_internal/pretrained.js';
 import { FileNotFoundError } from '../../src/_internal/hub.js';
 import { ValueError } from '../../src/errors.js';
 import type { JsonObject } from '../../src/_internal/json.js';
@@ -226,6 +226,10 @@ describe('PretrainedModule lifecycle', () => {
     expect(text).toContain('library_name: tensorcode');
     expect(text).toContain('fromPretrained');
     expect(text.toLowerCase()).toContain('training');
+    // A class defined outside the package has no public import path to print.
+    expect(text).toContain("// Tiny is the class that saved this artifact.\nconst model = await Tiny.fromPretrained('./model');");
+    expect(defaultModelCard('tensorcode.tools.decision.Decision', 'Decision')).toContain("import { Decision } from 'tensorcode/tools';");
+    expect(defaultModelCard('tensorcode._internal.vec.text.TextEncoder', 'TextEncoder')).toContain("import { TextEncoder } from 'tensorcode/ops/vec';");
     writeFileSync(card, '# Authored model card\n');
     await model.savePretrained(directory);
     expect(readFileSync(card, 'utf8')).toBe('# Authored model card\n');
