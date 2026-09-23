@@ -10,7 +10,9 @@ import { Module } from '../../nn/module.js';
 import { Parameter, Tensor, ones, tensor } from '../../nn/tensor.js';
 import { Embedding, Linear, ModuleList } from '../../nn/layers.js';
 import { cat } from '../../nn/ops/shape.js';
-import { ValueError } from '../../errors.js';
+import { KeyError, ValueError } from '../../errors.js';
+
+export { KeyError };
 import { isPlainObject, type JsonObject } from '../json.js';
 import { baseInitWeights, initializerStd, postInit } from './hfInit.js';
 import type { NativeConfig } from './config.js';
@@ -201,14 +203,6 @@ export function ropeInverseFrequencies(config: NativeConfig): { invFreq: Float32
     return { invFreq, scaling: 1 };
   }
   throw new KeyError(`'${type}'`);
-}
-
-/** Python ``KeyError`` (an unknown ``rope_type`` in ``ROPE_INIT_FUNCTIONS``). */
-export class KeyError extends Error {
-  constructor(message?: string) {
-    super(message);
-    this.name = 'KeyError';
-  }
 }
 
 /**

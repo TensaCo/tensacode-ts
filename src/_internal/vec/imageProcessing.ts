@@ -20,7 +20,9 @@
  */
 import { Tensor, tensor } from '../../nn/tensor.js';
 import { roundToDType, type DType } from '../../nn/dtype.js';
-import { NotImplementedError, ValueError } from '../../errors.js';
+import { IndexError, NotImplementedError, ValueError } from '../../errors.js';
+
+export { IndexError };
 import { deepCopy, isPlainObject, jsonEqual, type JsonObject, type JsonValue } from '../json.js';
 import { RasterImage } from '../image/raster.js';
 import { fma, fmaf, glibcSin, glibcSinf } from '../image/fpmath.js';
@@ -685,14 +687,6 @@ export class ImageProcessor {
 }
 
 type Fetched = ImageArray | RasterImage | Fetched[];
-
-/** Python ``IndexError`` (an empty image batch). */
-export class IndexError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'IndexError';
-  }
-}
 
 /** ``type(value).__name__`` for the JavaScript values a caller might pass. */
 function pythonTypeName(value: unknown): string {

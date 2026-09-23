@@ -34,3 +34,43 @@ export class MissingDependencyError extends Error {
     this.name = new.target.name;
   }
 }
+
+/** Python ``KeyError``: a missing mapping key (for example an unknown ``rope_type``). */
+export class KeyError extends Error {
+  constructor(message?: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = new.target.name;
+  }
+}
+
+/** Python ``IndexError``: an index outside a sequence (for example an empty image batch). */
+export class IndexError extends Error {
+  constructor(message?: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = new.target.name;
+  }
+}
+
+/** Python ``RuntimeError``, where Python's own code raises it by name. */
+export class RuntimeError extends Error {
+  constructor(message?: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = new.target.name;
+  }
+}
+
+/** Python ``AttributeError``, where transformers raises it for a configuration. */
+export class AttributeError extends Error {
+  constructor(message?: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = new.target.name;
+  }
+}
+
+/** Python ``ImportError``, where transformers raises it for a missing optional package. */
+export class ImportError extends Error {
+  constructor(message?: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = new.target.name;
+  }
+}

@@ -1,5 +1,5 @@
 /** TypeSafe Jev System One HTTP adapter based on its published OpenAPI schema (Python ``tensorcode/integrations/jev.py``). */
-import { ValueError } from '../errors.js';
+import { KeyError, ValueError } from '../errors.js';
 import { isPlainObject } from '../_internal/json.js';
 import { ImagePart, TextPart, type Message } from '../ops/text/messages.js';
 import { ModelOutput, ModelRequest } from '../ops/text/model.js';
@@ -29,8 +29,6 @@ function dig(value: unknown, ...path: string[]): unknown {
   }
   return current;
 }
-
-class KeyError extends Error {}
 
 /** Configured alternatives and optional descriptions from a selection schema. */
 function alternatives(request: ModelRequest): [string[], Record<string, string | null>] {

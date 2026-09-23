@@ -6,52 +6,14 @@
  * rounded to float32 where PyTorch computes in float32 (Python scalars are
  * cast to the tensor dtype first).
  */
-import { ValueError } from '../../errors.js';
+import { AttributeError, ImportError, IndexError, KeyError, RuntimeError, ValueError } from '../../errors.js';
+
+export { AttributeError, ImportError, IndexError, KeyError, RuntimeError };
 import { Generator, randpermValues } from '../../nn/random.js';
 import { pythonFloatRepr } from '../json.js';
 
 const f32 = Math.fround;
 const FLOAT32_MAX = 3.4028234663852886e38;
-
-/** Python ``IndexError``. */
-export class IndexError extends Error {
-  constructor(message?: string) {
-    super(message);
-    this.name = 'IndexError';
-  }
-}
-
-/** Python ``AttributeError``. */
-export class AttributeError extends Error {
-  constructor(message?: string) {
-    super(message);
-    this.name = 'AttributeError';
-  }
-}
-
-/** Python ``ImportError``. */
-export class ImportError extends Error {
-  constructor(message?: string) {
-    super(message);
-    this.name = 'ImportError';
-  }
-}
-
-/** Python ``KeyError``. */
-export class KeyError extends Error {
-  constructor(message?: string) {
-    super(message);
-    this.name = 'KeyError';
-  }
-}
-
-/** Python ``RuntimeError``. */
-export class RuntimeError extends Error {
-  constructor(message?: string) {
-    super(message);
-    this.name = 'RuntimeError';
-  }
-}
 
 /** Python ``repr`` of a JSON-like value (floats need an explicit ``float`` hint). */
 export function pyRepr(value: unknown): string {
