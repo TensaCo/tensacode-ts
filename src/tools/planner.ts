@@ -15,11 +15,12 @@ import type { FoundationOptions } from '../_internal/native/foundation.js';
 import { generateProposals, proposalLoss, type ProposalRecord } from '../_internal/proposals.js';
 import { RankingSession } from '../_internal/sessions/ranking.js';
 import { isDirectory } from '../_internal/retrieval.js';
-import { PlanExecutor, type PlanAction, type ReplanPolicy } from '../_internal/execution/planning.js';
+import { PlanExecutor, type ActionSignature, type PlanAction, type ReplanPolicy } from '../_internal/execution/planning.js';
 import { Chatbot } from './chatbot.js';
 
 export {
-  PlanStep, ExecutablePlan, OutcomeExperience, ReplanRequest, PlanExecutionResult, PlanExecutor,
+  PlanStep, ExecutablePlan, OutcomeExperience, ReplanRequest, PlanExecutionResult, PlanExecutor, withSignature,
+  type ActionSignature, type ActionParameter,
 } from '../_internal/execution/planning.js';
 
 export interface PlannerFoundationOptions extends Omit<FoundationOptions, 'head'> {
@@ -127,7 +128,10 @@ export class Planner extends PretrainedModule<Record<string, unknown>, JsonObjec
    * Calling it with state and an ExecutablePlan validates every step before
    * any effect, then executes at most ``maxSteps`` actions.
    */
-  newExecutor<S = any>(options: { actions: Record<string, PlanAction<S>> | Map<string, PlanAction<S>>; replan: ReplanPolicy<S>; maxSteps: number }): PlanExecutor<S> {
+  newExecutor<S = any>(options: {
+    actions: Record<string, PlanAction<S>> | Map<string, PlanAction<S>>; replan: ReplanPolicy<S>; maxSteps: number;
+    signatures?: Readonly<Record<string, ActionSignature>> | null;
+  }): PlanExecutor<S> {
     return new PlanExecutor<S>(options);
   }
 

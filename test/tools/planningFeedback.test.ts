@@ -10,6 +10,7 @@ import {
 } from '../../src/_internal/execution/planning.js';
 import { Planner } from '../../src/tools/planner.js';
 import type { JsonObject } from '../../src/_internal/json.js';
+import { ValueError } from '../../src/errors.js';
 import { scratch, tinyConfig } from './helpers.js';
 
 const temp = scratch();
@@ -102,13 +103,14 @@ describe('plan execution and feedback', () => {
     const policy = (request: ReplanRequest) => {
       expect(request.experiences[0]!.status).toBe('error');
       expect(request.state).toEqual({ local: [] });
-      throw new TypeError('model callback failed');
+      throw new ValueError('model callback failed');
     };
     const result = await new PlanExecutor({ actions: { effect }, replan: policy, maxSteps: 2 }).call({ local: [] }, plan('p', 'effect'));
     expect(external).toEqual(['effect']);
-    expect((result.experiences[0]!.observation as JsonObject).error_type).toBe('Error');
+    // Python records ``type(exc).__name__``: a JavaScript ``Error`` is Python's ``RuntimeError``.
+    expect((result.experiences[0]!.observation as JsonObject).error_type).toBe('RuntimeError');
     expect((result.experiences[0]!.observation as JsonObject).message).toBe('after external effect');
-    expect(result.policyErrors).toEqual(['TypeError: model callback failed']);
+    expect(result.policyErrors).toEqual(['ValueError: model callback failed']);
   });
 
   it('owns plan generation, checkpoints and observed-only loss', async () => {

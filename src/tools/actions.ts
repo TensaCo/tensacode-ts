@@ -127,6 +127,6 @@ export function actionLoop<S = unknown>(options: ActionLoopOptions<S>): ActionLo
 export type { ActionFunction, Chooser, ChooserResult } from '../_internal/execution/actionLoop.js';
 export { ActionLoop } from '../_internal/execution/actionLoop.js';
 export {
-  PlanStep, ExecutablePlan, OutcomeExperience, ReplanRequest, PlanExecutionResult, PlanExecutor,
-  type PlanAction, type ReplanPolicy, type PlanStopReason,
+  PlanStep, ExecutablePlan, OutcomeExperience, ReplanRequest, PlanExecutionResult, PlanExecutor, withSignature,
+  type PlanAction, type ReplanPolicy, type PlanStopReason, type ActionSignature, type ActionParameter,
 } from '../_internal/execution/planning.js';
