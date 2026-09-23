@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { Tensor, tensor } from '../../nn/tensor.js';
 import { ValueError } from '../../errors.js';
 import { parseJsonStrict, type JsonObject } from '../json.js';
-import { canonicalBackendJson, loadsThroughRust } from './serialization.js';
+import { canonicalBackendJson, loadsThroughRust, rustTokenizerString } from './serialization.js';
 import { buildModel, type TokenModel } from './models.js';
 import {
   buildDecoder, buildNormalizer, buildPostProcessor, buildPreTokenizer,
@@ -440,6 +440,17 @@ export class FastTokenizer {
       ...(paddingSide ? { paddingSide } : {}),
       ...(truncationSide ? { truncationSide } : {}),
     });
+  }
+
+  #rustJsonText: string | null = null;
+
+  /**
+   * Python ``backend_tokenizer.to_str()``: the backend JSON in Rust field
+   * order, as tools persist it in ``tokenizer_json`` fields.
+   */
+  get rustJsonText(): string {
+    this.#rustJsonText ??= rustTokenizerString(this.jsonText);
+    return this.#rustJsonText;
   }
 
   /** Python ``_tokenizer_config(tokenizer)``. */

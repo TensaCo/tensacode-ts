@@ -358,7 +358,7 @@ export class Chatbot extends PretrainedModule<unknown, string> {
     const config: JsonObject = {
       foundation_config: loaded.config.toDict(), untied_lm_head: untied,
       generation_config: deepCopy(loaded.generationConfig ?? generationConfigFromModel(loaded.config)),
-      tokenizer_json: loaded.tokenizer.jsonText, tokenizer_special_tokens: special,
+      tokenizer_json: loaded.tokenizer.rustJsonText, tokenizer_special_tokens: special,
       foundation: { repository: repo, revision: resolved, workspace_initialization: 'random' },
       ...(extra ?? {}),
     };

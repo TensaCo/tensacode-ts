@@ -266,14 +266,18 @@ others with `ValueError`.
   persisted callbacks (e.g. `combine`) always need explicit `configuration()`.
 - **Checkpoint RNG.** TypeScript checkpoints store the TensorCode generator state;
   PyTorch/Python RNG states cannot be restored in TypeScript (and vice versa).
-- **Tokenizer JSON.** Artifacts embed the canonical backend JSON (sorted keys),
-  as Python does. Wherever Python builds the backend with Rust
+- **Tokenizer JSON.** Tokenizer configurations embed the canonical backend JSON
+  (sorted keys), as Python does. Tools built from foundations persist
+  `backend_tokenizer.to_str()` in `tokenizer_json`, `verifier_tokenizer_json`
+  and Scene's `tokenizer.json`/`tokenizer_sha256`; TypeScript writes the same
+  bytes (`rustTokenizerString`: Rust struct field order, vocabularies in id
+  order, `serde_json` float formatting, unescaped non-ASCII text). Wherever Python builds the backend with Rust
   `Tokenizer.from_str`/`from_file` (tokenizer configurations, tool
   `tokenizer_json`, generic fast tokenizers), TypeScript reproduces the Rust
   `serde_json` float parsing, which can move Unigram scores by one ULP
   (`rustJsonF64`). Class-specific transformers tokenizers (T5, DeBERTa-v2,
   ALBERT, ...) rebuild their vocabulary exactly and are loaded exactly; for
-  `T5Tokenizer`, `DebertaV2Tokenizer` and `AlbertTokenizer` the pipeline that
+  `T5Tokenizer`, `DebertaV2Tokenizer`, `AlbertTokenizer` and `GPT2Tokenizer` the pipeline that
   transformers 5 rebuilds from `tokenizer_config.json` flags is reproduced as
   well (`src/_internal/tokenizers/serialization.ts`). Embedded
   tokenizer JSON, configurations and fingerprints of real foundations (for

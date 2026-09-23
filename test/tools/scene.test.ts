@@ -1,5 +1,5 @@
 /** Port of ``tests/models/test_scene.py`` (+ language-mode unavailability) with Python parity fixtures. */
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -204,6 +204,15 @@ describe('Scene with owned CLIP foundation perception', () => {
       expect(weight.equal(expected.get(name)!), name).toBe(true);
     }
     expect(imported.configuration().foundation_source).toEqual({ repo_id: path, revision: 'pinned' });
+    // Python persists ``backend_tokenizer.to_str()`` and hashes it.
+    expect(imported.configuration().tokenizer_sha256).toBe(source.configuration().tokenizer_sha256);
+    const directory = mkdtempSync(join(tmpdir(), 'tensorcode-scene-tokenizer-'));
+    try {
+      await imported.savePretrained(directory);
+      expect(readFileSync(join(directory, 'tokenizer.json'), 'utf8')).toBe(readFileSync(join(fixturePath('scene_foundation_python'), 'tokenizer.json'), 'utf8'));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
     expect(imported.call(sample()).candidates.length).toBe(2);
   });
 });

@@ -181,7 +181,7 @@ export class RetrievalEncoder extends PretrainedModule<readonly string[], Tensor
     const special: JsonObject = {};
     for (const [key, value] of Object.entries(loaded.tokenizer.specialTokensMap)) if (typeof value === 'string') special[key] = value;
     const result = new RetrievalEncoder({
-      foundation_config: loaded.config.toDict(), tokenizer_json: loaded.tokenizer.jsonText, tokenizer_special_tokens: special,
+      foundation_config: loaded.config.toDict(), tokenizer_json: loaded.tokenizer.rustJsonText, tokenizer_special_tokens: special,
       pooling, normalize: normalizeOption, max_tokens: maxTokens, freeze_foundation: freezeFoundation,
       foundation: { repository: repo, revision: resolved, pooling_contract: 'caller_declared_masked_mean_l2', weights: 'loaded_foundation' },
     });

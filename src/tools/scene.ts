@@ -35,6 +35,7 @@ import { CLIPModel } from '../_internal/native/clip.js';
 import { createNativeModel } from '../_internal/native/registry.js';
 import { loadNativeFoundation } from '../_internal/native/foundation.js';
 import { Tokenizer } from '../_internal/tokenizers/index.js';
+import { canonicalBackendJson, rustTokenizerString } from '../_internal/tokenizers/serialization.js';
 
 export const SCENE_LANGUAGE_UNAVAILABLE = 'Scene language mode (Idefics3/SmolVLM interpretation) is not available in the TypeScript port; use the Python package';
 
@@ -524,7 +525,7 @@ export class Scene extends PretrainedModule<SceneInputs, SceneReceipt> {
     if (!loaded.tokenizer) throw new ValueError('Scene foundation requires a tokenizer.json');
     const processor = parseJsonStrict(await readFile(join(loaded.directory, 'preprocessor_config.json'), 'utf8'));
     if (!isPlainObject(processor)) throw new ValueError('preprocessor_config.json must contain a JSON object');
-    const tokenizerJson = loaded.tokenizer.jsonText;
+    const tokenizerJson = loaded.tokenizer.rustJsonText;
     const config: JsonObject = {
       vocabulary: ['<foundation>'], dimensions, slots, steps,
       foundation_config: loaded.config.toDict(),
@@ -545,7 +546,8 @@ export class Scene extends PretrainedModule<SceneInputs, SceneReceipt> {
     if (this.rank instanceof FoundationSceneRank) {
       const path = join(directory, 'tokenizer.json');
       if (await isSymlink(path)) await unlink(path);
-      await writeFile(path, this.rank.tokenizerJson, 'utf8');
+      // Python writes ``Tokenizer.from_str(tokenizer_json).to_str()``.
+      await writeFile(path, rustTokenizerString(canonicalBackendJson(this.rank.tokenizerJson, { rustParsed: true })), 'utf8');
     }
   }
 

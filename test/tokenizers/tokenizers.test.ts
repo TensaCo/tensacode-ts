@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FastTokenizer } from '../../src/_internal/tokenizers/index.js';
-import { pythonFloatRepr, sha256Hex } from '../../src/_internal/json.js';
-import { rustJsonF64 } from '../../src/_internal/tokenizers/serialization.js';
+import { canonicalizeJsonText, pythonFloatRepr, sha256Hex } from '../../src/_internal/json.js';
+import { rustFloatRepr, rustJsonF64, rustTokenizerString } from '../../src/_internal/tokenizers/serialization.js';
 import { cachedSnapshot } from '../helpers/hub.js';
 
 interface Encoding { text: string; ids: number[]; tokens: string[]; no_special: number[]; decoded: string; decoded_skip: string }
@@ -19,6 +19,7 @@ interface Case {
   canonical_json?: string;
   snapshot?: string;
   tokenizer_class?: string;
+  rust_json_sha256?: string;
 }
 
 const fixture = (name: string): Record<string, Case> => JSON.parse(readFileSync(new URL(`../fixtures/${name}`, import.meta.url), 'utf8'));
@@ -71,8 +72,35 @@ describe('cached Hugging Face tokenizers', () => {
     it.skipIf(!directory)(`${repo} (${record.tokenizer_class})`, async () => {
       const tokenizer = await FastTokenizer.fromDirectory(directory!);
       check(tokenizer, record);
+      expect(sha256Hex(tokenizer.rustJsonText)).toBe(record.rust_json_sha256);
     });
   }
+});
+
+describe('Rust Tokenizer.to_str() serialization', () => {
+  const sorted = (text: string) => canonicalizeJsonText(text, { sortKeys: true, separators: [',', ':'] });
+
+  it('reproduces every supported component, vocabulary order and float format', () => {
+    const cases = JSON.parse(readFileSync(new URL('../fixtures/tokenizers_rust_serialization.json', import.meta.url), 'utf8')) as Record<string, string>;
+    expect(Object.keys(cases).length).toBeGreaterThan(5);
+    for (const [name, rust] of Object.entries(cases)) expect(rustTokenizerString(sorted(rust)), name).toBe(rust);
+  });
+
+  it('reproduces trained tokenizers with padding and truncation', () => {
+    for (const [name, record] of Object.entries(fixture('tokenizers_synthetic.json'))) {
+      expect(rustTokenizerString(sorted(record.tokenizer_json!)), name).toBe(record.tokenizer_json);
+    }
+  });
+
+  it('formats floats like serde_json', () => {
+    const cases: [number, string][] = [
+      [0, '0.0'], [-0, '-0.0'], [-1, '-1.0'], [0.1, '0.1'], [1e-5, '0.00001'], [1e-6, '1e-6'], [1.5e-7, '1.5e-7'],
+      [1234567890123456.8, '1234567890123456.8'], [1e16, '1e+16'], [-1.2345678901234566e17, '-1.2345678901234566e+17'], [5e-324, '5e-324'],
+    ];
+    for (const [value, text] of cases) expect(rustFloatRepr(value), String(value)).toBe(text);
+    expect(rustFloatRepr(0.1, true)).toBe('0.1');
+    expect(rustFloatRepr(0.123456789, true)).toBe('0.12345679');
+  });
 });
 
 describe('Rust tokenizers float parsing (serde_json without float_roundtrip)', () => {

@@ -133,7 +133,10 @@ def cached():
             continue
         snapshot = snapshots[0]
         tokenizer = AutoTokenizer.from_pretrained(repo, revision=snapshot.name, local_files_only=True, use_fast=True)
+        # Tools persist the fresh ``backend_tokenizer.to_str()`` (Rust field order) in ``tokenizer_json``.
+        rust_json = tokenizer.backend_tokenizer.to_str()
         record = cases(tokenizer, TEXTS, special_inline=inline, pairs=pairs)
+        record['rust_json_sha256'] = hashlib.sha256(rust_json.encode()).hexdigest()
         record['tokenizer_class'] = type(tokenizer).__name__
         record['snapshot'] = snapshot.name
         record['python_canonical_equals_file_canonical'] = canonical(tokenizer) == json.dumps(
@@ -142,6 +145,39 @@ def cached():
     write_json('tokenizers_cached.json', result)
 
 
+def rust_serialization():
+    """``Tokenizer.to_str()`` of every supported component and of float scores."""
+    from tokenizers import AddedToken, decoders, models, normalizers, pre_tokenizers, processors, Regex, Tokenizer
+    result = {}
+    tokenizer = Tokenizer(models.BPE(vocab={'b': 1, 'a': 0, 'ab': 2, 'é': 3}, merges=[], dropout=0.1, unk_token='a',
+                                     continuing_subword_prefix='##', end_of_word_suffix='</w>', fuse_unk=True, byte_fallback=True))
+    tokenizer.normalizer = normalizers.Sequence([
+        normalizers.Replace(Regex(r'\s+'), ' '), normalizers.Replace('x', 'y'), normalizers.Strip(), normalizers.Prepend('▁'),
+        normalizers.BertNormalizer(strip_accents=False), normalizers.NFKC(), normalizers.Lowercase(), normalizers.StripAccents()])
+    tokenizer.pre_tokenizer = pre_tokenizers.Sequence([
+        pre_tokenizers.Split(Regex(' '), 'isolated', invert=True), pre_tokenizers.CharDelimiterSplit('\t'), pre_tokenizers.Digits(True),
+        pre_tokenizers.FixedLength(3), pre_tokenizers.Punctuation(), pre_tokenizers.Metaspace(prepend_scheme='first', split=False),
+        pre_tokenizers.ByteLevel(add_prefix_space=False), pre_tokenizers.BertPreTokenizer(), pre_tokenizers.Whitespace(), pre_tokenizers.UnicodeScripts()])
+    tokenizer.post_processor = processors.Sequence([
+        processors.RobertaProcessing(('</s>', 2), ('<s>', 0)), processors.BertProcessing(('[SEP]', 2), ('[CLS]', 1)), processors.ByteLevel(),
+        processors.TemplateProcessing(single='[CLS] $A [SEP]', pair='[CLS] $A [SEP] $B:1 [SEP]:1', special_tokens=[('[SEP]', 2), ('[CLS]', 1), ('A', 5)])])
+    tokenizer.decoder = decoders.Sequence([
+        decoders.Replace('▁', ' '), decoders.Strip(' ', 1, 0), decoders.CTC(), decoders.BPEDecoder(), decoders.WordPiece(),
+        decoders.Fuse(), decoders.ByteFallback(), decoders.Metaspace(), decoders.ByteLevel()])
+    tokenizer.add_special_tokens([AddedToken('<x>\n"\\\x01\x7f😀', lstrip=True, single_word=True)])
+    tokenizer.add_tokens(['ü'])
+    result['components'] = tokenizer.to_str()
+    for dropout in [0.25, 0.3, 1e-7, 0.123456789]:
+        result[f'dropout_{dropout}'] = Tokenizer(models.BPE(vocab={'a': 0}, merges=[], dropout=dropout)).to_str()
+    scores = [-m * 10 ** k for k in range(-12, 26) for m in [1, 1.5, 1.2345678901234567, 9.999]]
+    scores += [-0.0, -5e-324, -1.7976931348623157e308, 0.0, 3.0]
+    result['unigram_scores'] = Tokenizer(models.Unigram([(f't{i}', v) for i, v in enumerate(scores)], 0, True)).to_str()
+    result['wordlevel'] = Tokenizer(models.WordLevel(vocab={'b': 1, 'a': 0, '[UNK]': 2}, unk_token='[UNK]')).to_str()
+    result['wordpiece'] = Tokenizer(models.WordPiece(vocab={'b': 1, 'a': 0, '[UNK]': 2}, max_input_chars_per_word=7)).to_str()
+    write_json('tokenizers_rust_serialization.json', result)
+
+
 def generate():
     synthetic()
     cached()
+    rust_serialization()

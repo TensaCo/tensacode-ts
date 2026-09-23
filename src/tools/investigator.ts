@@ -516,7 +516,7 @@ export class Investigator extends PretrainedModule<Record<string, unknown>, Json
     for (const [key, value] of Object.entries(verifier.tokenizer.specialTokensMap)) if (typeof value === 'string') special[key] = value;
     Object.assign(config, {
       generator: generator.configuration(), verifier_config: verifier.config.toDict(),
-      verifier_tokenizer_json: verifier.tokenizer.jsonText, verifier_tokenizer_special_tokens: special,
+      verifier_tokenizer_json: verifier.tokenizer.rustJsonText, verifier_tokenizer_special_tokens: special,
       verifier_labels: verifierLabels as unknown as JsonObject, verifier_foundation: { repository: verifierRepo, revision: resolved },
     });
     const result = await (Investigator.fromFoundation as (this: new (config: JsonObject) => T, repo: string, options: InvestigatorFoundationOptions) => Promise<T>)

@@ -347,7 +347,7 @@ export async function rankingFromFoundation<T extends Module & { rank: RankOpera
   const config: JsonObject = {
     ...(toolOptions ?? {}),
     foundation_config: loaded.config.toDict(),
-    tokenizer_json: loaded.tokenizer.jsonText,
+    tokenizer_json: loaded.tokenizer.rustJsonText,
     tokenizer_special_tokens: special,
     foundation: { repository: repo, revision: resolved, workspace_initialization: 'random' },
   };
