@@ -1,0 +1,21 @@
+{
+  "config": {
+    "architecture_version": 1,
+    "cache_records": 0,
+    "dimensions": 8,
+    "max_proposals": 16,
+    "max_tokens": 256,
+    "proposal_template_version": 1,
+    "slots": 2,
+    "steps": 1,
+    "verification_scope": "source",
+    "vocabulary": [
+      "a",
+      "b",
+      "c"
+    ]
+  },
+  "format": "tensorcode.pretrained",
+  "tool": "tensorcode.tools.investigator.Investigator",
+  "version": 1
+}

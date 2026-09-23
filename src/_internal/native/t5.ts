@@ -7,7 +7,7 @@ import { activationModule, type ActivationModule } from './activations.js';
 import { Module } from '../../nn/module.js';
 import { Tensor, tensor, zeros } from '../../nn/tensor.js';
 import { Dropout, Embedding, Linear, ModuleList } from '../../nn/layers.js';
-import { crossEntropy, rmsNorm } from '../../nn/ops/nn.js';
+import { crossEntropy } from '../../nn/ops/nn.js';
 import { cat } from '../../nn/ops/shape.js';
 import { Parameter } from '../../nn/tensor.js';
 import { noGrad } from '../../nn/autograd.js';
@@ -29,8 +29,16 @@ export class T5LayerNorm extends Module {
     this.eps = eps;
   }
 
+  /**
+   * transformers ``T5LayerNorm``: the variance is always accumulated in
+   * float32 (also for float64 inputs), and half-precision weights cast the
+   * normalized states to their dtype before scaling.
+   */
   forward(hidden: Tensor): Tensor {
-    return rmsNorm(hidden, this.weight, this.eps);
+    const variance = hidden.to('float32').square().mean(-1, true);
+    let normalized = hidden.mul(variance.add(this.eps).rsqrt());
+    if (this.weight.dtype === 'float16' || this.weight.dtype === 'bfloat16') normalized = normalized.to(this.weight.dtype);
+    return this.weight.mul(normalized);
   }
 }
 

@@ -58,16 +58,17 @@ describe('additional finite-difference gradient checks', () => {
     }
     const ids = tensor([[3, 5, 7, 0], [4, 6, 0, 0]], { dtype: 'int64' });
     const mask = tensor([[1, 1, 1, 0], [1, 1, 0, 0]], { dtype: 'int64' });
-    const checks: [() => Tensor, Parameter][] = [
-      [() => bert.forward({ inputIds: ids, attentionMask: mask }).lastHiddenState.sum(), bert.encoder.layer.at(0).attention.self.query.weight],
+    // transformers accumulates the T5 layer-norm variance in float32 even for
+    // float64 weights, so its finite differences need a larger step.
+    const checks: [() => Tensor, Parameter, number, number][] = [
+      [() => bert.forward({ inputIds: ids, attentionMask: mask }).lastHiddenState.sum(), bert.encoder.layer.at(0).attention.self.query.weight, 1e-6, 1e-6],
       [() => t5.forward({ inputIds: ids, attentionMask: mask, labels: tensor([[2, 9, 1], [8, 1, -100]], { dtype: 'int64' }) }).loss!,
-        t5.encoder.block.at(0).layer.at(0).getSubmodule('SelfAttention.relative_attention_bias').getParameter('weight')!],
+        t5.encoder.block.at(0).layer.at(0).getSubmodule('SelfAttention.relative_attention_bias').getParameter('weight')!, 1e-3, 1e-4],
     ];
-    for (const [loss, parameter] of checks) {
+    for (const [loss, parameter, eps, atol] of checks) {
       parameter.grad = null;
       loss().backward();
       const analytic = parameter.grad!.toArray();
-      const eps = 1e-6;
       noGrad(() => {
         for (const index of [0, 1, Math.floor(parameter.numel / 2), parameter.numel - 1]) {
           const original = parameter.data[index]!;
@@ -76,7 +77,7 @@ describe('additional finite-difference gradient checks', () => {
           parameter.data[index] = original - eps;
           const minus = loss().item();
           parameter.data[index] = original;
-          expect(Math.abs((plus - minus) / (2 * eps) - analytic[index]!)).toBeLessThan(1e-6 + 1e-4 * Math.abs(analytic[index]!));
+          expect(Math.abs((plus - minus) / (2 * eps) - analytic[index]!)).toBeLessThan(atol + 1e-4 * Math.abs(analytic[index]!));
         }
       });
     }

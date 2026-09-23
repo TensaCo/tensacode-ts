@@ -188,6 +188,24 @@ export class Tensor {
     return this;
   }
 
+  /**
+   * @internal Replace this tensor's values and dtype in place (PyTorch
+   * ``param.data = param.data.to(dtype)``): identity, and therefore module ties
+   * and optimizer references, are preserved. The storage version advances so
+   * traces see the change; the gradient is dropped.
+   */
+  _replaceData(data: Storage, dtype: DType): void {
+    if (this._gradFn !== null) throw new Error('only leaf tensors can replace their data');
+    if (data.length !== this.numel) throw new RangeError('replacement data must keep the element count');
+    if (usesFloat32Storage(dtype) !== (data instanceof Float32Array)) {
+      throw new TypeError(`dtype ${dtype} requires ${usesFloat32Storage(dtype) ? 'Float32Array' : 'Float64Array'} storage`);
+    }
+    const version = this._storage.version + 1;
+    (this as { dtype: DType }).dtype = dtype;
+    this._storage = { data, version };
+    this.grad = null;
+  }
+
   /** A tensor sharing storage but excluded from gradient recording. */
   detach(): Tensor {
     return new Tensor(this.data, this.shape, this.dtype, this._storage);

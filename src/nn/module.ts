@@ -8,7 +8,7 @@
  * ``removeDuplicate`` is false.
  */
 import { noGrad } from './autograd.js';
-import { castValue, roundToDType } from './dtype.js';
+import { castValue, isFloatingDType, roundToDType, type DType } from './dtype.js';
 import { formatShape, shapesEqual } from './shape.js';
 import { Parameter, Tensor } from './tensor.js';
 
@@ -112,7 +112,9 @@ export class Module {
     const owner = index < 0 ? this : this.getSubmodule(path.slice(0, index));
     const name = index < 0 ? path : path.slice(index + 1);
     if (!owner._parameters.has(name)) throw new Error(`no parameter ${path}`);
+    const previous = owner._parameters.get(name) ?? null;
     owner._parameters.set(name, parameter);
+    rebindFields(owner, previous, parameter);
     owner.onRegistryChange();
   }
 
@@ -122,7 +124,9 @@ export class Module {
     const owner = index < 0 ? this : this.getSubmodule(path.slice(0, index));
     const name = index < 0 ? path : path.slice(index + 1);
     if (!owner._buffers.has(name)) throw new Error(`no buffer ${path}`);
+    const previous = owner._buffers.get(name) ?? null;
     owner._buffers.set(name, buffer);
+    rebindFields(owner, previous, buffer);
     owner.onRegistryChange();
   }
 
@@ -276,6 +280,52 @@ export class Module {
     return { missingKeys, unexpectedKeys };
   }
 
+  // ------------------------------------------------------------ dtype
+  /**
+   * Cast floating-point parameters and buffers to ``dtype`` (``module.to(dtype)``).
+   * Integer and boolean tensors are unchanged. As in PyTorch, parameters keep
+   * their identity (their data is replaced in place), so ties with modules
+   * outside this one and optimizer references are preserved; buffers are
+   * replaced by converted tensors.
+   */
+  to(dtype: DType): this {
+    if (!isFloatingDType(dtype)) throw new TypeError(`Module.to expects a floating-point dtype, got ${dtype}`);
+    const converted = new Map<Tensor, Tensor>();
+    const convert = (value: Tensor, make: () => Tensor): Tensor => {
+      let replacement = converted.get(value);
+      if (!replacement) {
+        replacement = make();
+        converted.set(value, replacement);
+      }
+      return replacement;
+    };
+    for (const parameter of this.parameters()) {
+      if (!parameter.isFloatingPoint || parameter.dtype === dtype) continue;
+      parameter._replaceData(noGrad(() => parameter.to(dtype)).data, dtype);
+    }
+    for (const module of this.modules()) {
+      let changed = false;
+      for (const [name, value] of module._buffers) {
+        if (value === null || !value.isFloatingPoint || value.dtype === dtype) continue;
+        const replacement = convert(value, () => noGrad(() => value.to(dtype)));
+        module._buffers.set(name, replacement);
+        rebindFields(module, value, replacement);
+        changed = true;
+      }
+      if (changed) module.onRegistryChange();
+    }
+    return this;
+  }
+
+  /** ``module.double()``. */
+  double(): this { return this.to('float64'); }
+  /** ``module.float()``. */
+  float(): this { return this.to('float32'); }
+  /** ``module.half()``. */
+  half(): this { return this.to('float16'); }
+  /** ``module.bfloat16()``. */
+  bfloat16(): this { return this.to('bfloat16'); }
+
   // ------------------------------------------------------------ modes
   /** Set training mode recursively. Subclasses may override to pin modes. */
   train(mode = true): this {
@@ -324,6 +374,20 @@ export function publicAttributes(value: object): Record<string, unknown> {
     result[key] = item;
   }
   return result;
+}
+
+/**
+ * Point own fields that cached a replaced registered tensor at its
+ * replacement, so subclasses holding ``readonly weight: Parameter`` fields
+ * never read a stale tensor after ``setParameterAt``/``setBufferAt``/``to``.
+ */
+function rebindFields(owner: Module, previous: Tensor | null, replacement: Tensor | null): void {
+  if (previous === null || previous === replacement) return;
+  for (const key of Object.keys(owner)) {
+    if ((owner as unknown as Record<string, unknown>)[key] === previous) {
+      (owner as unknown as Record<string, unknown>)[key] = replacement;
+    }
+  }
 }
 
 function assertName(name: string): void {
