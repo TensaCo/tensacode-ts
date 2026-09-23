@@ -8,6 +8,7 @@
  * ``fromModel`` explicitly wraps an external provider without owned training
  * or artifacts, and ``fromFoundation`` imports pretrained native weights.
  */
+import type { DType } from '../../nn/dtype.js';
 import { Operation, type Context } from '../../ops/base.js';
 import type { Module, StateDict, LoadStateDictResult } from '../../nn/module.js';
 import type { Parameter, Tensor } from '../../nn/tensor.js';
@@ -33,6 +34,8 @@ export type ExternalModel = object | ((messages: readonly Message[]) => unknown)
 /** Options of ``fromFoundation`` (Hub options plus the semantic/decoding/generation ``config``). */
 export interface FromFoundationOptions extends Omit<HubOptions, 'allowPatterns' | 'fetch' | 'endpoint'> {
   config?: JsonObject | null;
+  /** Parameter dtype (transformers ``dtype``; default ``'auto'``: the checkpoint's dtype). */
+  dtype?: DType | 'auto';
 }
 
 /** Private construction routes (``from_model``/``from_foundation``); not constructible outside this module. */

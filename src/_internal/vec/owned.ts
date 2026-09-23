@@ -8,6 +8,7 @@
  * configuration validation, the linear/MLP/native-transformer networks,
  * latent-prefix context, losses and the supervised ``Objective``.
  */
+import type { DType } from '../../nn/dtype.js';
 import { Tensor, tensor } from '../../nn/tensor.js';
 import { GELU, Linear, Sequential, type TensorModule } from '../../nn/layers.js';
 import { cat } from '../../nn/ops/shape.js';
@@ -144,6 +145,8 @@ export interface FromModuleOptions {
 
 export interface OwnedFoundationOptions {
   inputSpace: Space | JsonObject;
+  /** Parameter dtype (transformers ``dtype``; default ``'auto'``: the checkpoint's dtype). */
+  dtype?: DType | 'auto';
   revision?: string | null;
   outputSpace?: Space | JsonObject;
   labels?: readonly string[];
@@ -333,7 +336,8 @@ export abstract class OwnedMap<O = unknown> extends LatentOperation<unknown, O> 
       native_config: loaded.config.toDiffDict(),
       foundation: { repo: String(repo), revision, input_bridge: 'untrained', output_head: 'untrained' },
     });
-    return new this(config, ownedInternals({ nativeModel: loaded.model })).eval();
+    // The untrained input bridge and head start in the native parameter dtype.
+    return new this(config, ownedInternals({ nativeModel: loaded.model })).to(loaded.model.parameters()[0]?.dtype ?? 'float32').eval();
   }
 
   override configuration(): JsonObject {

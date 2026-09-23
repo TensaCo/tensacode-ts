@@ -51,6 +51,19 @@ function labelMaps(values: JsonObject, input: JsonObject): void {
   delete values.num_labels;
 }
 
+/**
+ * Legacy generation parameters that transformers 5.17 model configurations
+ * drop on construction (they belong to ``GenerationConfig``).
+ */
+const LEGACY_GENERATION_KEYS = new Set([
+  'assistant_confidence_threshold', 'assistant_lookbehind', 'bad_words_ids', 'begin_suppress_tokens', 'diversity_penalty',
+  'do_sample', 'early_stopping', 'encoder_no_repeat_ngram_size', 'encoder_repetition_penalty', 'epsilon_cutoff', 'eta_cutoff',
+  'exponential_decay_length_penalty', 'forced_bos_token_id', 'forced_eos_token_id', 'length_penalty', 'max_length',
+  'min_length', 'no_repeat_ngram_size', 'num_assistant_tokens', 'num_assistant_tokens_schedule', 'num_beam_groups',
+  'num_beams', 'num_return_sequences', 'output_scores', 'remove_invalid_values', 'repetition_penalty',
+  'return_dict_in_generate', 'suppress_tokens', 'target_lookbehind', 'temperature', 'top_k', 'top_p', 'typical_p',
+]);
+
 function normalize(modelType: string, input: JsonObject): JsonObject {
   const defaults = CLASS_CONFIG_DEFAULTS[modelType];
   if (!defaults) throw new ValueError(`unsupported native model_type ${JSON.stringify(modelType)}`);
@@ -58,13 +71,26 @@ function normalize(modelType: string, input: JsonObject): JsonObject {
   const values = deepCopy(defaults);
   const nested = NESTED[modelType] ?? {};
   for (const [key, value] of Object.entries(input)) {
-    if (key === 'model_type' || key === 'transformers_version' || key in nested) continue;
+    if (key === 'model_type' || key === 'transformers_version' || key in nested || key === 'torch_dtype') continue;
+    if (LEGACY_GENERATION_KEYS.has(key)) continue;
+    if (key.endsWith('_config_dict') && key.slice(0, -'_dict'.length) in nested) continue;
     values[aliases[key] ?? key] = deepCopy(value as JsonValue);
   }
+  // ``torch_dtype`` is the legacy spelling of ``dtype``.
+  if (input.dtype === undefined && input.torch_dtype !== undefined) values.dtype = deepCopy(input.torch_dtype as JsonValue);
   labelMaps(values, input);
   for (const [key, nestedType] of Object.entries(nested)) {
     const supplied = input[key];
-    const child = normalize(nestedType, isPlainObject(supplied) ? supplied as JsonObject : {});
+    let childInput = isPlainObject(supplied) ? supplied as JsonObject : {};
+    // CLIP ``text_config_dict``/``vision_config_dict`` (legacy): a complete
+    // configuration built from the dict overrides ``text_config``/``vision_config``.
+    const legacy = input[`${key}_dict`];
+    if (isPlainObject(legacy)) {
+      const complete = normalize(nestedType, legacy as JsonObject);
+      delete complete.transformers_version;
+      childInput = { ...childInput, ...complete };
+    }
+    const child = normalize(nestedType, childInput);
     delete child.transformers_version;
     values[key] = child;
   }
@@ -153,9 +179,10 @@ export class NativeConfig {
   /**
    * ``AutoConfig.from_pretrained`` for a downloaded ``config.json``: always
    * normalized (re-stamped with this transformers version), ``_name_or_path``
-   * recorded and ``dtype`` set to the float32 weights TypeScript loads.
+   * recorded and ``dtype`` (also on sub-configurations) set to the dtype the
+   * weights are loaded in.
    */
-  static fromPretrainedDict(data: unknown, nameOrPath: string): NativeConfig {
+  static fromPretrainedDict(data: unknown, nameOrPath: string, dtype: string = 'float32'): NativeConfig {
     if (!isPlainObject(data)) throw new ValueError('config.json must contain a JSON object');
     const input = deepCopy(data as JsonObject);
     const modelType = input.model_type;
@@ -165,7 +192,10 @@ export class NativeConfig {
     for (const key of ['transformers_version', 'torch_dtype', '_commit_hash', '_name_or_path']) delete input[key];
     const values = normalize(modelType, input);
     values._name_or_path = nameOrPath;
-    values.dtype = 'float32';
+    values.dtype = dtype;
+    for (const key of Object.keys(NESTED[modelType] ?? {})) {
+      if (isPlainObject(values[key])) (values[key] as JsonObject).dtype = dtype;
+    }
     return new NativeConfig(modelType, values, null);
   }
 

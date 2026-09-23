@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { Parameter, Tensor } from '../../nn/tensor.js';
 import { noGrad } from '../../nn/autograd.js';
 import { deserializeSafetensors } from '../../nn/safetensors.js';
+import { isDType, isFloatingDType, roundToDType, type DType } from '../../nn/dtype.js';
 import { ValueError } from '../../errors.js';
 import { parseJsonStrict, type JsonObject } from '../json.js';
 import { resolveArtifactDirectory, type HubOptions } from '../hub.js';
@@ -40,6 +41,12 @@ export interface FoundationOptions extends Omit<HubOptions, 'allowPatterns'> {
   restoreRawTieFlags?: boolean;
   /** Override configuration fields before construction (for example ``num_labels``). */
   configOverrides?: JsonObject;
+  /**
+   * Parameter dtype (transformers ``dtype``). ``'auto'`` (the default, as in
+   * transformers 5) uses ``config.json``'s ``dtype``/``torch_dtype``, else the
+   * first floating-point checkpoint tensor.
+   */
+  dtype?: DType | 'auto';
 }
 
 export interface LoadedFoundation<T extends NativeModel = NativeModel> {
@@ -162,21 +169,45 @@ export function loadCheckpointState(model: NativeModel, tensors: Map<string, Ten
       if (!source) continue;
       const target = value.data;
       const data = source.data;
-      for (let index = 0; index < target.length; index += 1) target[index] = data[index]!;
+      if (value.dtype === source.dtype || value.dtype === 'float64' || (value.dtype === 'float32' && source.dtype !== 'float64')) {
+        for (let index = 0; index < target.length; index += 1) target[index] = data[index]!;
+      } else {
+        for (let index = 0; index < target.length; index += 1) target[index] = roundToDType(value.dtype, data[index]!);
+      }
       value._storage.version += 1;
     }
   });
   return { unexpected };
 }
 
+/** transformers ``_get_dtype``: an explicit dtype, else ``config.json``, else the checkpoint's first float tensor. */
+function resolveDtype(requested: DType | 'auto', rawConfig: JsonObject, weights: Map<string, Tensor>): DType {
+  if (requested !== 'auto') {
+    if (!isDType(requested) || !isFloatingDType(requested)) throw new ValueError(`dtype must be 'auto' or a floating-point dtype, got ${JSON.stringify(requested)}`);
+    return requested;
+  }
+  const declared = rawConfig.dtype ?? rawConfig.torch_dtype;
+  if (declared !== undefined && declared !== null) {
+    if (typeof declared !== 'string' || !isDType(declared) || !isFloatingDType(declared)) {
+      throw new ValueError(`unsupported foundation dtype ${JSON.stringify(declared)}`);
+    }
+    return declared;
+  }
+  for (const value of weights.values()) if (value.isFloatingPoint) return value.dtype;
+  return 'float32';
+}
+
 /** ``AutoModel*.from_pretrained(source)`` for supported native architectures. */
 export async function loadNativeFoundation(source: string, options: FoundationOptions = {}): Promise<LoadedFoundation> {
-  const { head = 'base', addPoolingLayer, tokenizer: wantTokenizer, restoreRawTieFlags, configOverrides, ...hub } = options;
+  const { head = 'base', addPoolingLayer, tokenizer: wantTokenizer, restoreRawTieFlags, configOverrides, dtype: requested = 'auto', ...hub } = options;
   const { path } = await resolveArtifactDirectory(source, { ...hub, allowPatterns: FOUNDATION_FILES });
   const rawConfig = parseJsonStrict(await readFile(join(path, 'config.json'), 'utf8')) as JsonObject;
-  let config = NativeConfig.fromPretrainedDict({ ...rawConfig, ...(configOverrides ?? {}) }, source);
+  const weights = await readWeights(path);
+  const dtype = resolveDtype(requested, rawConfig, weights);
+  let config = NativeConfig.fromPretrainedDict({ ...rawConfig, ...(configOverrides ?? {}) }, source, dtype);
   const model = createNativeModel(config, head, addPoolingLayer === undefined ? {} : { addPoolingLayer });
-  const { unexpected } = loadCheckpointState(model, await readWeights(path));
+  if (dtype !== 'float32') model.to(dtype);
+  const { unexpected } = loadCheckpointState(model, weights);
   model.eval();
   if (restoreRawTieFlags) {
     const overrides: JsonObject = {};

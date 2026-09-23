@@ -54,16 +54,17 @@ describe('cached real foundations', () => {
     }
     copyFileSync(join(clipWeights!, 'model.safetensors'), join(directory, 'model.safetensors'));
     const scene = await Scene.fromFoundation(directory, { revision: null, dimensions: 8 });
-    // Core gap: NativeConfig.fromPretrainedDict keeps legacy generation keys in
-    // CLIP's nested text/vision configs, so ``foundation_config`` is compared by
-    // its top-level architecture fields only.
-    const { tokenizer_sha256: sha, foundation_source: source, foundation_config: native, ...configuration } = scene.configuration();
+    const { tokenizer_sha256: sha, foundation_source: source, ...configuration } = scene.configuration();
     void sha;
-    const { foundation_config: expectedNative, foundation_source: expectedSource, ...expected } = record.configuration;
+    const { foundation_source: expectedSource, ...expected } = record.configuration;
     void expectedSource;
     expect(source).toEqual({ repo_id: directory, revision: null });
-    expect(configuration).toEqual(expected);
-    for (const key of ['projection_dim', 'logit_scale_init_value', 'model_type']) expect((native as any)[key]).toEqual(expectedNative[key]);
+    // Including the nested text/vision configurations, which drop legacy
+    // generation keys and carry the loaded dtype as in transformers.
+    // ``_name_or_path`` records each run's own temporary foundation directory.
+    expect((configuration.foundation_config as any)._name_or_path).toBe(directory);
+    expect({ ...configuration, foundation_config: { ...(configuration.foundation_config as object), _name_or_path: null } })
+      .toEqual({ ...expected, foundation_config: { ...expected.foundation_config, _name_or_path: null } });
     const rank = scene.rank as FoundationSceneRank;
     expect(rank.tokens('a photo of a cat').toArray()).toEqual(record.tokens);
     const [patches, imageGlobal] = rank.encodeImage(fromJson(record.pixels));

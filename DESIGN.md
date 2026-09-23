@@ -75,7 +75,10 @@ them natively with transformers **5.17** parameter names and numerics:
   reconstruct exactly. `nativeConfig()` mirrors Python `_native_config`.
 - `loadNativeFoundation(repo, {head, revision, localFilesOnly, ...})` mirrors
   `AutoModel*.from_pretrained(use_safetensors=True)`: Hub download, config
-  normalization (`_name_or_path`, `dtype`), `base_model_prefix` stripping, legacy
+  normalization (`_name_or_path`, `dtype`, dropped legacy generation keys, CLIP
+  `*_config_dict`), transformers 5 `dtype="auto"` (the dtype in `config.json`,
+  else the checkpoint's first floating tensor; the text and vector foundation
+  factories also accept an explicit `dtype`), `base_model_prefix` stripping, legacy
   ViT renames, transformers' tie/untie rules (flan-T5: embeddings tied, `lm_head`
   untied), missing/mismatched weight rejection, tokenizer and generation config.
 - `generateSeq2Seq(model, inputs, settings, {generationConfig})` takes

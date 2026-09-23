@@ -6,6 +6,7 @@
  * enter only ``loss``. Configuration embeds the complete fast tokenizer and
  * native architecture, so artifacts reconstruct offline.
  */
+import type { DType } from '../../nn/dtype.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Module } from '../../nn/module.js';
@@ -65,6 +66,12 @@ export interface TextFoundationHubOptions {
   endpoint?: string | null;
   trustRemoteCode?: boolean;
   useSafetensors?: boolean;
+  /** Parameter dtype (transformers ``dtype``; default ``'auto'``: the checkpoint's dtype). */
+  dtype?: DType | 'auto';
+}
+
+function nativeDtype(model: NativeModel): DType {
+  return model.parameters()[0]?.dtype ?? 'float32';
 }
 
 /** Python ``_load_foundation``: native weights, raw tie flags and the fast tokenizer. */
@@ -169,7 +176,8 @@ export class TextEncoder extends LatentOperation<string | readonly string[], Lat
       output_space: spaceJson(space),
       foundation: { repo: String(repo), revision },
     };
-    return new this(config, { [TEXT_INTERNAL]: true, model: loaded.model }).eval();
+    // New owned bridges start in the native parameter dtype (Python creates them with it).
+    return new this(config, { [TEXT_INTERNAL]: true, model: loaded.model }).to(nativeDtype(loaded.model)).eval();
   }
 
   override configuration(): JsonObject {
@@ -388,7 +396,8 @@ export class TextDecoder extends LatentOperation<Latent, string | string[]> {
       generation: (generation ?? { max_new_tokens: 32 }) as JsonValue,
       foundation: { repo: String(repo), revision },
     };
-    return new this(config, { [TEXT_INTERNAL]: true, model: loaded.model }).eval();
+    // New owned bridges start in the native parameter dtype (Python creates them with it).
+    return new this(config, { [TEXT_INTERNAL]: true, model: loaded.model }).to(nativeDtype(loaded.model)).eval();
   }
 
   /** Sampling generations are not replayable. */

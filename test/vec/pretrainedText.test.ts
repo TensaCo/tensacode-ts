@@ -422,3 +422,32 @@ describe('pretrained text conditioning (remaining tests/vec/test_pretrained_text
     if (kind === 'decoder') expect(Number.isFinite(Trainer.fromTool(restored as TextDecoder).step(replayed))).toBe(true);
   });
 });
+
+describe('foundation dtype (transformers dtype="auto" and explicit dtype)', () => {
+  it('foundation bridge matches the native dtype', async () => {
+    const decoder = await TextDecoder.fromFoundation(T5, { inputSpace: new Space('input', 3, { organization: 'sequence' }), dtype: 'float64' });
+    expect((decoder.projection as any).weight.dtype).toBe('float64');
+    expect(decoder.model.parameters().every((parameter) => parameter.dtype === 'float64')).toBe(true);
+    expect((decoder.configuration().native_config as any).dtype).toBe('float64');
+    expect(Number.isFinite(decoder.loss(new Latent(randn([1, 2, 3]), decoder.inputSpace), 'answer').item())).toBe(true);
+  });
+
+  it.each([true, false])('a float16 checkpoint loads as float16 (dtype declared in config: %s)', async (declared) => {
+    const directory = copyFoundation(BERT, `bert-float16-${declared}`);
+    const weights = deserializeSafetensors(new Uint8Array(readFileSync(join(directory, 'model.safetensors'))));
+    const half = new Map([...weights.tensors].map(([name, value]) => [name, value.isFloatingPoint ? value.to('float16') : value]));
+    writeFileSync(join(directory, 'model.safetensors'), serializeSafetensors(half, weights.metadata));
+    const config = JSON.parse(readFileSync(join(directory, 'config.json'), 'utf8'));
+    delete config.dtype;
+    delete config.torch_dtype;
+    if (declared) config.dtype = 'float16';
+    writeFileSync(join(directory, 'config.json'), JSON.stringify(config));
+    const encoder = await TextEncoder.fromFoundation(directory);
+    expect([...new Set(encoder.parameters().map((parameter) => parameter.dtype))]).toEqual(['float16']);
+    expect((encoder.configuration().native_config as any).dtype).toBe('float16');
+    const explicit = await TextEncoder.fromFoundation(directory, { dtype: 'float32' });
+    expect([...new Set(explicit.parameters().map((parameter) => parameter.dtype))]).toEqual(['float32']);
+    const reference = noGrad(() => explicit.call(['hello world']).tensor);
+    close(noGrad(() => encoder.call(['hello world']).tensor.to('float32')), reference, 1e-2);
+  });
+});

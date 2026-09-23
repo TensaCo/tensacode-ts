@@ -23,6 +23,8 @@ CONFIG_CASES = [
     {'model_type': 't5', 'd_model': 16, 'd_ff': 32, 'd_kv': 8, 'num_heads': 2, 'num_layers': 2, 'vocab_size': 40, 'feed_forward_proj': 'gated-gelu', 'tie_word_embeddings': False, 'decoder_start_token_id': 0},
     {'model_type': 't5', 'd_model': 16, 'd_ff': 32, 'd_kv': 8, 'num_heads': 2, 'num_layers': 2, 'num_decoder_layers': 1, 'vocab_size': 40, 'relative_attention_num_buckets': 8, 'relative_attention_max_distance': 16, 'decoder_start_token_id': 0},
     {'model_type': 'vit', 'hidden_size': 16, 'num_hidden_layers': 2, 'num_attention_heads': 2, 'intermediate_size': 32, 'image_size': 8, 'patch_size': 4, 'num_channels': 3},
+    # Legacy generation parameters are dropped and ``torch_dtype`` becomes ``dtype``.
+    {'model_type': 'bert', 'hidden_size': 16, 'do_sample': True, 'max_length': 30, 'num_beams': 2, 'temperature': 0.5, 'max_new_tokens': 5, 'torch_dtype': 'float16'},
 ]
 
 
@@ -37,6 +39,17 @@ def configs():
     cases.append({'input': {'model_type': 'clip', 'text_config': {'hidden_size': 16, 'intermediate_size': 32, 'num_hidden_layers': 1, 'num_attention_heads': 2, 'vocab_size': 60, 'max_position_embeddings': 12},
                             'vision_config': {'hidden_size': 16, 'intermediate_size': 32, 'num_hidden_layers': 1, 'num_attention_heads': 2, 'image_size': 8, 'patch_size': 4}, 'projection_dim': 8},
                   'to_dict': json.loads(json.dumps(clip.to_dict())), 'diff': json.loads(clip.to_json_string())})
+    # openai/clip-vit-base-patch32 style: nested legacy generation keys and ``*_config_dict``.
+    legacy = {'model_type': 'clip', 'projection_dim': 8, 'torch_dtype': 'float32',
+              'text_config': {'hidden_size': 16, 'intermediate_size': 32, 'num_hidden_layers': 1, 'num_attention_heads': 2, 'vocab_size': 60,
+                              'max_position_embeddings': 12, 'do_sample': False, 'top_k': 50, 'bad_words_ids': None, 'torch_dtype': None},
+              'text_config_dict': {'hidden_size': 16, 'intermediate_size': 32, 'num_hidden_layers': 1, 'num_attention_heads': 2, 'vocab_size': 60,
+                                   'max_position_embeddings': 12, 'hidden_act': 'quick_gelu'},
+              'vision_config': {'hidden_size': 16, 'intermediate_size': 32, 'num_hidden_layers': 1, 'num_attention_heads': 2, 'image_size': 8,
+                                'patch_size': 4, 'num_beams': 1},
+              'vision_config_dict': None}
+    config = AutoConfig.for_model(**legacy)
+    cases.append({'input': legacy, 'to_dict': json.loads(json.dumps(config.to_dict())), 'diff': json.loads(config.to_json_string())})
     write_json('native_configs.json', cases)
 
 
