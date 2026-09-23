@@ -157,6 +157,13 @@ are computed in float32 and rounded once, where PyTorch's float16 CPU
 convolution accumulates in float16, so they agree to a few units in the last
 place.
 
+PyTorch initializes CUDA during a training step on a machine with a GPU, even
+when every tensor is on the CPU, so a directory checkpoint that Python saves
+there carries CUDA generator states and TypeScript rejects it. To move such a
+run to TypeScript, save the checkpoint from a Python process that cannot see
+the GPU (`CUDA_VISIBLE_DEVICES=`), or use a standalone checkpoint file, which
+stores no generator states.
+
 ### Reference platform
 
 Bit-exact random streams and image resampling follow PyTorch, glibc 2.39 and
@@ -194,6 +201,15 @@ classes with their own construction (for example `Qwen2Tokenizer`,
 `NotImplementedError` there. Image processors other than
 `Idefics3ImageProcessor` (also named `...Fast` or `...Pil`) raise
 `NotImplementedError` as well.
+
+### Chat templates
+
+Processor chat templates render with a built-in Jinja implementation that
+follows transformers' sandboxed jinja2 environment. Recursive `for` loops,
+`call` blocks, the filters `attr`, `filesizeformat`, `groupby`, `pprint`,
+`random`, `slice`, `striptags`, `urlencode`, `urlize`, `wordwrap` and
+`xmlattr`, and the tests `escaped`, `filter` and `test` raise `TemplateError`.
+The chat templates of the Idefics3 checkpoints on the Hub use none of them.
 
 ### Images
 
@@ -236,6 +252,14 @@ repositories, so it never loads weights a third party proposed.
   (`new AdamW(params, { weightDecay: float(0) })`).
 - Decoded dictionaries with tuple keys are `Map`s whose tuple keys compare by
   identity.
+- A plan action's keyword parameters are read from the properties its source
+  destructures from `args`. A function whose source does not show them (bound,
+  native or transpiled functions) accepts every keyword unless it is declared
+  with `withSignature`.
+- Generation settings keep the Python kind of top-level whole numbers read from
+  a file, so `"repetition_penalty": 2` or `"top_k": 5.0` fail as they do in
+  transformers. Inside nested lists only floats are recorded, so an int bias in
+  `sequence_bias` (`[[[3], 5]]`) is accepted where transformers rejects it.
 
 ### Not ported
 

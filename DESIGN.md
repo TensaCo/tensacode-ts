@@ -419,6 +419,10 @@ users. In short:
   with their own construction and other image processor classes raise
   `NotImplementedError`.
 - `openImage` reads PNG, JPEG, GIF, WebP and BMP only.
+- Chat templates: recursive loops, `call` blocks and a few rarely used Jinja
+  filters raise `TemplateError`.
+- Directory checkpoints that Python saved on a GPU machine carry CUDA generator
+  states (PyTorch initializes CUDA while training) and are rejected.
 - Blocking provider calls need a thread that can block; `LocalModel` runs
   Transformers.js, not PyTorch.
 - Only `SFconvertbot` conversion pull requests load on public repositories.
