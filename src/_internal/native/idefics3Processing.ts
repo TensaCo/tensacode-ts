@@ -87,8 +87,8 @@ export class Idefics3ImageProcessor {
   private interpolation(): InterpolationMode {
     const code = this.values.resample ?? 1;
     const mode = typeof code === 'number' ? PIL_RESAMPLING[code] : undefined;
-    if (mode === undefined) throw new ValueError(`unsupported resample ${JSON.stringify(code)}`);
-    if (mode === null) throw new NotImplementedError(`resample ${code} (BOX/HAMMING) is not available in the TypeScript port`);
+    // BOX and HAMMING reach resizeImage, which raises torch's NotImplementedError like transformers.
+    if (!mode) throw new ValueError(`unsupported resample ${JSON.stringify(code)}`);
     return mode;
   }
 

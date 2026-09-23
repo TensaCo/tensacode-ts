@@ -10,7 +10,7 @@ import { Tensor, tensor } from '../../nn/tensor.js';
 import { Conv2d, Embedding, LayerNorm, Linear, ModuleList } from '../../nn/layers.js';
 import { crossEntropy } from '../../nn/ops/nn.js';
 import { cat } from '../../nn/ops/shape.js';
-import { ValueError } from '../../errors.js';
+import { RuntimeError, ValueError } from '../../errors.js';
 import type { JsonObject } from '../json.js';
 import type { NativeConfig } from './config.js';
 import { baseInitWeights, initializerStd, postInit } from './hfInit.js';
@@ -335,7 +335,8 @@ export class Idefics3Model extends Module {
     let next = 0;
     for (let position = 0; position < batch * length; position += 1) {
       if (inputIds.data[position] === this.imageTokenId) {
-        if (next >= available) throw new ValueError('masked_scatter: the image features do not cover every image token');
+        // torch's masked_scatter error, which transformers surfaces unchanged.
+        if (next >= available) throw new RuntimeError('Number of elements of source < number of ones in mask');
         index.push(batch * length + next);
         next += 1;
       } else index.push(position);

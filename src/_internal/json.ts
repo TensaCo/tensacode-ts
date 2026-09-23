@@ -515,7 +515,9 @@ export const PYTHON_FLOAT_KEYS = new Set<string>([
   // PyTorch module attributes (``vars(module)``)
   'norm_type', 'p', 'eps',
   // transformers generation settings (``GenerationConfig``)
-  'temperature', 'top_p', 'repetition_penalty', 'length_penalty',
+  'temperature', 'top_p', 'repetition_penalty', 'length_penalty', 'encoder_repetition_penalty',
+  'epsilon_cutoff', 'eta_cutoff', 'guidance_scale', 'min_p', 'top_h', 'assistant_confidence_threshold',
+  'assistant_ensemble_weight',
   // transformers image processor settings
   'image_mean', 'image_std', 'rescale_factor',
   // provider settings (``timeout=30.0``)

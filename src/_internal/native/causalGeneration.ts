@@ -15,7 +15,7 @@ import { Tensor } from '../../nn/tensor.js';
 import { noGrad } from '../../nn/autograd.js';
 import { getDefaultGenerator, multinomialValues, type Generator } from '../../nn/random.js';
 import { ValueError } from '../../errors.js';
-import { deepCopy, isPlainObject, type JsonObject, type JsonValue } from '../json.js';
+import { deepCopy, isPlainObject, PYTHON_FLOAT_KEYS, pythonFloatRepr, pythonKindOf, setPythonNumberKind, transferPythonNumberKind, type JsonObject, type JsonValue } from '../json.js';
 import { GENERATION_CONFIG_DEFAULTS } from './defaults.generated.js';
 import type { LlamaLayerCache } from './llama.js';
 import * as P from './logitsProcessors.js';
@@ -158,7 +158,11 @@ function normalizeWatermark(config: GenerationValues): void {
 export function generationConfigFromDict(dict: Record<string, unknown> | null | undefined): GenerationValues {
   const config: GenerationValues = {};
   for (const key of CONFIG_ATTRIBUTES) config[key] = null;
-  for (const [key, value] of Object.entries(dict ?? {})) config[key] = deepCopy(value as JsonValue);
+  for (const [key, value] of Object.entries(dict ?? {})) {
+    config[key] = deepCopy(value as JsonValue);
+    // A whole number keeps the Python kind it was read with (``2`` vs ``2.0``).
+    transferPythonNumberKind(config, key, dict!, key);
+  }
   normalizeWatermark(config);
   validateGenerationConfig(config);
   return config;
@@ -178,11 +182,14 @@ export function prepareGenerationConfig(
   const update = (values: Record<string, unknown>, defaultsOnly: boolean, allowCustom: boolean): Record<string, unknown> => {
     const unused: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(values)) {
-      if (allowCustom && !(key in config)) config[key] = deepCopy(value as JsonValue);
-      else if (key in config) {
+      if (allowCustom && !(key in config)) {
+        config[key] = deepCopy(value as JsonValue);
+        transferPythonNumberKind(config, key, values, key);
+      } else if (key in config) {
         if (!defaultsOnly || isNone(config[key])) {
           if (key === 'watermarking_config' && isPlainObject(value)) config[key] = P.watermarkingFromDict(value);
           else config[key] = value instanceof Map ? new Map(value) : deepCopy(value as JsonValue);
+          transferPythonNumberKind(config, key, values, key);
         }
       } else unused[key] = value;
     }
@@ -790,21 +797,43 @@ function buildProcessors(
   const { config, special, options } = runner;
   const list: P.LogitsProcessorFn[] = [];
   const number = (key: string): number | null => (isNone(config[key]) ? null : Number(config[key]));
+  // transformers' processors check isinstance(value, float) / isinstance(value, int): a whole
+  // number recorded with the other Python kind (read from a file, or float()/int()) fails there.
+  const kind = (key: string): 'int' | 'float' | null => {
+    const value = config[key];
+    if (typeof value !== 'number') return null;
+    if (!Number.isInteger(value)) return 'float';
+    return pythonKindOf(value, config, key) ?? (PYTHON_FLOAT_KEYS.has(key) ? 'float' : 'int');
+  };
+  const requireFloat = (key: string, message: (shown: string) => string): void => {
+    if (kind(key) === 'int') throw new ValueError(message(String(number(key))));
+  };
+  const requireInt = (key: string, message: (shown: string) => string): void => {
+    if (kind(key) === 'float') throw new ValueError(message(pythonFloatRepr(number(key)!)));
+  };
   const guidance = number('guidance_scale');
   if (guidance !== null && guidance !== 1) list.push(guidanceProcessor(runner, guidance, negative.ids, negative.mask));
   if (!isNone(config.sequence_bias)) list.push(P.sequenceBiasProcessor(P.normalizeSequenceBias(config.sequence_bias)));
   const encoderPenalty = number('encoder_repetition_penalty');
+  if (encoderPenalty !== null && encoderPenalty !== 1) requireFloat('encoder_repetition_penalty', (shown) => `\`penalty\` has to be a strictly positive float, but is ${shown}`);
   if (encoderPenalty !== null && encoderPenalty !== 1) list.push(P.encoderRepetitionPenaltyProcessor(encoderPenalty, encoderIds));
   const penalty = number('repetition_penalty');
-  if (penalty !== null && penalty !== 1) list.push(P.repetitionPenaltyProcessor(penalty));
+  if (penalty !== null && penalty !== 1) {
+    requireFloat('repetition_penalty', (shown) => `\`penalty\` has to be a strictly positive float, but is ${shown}`);
+    list.push(P.repetitionPenaltyProcessor(penalty));
+  }
   const ngram = number('no_repeat_ngram_size');
+  if (ngram !== null && ngram > 0) requireInt('no_repeat_ngram_size', (shown) => `\`ngram_size\` has to be a strictly positive integer, but is ${shown}`);
   if (ngram !== null && ngram > 0) list.push(P.noRepeatNGramProcessor(ngram));
   const encoderNgram = number('encoder_no_repeat_ngram_size');
+  if (encoderNgram !== null && encoderNgram > 0) requireInt('encoder_no_repeat_ngram_size', (shown) => `\`encoder_ngram_size\` has to be a strictly positive integer, but is ${shown}`);
   if (encoderNgram !== null && encoderNgram > 0) list.push(P.encoderNoRepeatNGramProcessor(encoderNgram, encoderIds));
   if (!isNone(config.bad_words_ids)) list.push(P.noBadWordsProcessor(config.bad_words_ids, special.eos));
   const minLength = number('min_length');
+  if (minLength !== null && special.eos !== null && minLength > 0) requireInt('min_length', (shown) => `\`min_length\` has to be a non-negative integer, but is ${shown}`);
   if (minLength !== null && special.eos !== null && minLength > 0) list.push(P.minLengthProcessor(minLength, special.eos));
   const minNew = number('min_new_tokens');
+  if (minNew !== null && special.eos !== null && minNew > 0) requireInt('min_new_tokens', (shown) => `\`min_new_tokens\` has to be a positive integer, but is ${shown}`);
   if (minNew !== null && special.eos !== null && minNew > 0) list.push(P.minNewTokensProcessor(promptLength, minNew, special.eos));
   if (options.prefixAllowedTokensFn) list.push(P.prefixConstrainedProcessor(options.prefixAllowedTokensFn, config.num_beams as number));
   const forcedBos = number('forced_bos_token_id');
@@ -827,10 +856,16 @@ function buildProcessors(
     const beams = config.num_beams as number | null;
     const minKeep = beams !== null && beams > 1 ? (special.eos?.length ?? 1) + 1 : 1;
     const temperature = number('temperature');
-    if (temperature !== null && temperature !== 1) list.push(P.temperatureWarper(temperature));
+    if (temperature !== null && temperature !== 1) {
+      requireFloat('temperature', (shown) => `\`temperature\` (=${shown}) has to be a strictly positive float, otherwise your next token scores will be invalid.`);
+      list.push(P.temperatureWarper(temperature));
+    }
     if (!isNone(config.top_h)) list.push(P.topHWarper(Number(config.top_h)));
     const topK = number('top_k');
-    if (topK !== null && topK !== 0) list.push(P.topKWarper(topK, minKeep));
+    if (topK !== null && topK !== 0) {
+      requireInt('top_k', (shown) => `\`top_k\` has to be a strictly positive integer, but is ${shown}`);
+      list.push(P.topKWarper(topK, minKeep));
+    }
     const topP = number('top_p');
     if (topP !== null && topP < 1) list.push(P.topPWarper(topP, minKeep));
     if (!isNone(config.min_p)) list.push(P.minPWarper(Number(config.min_p), minKeep));
@@ -1029,7 +1064,11 @@ function generateImpl(model: CausalLanguageModel, inputs: CausalGenerateInputs, 
     config.max_length = (config.max_length as number) + promptLength;
     if (model.generationMaxPositions !== null) config.max_length = Math.min(config.max_length as number, model.generationMaxPositions);
   }
-  if (!isNone(config.min_new_tokens)) config.min_length = (config.min_new_tokens as number) + promptLength;
+  if (!isNone(config.min_new_tokens)) {
+    config.min_length = (config.min_new_tokens as number) + promptLength;
+    // Python adds an int to min_new_tokens, so a float min_new_tokens makes min_length a float.
+    if (pythonKindOf(config.min_new_tokens, config, 'min_new_tokens') === 'float') setPythonNumberKind(config, 'min_length', 'float');
+  }
   if (promptLength >= (config.max_length as number)) {
     throw new ValueError(`Input length of input_ids is ${promptLength}, but \`max_length\` is set to ${config.max_length}. This can lead to unexpected behavior. You should consider increasing \`max_length\` or, better yet, setting \`max_new_tokens\`.`);
   }

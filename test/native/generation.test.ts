@@ -5,6 +5,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { nativeConfig } from '../../src/_internal/native/config.js';
+import { generationConfigFromDict } from '../../src/_internal/native/causalGeneration.js';
+import { pythonJsonLoads } from '../../src/_internal/json.js';
 import { Idefics3ForConditionalGeneration } from '../../src/_internal/native/idefics3.js';
 import { createNativeModel } from '../../src/_internal/native/registry.js';
 import * as P from '../../src/_internal/native/logitsProcessors.js';
@@ -176,5 +178,44 @@ describe('logits processors and warpers match transformers', () => {
     now = 11.6;
     expect(timer([[1]])).toEqual([true]);
     void tensor;
+  });
+});
+
+describe('generation settings read from Python JSON keep their int/float kind', () => {
+  // transformers' processors check isinstance(value, float) / isinstance(value, int), so a
+  // configuration file that stores ``2`` for repetition_penalty or ``5.0`` for top_k fails in
+  // Python; the same file fails the same way here.
+  const model = load();
+  const features = fromJson(records.image_hidden_states);
+  const run = (json: string, settings: Record<string, unknown> = {}): string => {
+    // One Python JSON text: the model's generation configuration updated with ``json``.
+    const text = `${JSON.stringify(records.model_generation).slice(0, -1)}, ${json.slice(1)}`;
+    const merged = generationConfigFromDict(pythonJsonLoads(text) as Record<string, unknown>);
+    try {
+      model.generate({ inputIds: ints([records.prompt]), imageHiddenStates: features }, {
+        generationConfig: merged, settings: { max_new_tokens: 2, ...settings },
+      });
+      return 'ok';
+    } catch (error) {
+      return `${(error as Error).name}: ${(error as Error).message}`;
+    }
+  };
+
+  it('rejects whole numbers of the wrong kind with transformers messages', () => {
+    expect(run('{"repetition_penalty": 2}')).toBe('ValueError: `penalty` has to be a strictly positive float, but is 2');
+    expect(run('{"repetition_penalty": 2.0}')).toBe('ok');
+    // Unmarked whole numbers in JavaScript data follow the field's Python type (float here).
+    expect(() => model.generate({ inputIds: ints([records.prompt]), imageHiddenStates: features }, {
+      generationConfig: generationConfigFromDict({ ...records.model_generation, repetition_penalty: 2 }), settings: { max_new_tokens: 2 },
+    })).not.toThrow();
+    expect(run('{"encoder_repetition_penalty": 3}')).toBe('ValueError: `penalty` has to be a strictly positive float, but is 3');
+    expect(run('{"no_repeat_ngram_size": 2.0}')).toBe('ValueError: `ngram_size` has to be a strictly positive integer, but is 2.0');
+    expect(run('{"no_repeat_ngram_size": 2}')).toBe('ok');
+    // min_length becomes min_new_tokens + prompt length, a float, and is checked first.
+    expect(run('{"min_new_tokens": 2.0}')).toBe(`ValueError: \`min_length\` has to be a non-negative integer, but is ${records.prompt.length + 2}.0`);
+    expect(run('{"min_length": 3.0}')).toBe('ValueError: `min_length` has to be a non-negative integer, but is 3.0');
+    expect(run('{"do_sample": true, "top_k": 5.0}', { do_sample: true })).toBe('ValueError: `top_k` has to be a strictly positive integer, but is 5.0');
+    expect(run('{"do_sample": true, "temperature": 0}', { do_sample: true })).toBe(
+      'ValueError: `temperature` (=0) has to be a strictly positive float, otherwise your next token scores will be invalid.');
   });
 });
