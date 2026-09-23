@@ -1,0 +1,126 @@
+{
+  "config": {
+    "bridge": "linear",
+    "conditioning_status": "requires_training",
+    "input_space": {
+      "dimensions": 6,
+      "name": "image-conditioning",
+      "organization": "sequence"
+    },
+    "num_inference_steps": 2,
+    "scheduler_config": {
+      "beta_end": 0.02,
+      "beta_schedule": "squaredcos_cap_v2",
+      "beta_start": 0.0001,
+      "clip_sample": false,
+      "clip_sample_range": 1.0,
+      "dynamic_thresholding_ratio": 0.995,
+      "num_train_timesteps": 10,
+      "prediction_type": "epsilon",
+      "rescale_betas_zero_snr": false,
+      "sample_max_value": 1.0,
+      "set_alpha_to_one": true,
+      "steps_offset": 0,
+      "thresholding": false,
+      "timestep_spacing": "leading",
+      "trained_betas": null
+    },
+    "unet_config": {
+      "act_fn": "gelu",
+      "addition_embed_type": null,
+      "addition_embed_type_num_heads": 64,
+      "addition_time_embed_dim": null,
+      "attention_head_dim": 8,
+      "attention_type": "default",
+      "block_out_channels": [
+        32,
+        32,
+        64,
+        64
+      ],
+      "center_input_sample": false,
+      "class_embed_type": null,
+      "class_embeddings_concat": false,
+      "conv_in_kernel": 1,
+      "conv_out_kernel": 1,
+      "cross_attention_dim": 12,
+      "cross_attention_norm": null,
+      "down_block_types": [
+        "KDownBlock2D",
+        "KCrossAttnDownBlock2D",
+        "KCrossAttnDownBlock2D",
+        "KCrossAttnDownBlock2D"
+      ],
+      "downsample_padding": 1,
+      "dropout": 0.0,
+      "dual_cross_attention": false,
+      "encoder_hid_dim": null,
+      "encoder_hid_dim_type": null,
+      "flip_sin_to_cos": true,
+      "freq_shift": 0,
+      "in_channels": 4,
+      "layers_per_block": 1,
+      "mid_block_only_cross_attention": null,
+      "mid_block_scale_factor": 1,
+      "mid_block_type": null,
+      "norm_eps": 1e-05,
+      "norm_num_groups": null,
+      "num_attention_heads": null,
+      "num_class_embeds": null,
+      "only_cross_attention": false,
+      "out_channels": 4,
+      "projection_class_embeddings_input_dim": null,
+      "resnet_out_scale_factor": 1.0,
+      "resnet_skip_time_act": false,
+      "resnet_time_scale_shift": "scale_shift",
+      "reverse_transformer_layers_per_block": null,
+      "sample_size": 16,
+      "time_cond_proj_dim": null,
+      "time_embedding_act_fn": null,
+      "time_embedding_dim": null,
+      "time_embedding_type": "fourier",
+      "timestep_post_act": "gelu",
+      "transformer_layers_per_block": 1,
+      "up_block_types": [
+        "KCrossAttnUpBlock2D",
+        "KCrossAttnUpBlock2D",
+        "KCrossAttnUpBlock2D",
+        "KUpBlock2D"
+      ],
+      "upcast_attention": false,
+      "use_linear_projection": false
+    },
+    "vae_config": {
+      "act_fn": "mish",
+      "block_out_channels": [
+        8,
+        16
+      ],
+      "down_block_types": [
+        "AttnDownEncoderBlock2D",
+        "DownEncoderBlock2D"
+      ],
+      "force_upcast": true,
+      "in_channels": 3,
+      "latent_channels": 4,
+      "latents_mean": null,
+      "latents_std": null,
+      "layers_per_block": 1,
+      "mid_block_add_attention": true,
+      "norm_num_groups": 4,
+      "out_channels": 3,
+      "sample_size": 8,
+      "scaling_factor": 0.18215,
+      "shift_factor": null,
+      "up_block_types": [
+        "UpDecoderBlock2D",
+        "AttnUpDecoderBlock2D"
+      ],
+      "use_post_quant_conv": true,
+      "use_quant_conv": true
+    }
+  },
+  "format": "tensorcode.pretrained",
+  "tool": "tensorcode.ops.vec.decode.ImageDecoder",
+  "version": 1
+}

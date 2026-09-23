@@ -16,6 +16,7 @@ import { cat, mseLoss } from '../../nn/functional.js';
 import { Identity, Linear } from '../../nn/layers.js';
 import type { Module } from '../../nn/module.js';
 import { Generator } from '../../nn/random.js';
+import { withInitGuard } from '../../nn/init.js';
 import { deserializeSafetensors } from '../../nn/safetensors.js';
 import { Tensor, randn } from '../../nn/tensor.js';
 import type { Parameter } from '../../nn/tensor.js';
@@ -24,10 +25,12 @@ import { Latent, Space } from '../../ops/vec/latent.js';
 import { pathExists } from '../files.js';
 import { resolveArtifactDirectory, type HubOptions } from '../hub.js';
 import { qualifiedName } from '../identity.js';
-import { deepCopy, isPlainObject, parseJsonStrict, type JsonObject, type JsonValue } from '../json.js';
+import {
+  deepCopy, isPlainObject, orderedEntries, orderedObject, parseJsonStrict, transferPythonNumberKind, type JsonObject, type JsonValue,
+} from '../json.js';
 import { LatentOperation, asSequence, spaceFromConfig } from '../latentOps.js';
 import {
-  AutoencoderKL, DDIMScheduler, UNet2DConditionModel, convertDeprecatedAttentionKey, resolveDiffusersConfig,
+  AutoencoderKL, DDIMScheduler, UNet2DConditionModel, convertDeprecatedAttentionKey, deprecatedAttentionPaths, resolveDiffusersConfig,
 } from '../native/diffusers.js';
 import { pythonList, spaceJson, unknownKeys } from './owned.js';
 
@@ -51,9 +54,10 @@ interface DiffusionInternals {
 function nativeConfig(value: unknown, key: string): JsonObject {
   if (value === undefined) throw new ValueError(`missing ${key}`);
   if (!isPlainObject(value)) throw new TypeError(`${key} must be a mapping`);
-  const result: JsonObject = {};
   // Python ``_native_config``: private diffusers keys are not architecture.
-  for (const [name, item] of Object.entries(value as JsonObject)) if (!name.startsWith('_')) result[name] = deepCopy(item as JsonValue);
+  const result = orderedObject(orderedEntries(value as JsonObject).filter(([name]) => !name.startsWith('_'))
+    .map(([name, item]) => [name, deepCopy(item as JsonValue)] as const));
+  for (const name of Object.keys(result)) transferPythonNumberKind(result, name, value as JsonObject, name);
   return result;
 }
 
@@ -149,8 +153,8 @@ export interface ImageDecoderFoundationOptions extends Omit<HubOptions, 'allowPa
  * ``scheduler_config``, ``bridge`` and ``num_inference_steps``. Construction
  * initializes weights locally; ``fromFoundation`` explicitly imports pretrained
  * weights. Sampling requires ``context.noise`` (unscaled standard Gaussian
- * noise) or ``context.seed`` (a TensorCode generator seed; its noise differs
- * from PyTorch's). ``context.latents`` prefixes conditioning in order. DDIM
+ * noise) or ``context.seed`` (the noise of
+ * ``torch.randn(generator=torch.Generator().manual_seed(seed))``, as in Python). ``context.latents`` prefixes conditioning in order. DDIM
  * sampling uses eta 0 and no classifier-free guidance.
  */
 export class ImageDecoder extends LatentOperation<Latent, Tensor> {
@@ -217,8 +221,11 @@ export class ImageDecoder extends LatentOperation<Latent, Tensor> {
     const unetConfig = await readComponentConfig(path, 'unet', 'config.json');
     const vaeConfig = await readComponentConfig(path, 'vae', 'config.json');
     const schedulerConfig = await readComponentConfig(path, 'scheduler', 'scheduler_config.json');
-    const unet = new UNet2DConditionModel(nativeConfig(unetConfig, 'unet_config'));
-    const vae = new AutoencoderKL(nativeConfig(vaeConfig, 'vae_config'));
+    // diffusers ``from_pretrained`` builds under ``no_init_weights``: every ``torch.nn.init`` call is
+    // skipped (other draws, such as a Fourier time projection's ``torch.randn``, still happen).
+    const skipInit = <T>(build: () => T): T => withInitGuard(() => true, build);
+    const unet = skipInit(() => new UNet2DConditionModel(nativeConfig(unetConfig, 'unet_config')));
+    const vae = skipInit(() => new AutoencoderKL(nativeConfig(vaeConfig, 'vae_config')));
     await loadComponentWeights(unet, join(path, 'unet'), 'unet');
     await loadComponentWeights(vae, join(path, 'vae'), 'vae');
     const scheduler = new DDIMScheduler(nativeConfig(schedulerConfig, 'scheduler_config'));
@@ -369,10 +376,12 @@ async function loadComponentWeights(module: Module, directory: string, subfolder
     throw new ValueError(`incomplete or incompatible foundation ${subfolder} weights: no safetensors weights`);
   }
   const tensors = new Map<string, Tensor>();
+  // diffusers renames legacy attention parameters only for non-sharded checkpoints.
+  const legacy = files.length === 1 && files[0] === single ? deprecatedAttentionPaths(module) : new Set<string>();
   for (const file of files) {
     const bytes = await readFile(file);
     for (const [name, value] of deserializeSafetensors(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)).tensors) {
-      tensors.set(convertDeprecatedAttentionKey(name), value);
+      tensors.set(convertDeprecatedAttentionKey(name, legacy), value);
     }
   }
   const state = module.stateDict();

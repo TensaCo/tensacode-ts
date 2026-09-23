@@ -3,22 +3,32 @@
  * (diffusers 0.40 parameter names, module order and numerics) for the latent
  * diffusion ``ImageDecoder``.
  *
- * The supported UNet subset is the plain cross-attention family that
- * TensorCode's ``ImageDecoder`` accepts: ``CrossAttnDownBlock2D`` /
- * ``DownBlock2D`` / ``CrossAttnUpBlock2D`` / ``UpBlock2D`` blocks, a
- * ``UNetMidBlock2DCrossAttn`` (or no) mid block, positional timestep
- * embeddings and ``default``/``scale_shift`` ResNet time conditioning. The VAE
- * supports ``DownEncoderBlock2D``/``UpDecoderBlock2D``. Other diffusers blocks
- * raise {@link NotImplementedError}.
+ * Every block type these two models build is ported with diffusers' module
+ * tree: UNet down blocks ``DownBlock2D``, ``ResnetDownsampleBlock2D``,
+ * ``AttnDownBlock2D``, ``CrossAttnDownBlock2D``, ``SimpleCrossAttnDownBlock2D``,
+ * ``KDownBlock2D`` and ``KCrossAttnDownBlock2D``; the matching up blocks; mid
+ * blocks ``UNetMidBlock2DCrossAttn``, ``UNetMidBlock2DSimpleCrossAttn``,
+ * ``UNetMidBlock2D`` (or none); positional and Gaussian Fourier time
+ * embeddings; ``default``/``scale_shift`` ResNet time conditioning and the
+ * ``ada_group`` (``AdaGroupNorm``) and ``spatial`` conditional norms; the
+ * ``silu``/``swish``/``mish``/``gelu``/``relu`` activations; VAE blocks
+ * ``DownEncoderBlock2D``, ``AttnDownEncoderBlock2D``, ``UpDecoderBlock2D`` and
+ * ``AttnUpDecoderBlock2D``. Block types that diffusers constructs but cannot
+ * run inside these models (skip blocks, encoder blocks inside a UNet, UNet
+ * blocks inside a VAE) raise ``ValueError`` when constructed. UNet
+ * conditioning inputs that ``ImageDecoder`` rejects (class, addition and
+ * encoder projections, timestep conditions, dual or gated attention) raise
+ * ``ValueError('unsupported diffusion pipeline: ...')`` like Python's
+ * ``ImageDecoder``.
  */
 import { NotImplementedError, ValueError } from '../../errors.js';
 import { noGrad } from '../../nn/autograd.js';
-import { cat, interpolateNearest } from '../../nn/functional.js';
+import { cat, interpolateNearest, softplus, stack, tanh } from '../../nn/functional.js';
 import { Conv2d, Dropout, GELU, GroupNorm, LayerNorm, Linear, ModuleList, ReLU, SiLU } from '../../nn/layers.js';
 import { Module } from '../../nn/module.js';
-import { gelu } from '../../nn/ops/nn.js';
-import { Tensor, tensor, zeros } from '../../nn/tensor.js';
-import { deepCopy, isPlainObject, type JsonObject, type JsonValue } from '../json.js';
+import { conv2d, gelu, groupNorm } from '../../nn/ops/nn.js';
+import { Parameter, Tensor, randn, tensor, zeros } from '../../nn/tensor.js';
+import { deepCopy, isPlainObject, orderedEntries, transferPythonNumberKind, type JsonObject, type JsonValue } from '../json.js';
 import { DIFFUSERS_CONFIG_DEFAULTS } from './diffusersDefaults.generated.js';
 import { attention, mergeHeads, splitHeads } from './modules.js';
 
@@ -32,8 +42,10 @@ export type DiffusersComponent = 'UNet2DConditionModel' | 'AutoencoderKL' | 'DDI
 export function resolveDiffusersConfig(component: DiffusersComponent, supplied: unknown): JsonObject {
   if (!isPlainObject(supplied)) throw new TypeError(`${component} configuration must be a mapping`);
   const result: JsonObject = deepCopy(DIFFUSERS_CONFIG_DEFAULTS[component]!);
-  for (const [key, value] of Object.entries(supplied as JsonObject)) {
-    if (!key.startsWith('_')) result[key] = deepCopy(value as JsonValue);
+  for (const [key, value] of orderedEntries(supplied as JsonObject)) {
+    if (key.startsWith('_')) continue;
+    result[key] = deepCopy(value as JsonValue);
+    transferPythonNumberKind(result, key, supplied as JsonObject, key);
   }
   return result;
 }
@@ -50,21 +62,63 @@ function num(config: JsonObject, key: string): number {
   return value;
 }
 
-function perBlock<T>(value: JsonValue | undefined, count: number, name: string): T[] {
-  if (Array.isArray(value)) {
-    if (value.length !== count) throw new ValueError(`Must provide the same number of \`${name}\` as \`down_block_types\``);
-    return value as unknown as T[];
-  }
-  return Array.from({ length: count }, () => value as unknown as T);
+/** Python ``repr`` of a JSON value in diffusers' messages. */
+function pyRepr(value: JsonValue | undefined): string {
+  if (value === null || value === undefined) return 'None';
+  if (value === true) return 'True';
+  if (value === false) return 'False';
+  if (typeof value === 'string') return `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+  if (Array.isArray(value)) return `[${value.map(pyRepr).join(', ')}]`;
+  if (typeof value === 'number') return String(value);
+  return JSON.stringify(value);
 }
 
-/** diffusers ``get_activation``. */
-function activation(name: string): Module & { forward(x: Tensor): Tensor } {
-  switch (name) {
+type Act = Module & { forward(x: Tensor): Tensor };
+
+/** ``torch.nn.Mish``: ``x * tanh(softplus(x))``. */
+export class Mish extends Module {
+  static override readonly qualifiedName: string = 'torch.nn.modules.activation.Mish';
+
+  override configurationAttributes(): Record<string, unknown> {
+    return { inplace: false };
+  }
+
+  forward(input: Tensor): Tensor {
+    return input.mul(tanh(softplus(input)));
+  }
+}
+
+/** ``torch.nn.AvgPool2d(kernel_size=2, stride=2)``. */
+export class AvgPool2d extends Module {
+  static override readonly qualifiedName: string = 'torch.nn.modules.pooling.AvgPool2d';
+
+  constructor(readonly kernelSize: number, readonly stride: number) {
+    super();
+  }
+
+  override configurationAttributes(): Record<string, unknown> {
+    return { ceil_mode: false, count_include_pad: true, divisor_override: null, kernel_size: this.kernelSize, padding: 0, stride: this.stride };
+  }
+
+  forward(input: Tensor): Tensor {
+    const [batch, channels, height, width] = input.shape as [number, number, number, number];
+    const k = this.kernelSize;
+    const outH = Math.floor((height - k) / this.stride) + 1;
+    const outW = Math.floor((width - k) / this.stride) + 1;
+    if (this.stride !== k) throw new ValueError('AvgPool2d here pools non-overlapping windows (stride equals kernel size)');
+    const cropped = input.slice(2, 0, outH * k).slice(3, 0, outW * k);
+    return cropped.reshape(batch, channels, outH, k, outW, k).mean([3, 5]);
+  }
+}
+
+/** diffusers ``get_activation`` (case-insensitive). */
+function activation(name: string): Act {
+  switch (String(name).toLowerCase()) {
     case 'silu': case 'swish': return new SiLU();
+    case 'mish': return new Mish();
     case 'gelu': return new GELU();
     case 'relu': return new ReLU();
-    default: throw new NotImplementedError(`diffusers activation ${JSON.stringify(name)} is not available in TypeScript`);
+    default: throw new ValueError(`activation function ${String(name).toLowerCase()} not found in ACT2FN mapping ['swish', 'silu', 'mish', 'gelu', 'relu']`);
   }
 }
 
@@ -103,11 +157,40 @@ class Timesteps extends Module {
   }
 }
 
+/**
+ * ``GaussianFourierProjection(embedding_size, set_W_to_weight=False, log=False)``:
+ * a fixed random ``weight`` (``randn(embedding_size) * scale``, not trained).
+ */
+class GaussianFourierProjection extends Module {
+  readonly weight: Parameter;
+
+  constructor(embeddingSize: number, readonly flipSinToCos: boolean, readonly log = false, scale = 1) {
+    super();
+    const initial = noGrad(() => randn([embeddingSize]).mul(scale));
+    this.weight = this.registerParameter('weight', new Parameter(initial, false));
+  }
+
+  forward(timesteps: Tensor): Tensor {
+    const f = Math.fround;
+    const pi = f(Math.PI);
+    const weights = Array.from(this.weight.toArray(), (value) => f(value));
+    const values: number[] = [];
+    for (const raw of timesteps.toArray()) {
+      const step = this.log ? f(Math.log(f(raw))) : f(raw);
+      const projected = weights.map((weight) => f(f(f(step * weight) * 2) * pi));
+      const sin = projected.map((angle) => f(Math.sin(angle)));
+      const cos = projected.map((angle) => f(Math.cos(angle)));
+      values.push(...(this.flipSinToCos ? [...cos, ...sin] : [...sin, ...cos]));
+    }
+    return tensor(values, { shape: [timesteps.numel, 2 * weights.length], dtype: 'float32' });
+  }
+}
+
 class TimestepEmbedding extends Module {
   readonly linear_1: Linear;
-  readonly act: Module & { forward(x: Tensor): Tensor };
+  readonly act: Act;
   readonly linear_2: Linear;
-  readonly post_act: (Module & { forward(x: Tensor): Tensor }) | null;
+  readonly post_act: Act | null;
 
   constructor(input: number, embedding: number, act: string, postAct: string | null) {
     super();
@@ -124,96 +207,66 @@ class TimestepEmbedding extends Module {
 }
 
 // ---------------------------------------------------------------------------
-// ResNet, sampling and attention blocks.
+// Normalization, resampling.
 // ---------------------------------------------------------------------------
 
-interface ResnetOptions {
-  inChannels: number;
-  outChannels: number;
-  tembChannels: number | null;
-  eps: number;
-  groups: number;
-  groupsOut?: number;
-  dropout: number;
-  timeEmbeddingNorm: string;
-  nonLinearity: string;
-  outputScaleFactor: number;
-}
+/** ``AdaGroupNorm``: group norm whose scale and shift come from the time embedding. */
+class AdaGroupNorm extends Module {
+  readonly act: Act | null;
+  readonly linear: Linear;
 
-export class ResnetBlock2D extends Module {
-  readonly norm1: GroupNorm;
-  readonly conv1: Conv2d;
-  readonly time_emb_proj: Linear | null;
-  readonly norm2: GroupNorm;
-  readonly dropout: Dropout;
-  readonly conv2: Conv2d;
-  readonly nonlinearity: Module & { forward(x: Tensor): Tensor };
-  readonly conv_shortcut: Conv2d | null;
-  readonly timeEmbeddingNorm: string;
-  readonly outputScaleFactor: number;
-
-  constructor(options: ResnetOptions) {
+  constructor(embeddingDim: number, outDim: number, readonly numGroups: number, act: string | null = null, readonly eps = 1e-5) {
     super();
-    const { inChannels, outChannels, tembChannels, eps } = options;
-    if (options.timeEmbeddingNorm === 'spatial' || options.timeEmbeddingNorm === 'ada_group') {
-      throw new NotImplementedError(`ResNet time embedding norm ${options.timeEmbeddingNorm} is not available in TypeScript`);
-    }
-    this.timeEmbeddingNorm = options.timeEmbeddingNorm;
-    this.outputScaleFactor = options.outputScaleFactor;
-    this.norm1 = this.registerModule('norm1', new GroupNorm(options.groups, inChannels, { eps }));
-    this.conv1 = this.registerModule('conv1', new Conv2d(inChannels, outChannels, 3, { padding: 1 }));
-    if (tembChannels !== null) {
-      if (this.timeEmbeddingNorm === 'default') this.time_emb_proj = this.registerModule('time_emb_proj', new Linear(tembChannels, outChannels));
-      else if (this.timeEmbeddingNorm === 'scale_shift') this.time_emb_proj = this.registerModule('time_emb_proj', new Linear(tembChannels, 2 * outChannels));
-      else throw new ValueError(`unknown time_embedding_norm : ${this.timeEmbeddingNorm} `);
-    } else {
-      this.time_emb_proj = null;
-    }
-    this.norm2 = this.registerModule('norm2', new GroupNorm(options.groupsOut ?? options.groups, outChannels, { eps }));
-    this.dropout = this.registerModule('dropout', new Dropout(options.dropout));
-    this.conv2 = this.registerModule('conv2', new Conv2d(outChannels, outChannels, 3, { padding: 1 }));
-    this.nonlinearity = this.registerModule('nonlinearity', activation(options.nonLinearity));
-    this.conv_shortcut = inChannels !== outChannels
-      ? this.registerModule('conv_shortcut', new Conv2d(inChannels, outChannels, 1))
-      : null;
+    this.act = act === null ? null : this.registerModule('act', activation(act));
+    this.linear = this.registerModule('linear', new Linear(embeddingDim, outDim * 2));
   }
 
-  forward(input: Tensor, temb: Tensor | null): Tensor {
-    let hidden = this.conv1.forward(this.nonlinearity.forward(this.norm1.forward(input)));
-    let time: Tensor | null = null;
-    if (this.time_emb_proj && temb) {
-      time = this.time_emb_proj.forward(this.nonlinearity.forward(temb));
-      time = time.reshape(time.shape[0]!, time.shape[1]!, 1, 1);
-    }
-    if (this.timeEmbeddingNorm === 'default') {
-      if (time) hidden = hidden.add(time);
-      hidden = this.norm2.forward(hidden);
-    } else if (this.timeEmbeddingNorm === 'scale_shift') {
-      if (!time) throw new ValueError(' `temb` should not be None when `time_embedding_norm` is scale_shift');
-      const [scale, shift] = time.chunk(2, 1) as [Tensor, Tensor];
-      hidden = this.norm2.forward(hidden).mul(scale.add(1)).add(shift);
-    } else {
-      hidden = this.norm2.forward(hidden);
-    }
-    hidden = this.conv2.forward(this.dropout.forward(this.nonlinearity.forward(hidden)));
-    const shortcut = this.conv_shortcut ? this.conv_shortcut.forward(input) : input;
-    const output = shortcut.add(hidden);
-    return this.outputScaleFactor === 1 ? output : output.div(this.outputScaleFactor);
+  forward(x: Tensor, emb: Tensor): Tensor {
+    let embedding = this.act ? this.act.forward(emb) : emb;
+    embedding = this.linear.forward(embedding);
+    embedding = embedding.reshape(embedding.shape[0]!, embedding.shape[1]!, 1, 1);
+    const [scale, shift] = embedding.chunk(2, 1) as [Tensor, Tensor];
+    return groupNorm(x, this.numGroups, null, null, this.eps).mul(scale.add(1)).add(shift);
   }
 }
 
-/** ``Downsample2D(use_conv=True)``; padding 0 pads right/bottom by one first. */
+/** ``SpatialNorm``: group norm modulated by a spatial conditioning map (MoVQ). */
+class SpatialNorm extends Module {
+  readonly norm_layer: GroupNorm;
+  readonly conv_y: Conv2d;
+  readonly conv_b: Conv2d;
+
+  constructor(fChannels: number, zqChannels: number) {
+    super();
+    this.norm_layer = this.registerModule('norm_layer', new GroupNorm(32, fChannels, { eps: 1e-6 }));
+    this.conv_y = this.registerModule('conv_y', new Conv2d(zqChannels, fChannels, 1));
+    this.conv_b = this.registerModule('conv_b', new Conv2d(zqChannels, fChannels, 1));
+  }
+
+  forward(f: Tensor, zq: Tensor | null): Tensor {
+    if (zq === null || zq.ndim !== 4) {
+      throw new ValueError('SpatialNorm conditioning must be a [batch, channels, height, width] map (F.interpolate input)');
+    }
+    const resized = interpolateNearest(zq, [f.shape[2]!, f.shape[3]!]);
+    return this.norm_layer.forward(f).mul(this.conv_y.forward(resized)).add(this.conv_b.forward(resized));
+  }
+}
+
+/** ``Downsample2D``: a stride-2 convolution (``padding=0`` pads right/bottom first) or 2x2 average pooling. */
 class Downsample2D extends Module {
-  readonly conv: Conv2d;
+  readonly conv: Conv2d | AvgPool2d;
 
-  constructor(channels: number, readonly padding: number) {
+  constructor(channels: number, readonly useConv: boolean, readonly padding: number, outChannels: number = channels) {
     super();
-    this.conv = this.registerModule('conv', new Conv2d(channels, channels, 3, { stride: 2, padding }));
+    if (!useConv && outChannels !== channels) throw new ValueError('Downsample2D without a convolution keeps the channel count');
+    this.conv = this.registerModule('conv', useConv
+      ? new Conv2d(channels, outChannels, 3, { stride: 2, padding })
+      : new AvgPool2d(2, 2));
   }
 
   forward(hidden: Tensor): Tensor {
     let input = hidden;
-    if (this.padding === 0) {
+    if (this.useConv && this.padding === 0) {
       const [batch, channels, height, width] = input.shape as [number, number, number, number];
       input = cat([input, zeros([batch, channels, height, 1], { dtype: input.dtype })], 3);
       input = cat([input, zeros([batch, channels, 1, width + 1], { dtype: input.dtype })], 2);
@@ -222,73 +275,408 @@ class Downsample2D extends Module {
   }
 }
 
-/** ``Upsample2D(use_conv=True)``: nearest 2x (or to ``size``) then a 3x3 convolution. */
+/** ``Upsample2D``: nearest 2x (or to ``outputSize``), then an optional 3x3 convolution. */
 class Upsample2D extends Module {
-  readonly conv: Conv2d;
+  readonly conv: Conv2d | null;
 
-  constructor(channels: number) {
+  constructor(channels: number, useConv: boolean) {
     super();
-    this.conv = this.registerModule('conv', new Conv2d(channels, channels, 3, { padding: 1 }));
+    this.conv = useConv ? this.registerModule('conv', new Conv2d(channels, channels, 3, { padding: 1 })) : null;
   }
 
   forward(hidden: Tensor, size: readonly [number, number] | null = null): Tensor {
     const target: [number, number] = size ? [size[0], size[1]] : [hidden.shape[2]! * 2, hidden.shape[3]! * 2];
-    return this.conv.forward(interpolateNearest(hidden, target));
+    const upsampled = interpolateNearest(hidden, target);
+    return this.conv ? this.conv.forward(upsampled) : upsampled;
   }
 }
 
-/** diffusers ``Attention`` with ``AttnProcessor2_0`` (the default processor). */
+/** ``F.pad(x, (p, p, p, p), mode='reflect')`` for ``[N, C, H, W]``. */
+function reflectPad(x: Tensor, pad: number): Tensor {
+  let result = x;
+  for (const dim of [3, 2]) {
+    const size = result.shape[dim]!;
+    if (pad >= size) throw new ValueError(`Padding size should be less than the corresponding input dimension, but got: padding (${pad}, ${pad}) at dimension ${dim} of input ${result.ndim}`);
+    const before = Array.from({ length: pad }, (_, index) => pad - index);
+    const after = Array.from({ length: pad }, (_, index) => size - 2 - index);
+    result = cat([result.indexSelect(dim, before), result, result.indexSelect(dim, after)], dim);
+  }
+  return result;
+}
+
+/** The dense ``[C, C, 4, 4]`` weight that applies ``kernel`` to each channel independently. */
+function channelDiagonalWeight(channels: number, kernel: readonly number[], dtype: Tensor['dtype']): Tensor {
+  const size = kernel.length;
+  const values = new Float32Array(channels * channels * size * size);
+  for (let c = 0; c < channels; c += 1) {
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) values[((c * channels + c) * size + y) * size + x] = Math.fround(kernel[y]! * kernel[x]!);
+    }
+  }
+  return tensor(values, { shape: [channels, channels, size, size], dtype });
+}
+
+const K_KERNEL = [1 / 8, 3 / 8, 3 / 8, 1 / 8].map(Math.fround);
+
+/** ``KDownsample2D``: reflect padding and a fixed ``[1, 3, 3, 1] / 8`` stride-2 filter. */
+class KDownsample2D extends Module {
+  constructor() {
+    super();
+    this.registerBuffer('kernel', tensor(K_KERNEL.flatMap((a) => K_KERNEL.map((b) => Math.fround(a * b))), { shape: [4, 4] }), false);
+  }
+
+  forward(inputs: Tensor): Tensor {
+    const padded = reflectPad(inputs, 1);
+    return conv2d(padded, channelDiagonalWeight(inputs.shape[1]!, K_KERNEL, inputs.dtype), null, { stride: 2 });
+  }
+}
+
+/** ``KUpsample2D``: reflect padding and a fixed ``[1, 3, 3, 1] / 4`` stride-2 transposed filter. */
+class KUpsample2D extends Module {
+  constructor() {
+    super();
+    const kernel = K_KERNEL.map((value) => Math.fround(value * 2));
+    this.registerBuffer('kernel', tensor(kernel.flatMap((a) => kernel.map((b) => Math.fround(a * b))), { shape: [4, 4] }), false);
+  }
+
+  forward(inputs: Tensor): Tensor {
+    // conv_transpose2d(x, w, stride=2, padding=3) = conv2d(zero-interleaved x, flipped w, padding=0)
+    // for a symmetric, channel-diagonal 4x4 kernel.
+    const padded = reflectPad(inputs, 1);
+    const [batch, channels, height, width] = padded.shape as [number, number, number, number];
+    const zero = zeros(padded.shape, { dtype: padded.dtype });
+    const wide = stack([padded, zero], 4).reshape(batch, channels, height, width * 2).slice(3, 0, width * 2 - 1);
+    const zeroRows = zeros(wide.shape, { dtype: wide.dtype });
+    const dilated = stack([wide, zeroRows], 3).reshape(batch, channels, height * 2, width * 2 - 1).slice(2, 0, height * 2 - 1);
+    const kernel = K_KERNEL.map((value) => Math.fround(value * 2));
+    return conv2d(dilated, channelDiagonalWeight(channels, kernel, inputs.dtype), null, { stride: 1 });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ResNet blocks.
+// ---------------------------------------------------------------------------
+
+interface ResnetOptions {
+  inChannels: number;
+  outChannels: number;
+  tembChannels: number | null;
+  eps: number;
+  groups: number | null;
+  groupsOut?: number | null;
+  dropout: number;
+  timeEmbeddingNorm: string;
+  nonLinearity: string;
+  outputScaleFactor: number;
+  skipTimeAct?: boolean;
+  up?: boolean;
+  down?: boolean;
+  convShortcutBias?: boolean;
+  conv2dOutChannels?: number | null;
+}
+
+function groupCount(groups: number | null | undefined, where: string): number {
+  if (typeof groups !== 'number') throw new TypeError(`${where}: GroupNorm needs an integer num_groups (norm_num_groups is None)`);
+  return groups;
+}
+
+interface Resnet extends Module {
+  forward(input: Tensor, temb: Tensor | null): Tensor;
+}
+
+export class ResnetBlock2D extends Module implements Resnet {
+  readonly norm1: GroupNorm;
+  readonly conv1: Conv2d;
+  readonly time_emb_proj: Linear | null;
+  readonly norm2: GroupNorm;
+  readonly dropout: Dropout;
+  readonly conv2: Conv2d;
+  readonly nonlinearity: Act;
+  readonly upsample: Upsample2D | null;
+  readonly downsample: Downsample2D | null;
+  readonly conv_shortcut: Conv2d | null;
+  readonly timeEmbeddingNorm: string;
+  readonly outputScaleFactor: number;
+  readonly skipTimeAct: boolean;
+
+  constructor(options: ResnetOptions) {
+    super();
+    const { inChannels, outChannels, tembChannels, eps } = options;
+    if (options.timeEmbeddingNorm === 'ada_group' || options.timeEmbeddingNorm === 'spatial') {
+      throw new ValueError(`This class cannot be used with \`time_embedding_norm==${options.timeEmbeddingNorm}\`, please use \`ResnetBlockCondNorm2D\` instead`);
+    }
+    this.timeEmbeddingNorm = options.timeEmbeddingNorm;
+    this.outputScaleFactor = options.outputScaleFactor;
+    this.skipTimeAct = options.skipTimeAct === true;
+    const groups = groupCount(options.groups, 'ResnetBlock2D');
+    const groupsOut = options.groupsOut ?? groups;
+    this.norm1 = this.registerModule('norm1', new GroupNorm(groups, inChannels, { eps }));
+    this.conv1 = this.registerModule('conv1', new Conv2d(inChannels, outChannels, 3, { padding: 1 }));
+    if (tembChannels !== null) {
+      if (this.timeEmbeddingNorm === 'default') this.time_emb_proj = this.registerModule('time_emb_proj', new Linear(tembChannels, outChannels));
+      else if (this.timeEmbeddingNorm === 'scale_shift') this.time_emb_proj = this.registerModule('time_emb_proj', new Linear(tembChannels, 2 * outChannels));
+      else throw new ValueError(`unknown time_embedding_norm : ${this.timeEmbeddingNorm} `);
+    } else {
+      this.time_emb_proj = null;
+    }
+    this.norm2 = this.registerModule('norm2', new GroupNorm(groupsOut, outChannels, { eps }));
+    this.dropout = this.registerModule('dropout', new Dropout(options.dropout));
+    const convOut = options.conv2dOutChannels ?? outChannels;
+    this.conv2 = this.registerModule('conv2', new Conv2d(outChannels, convOut, 3, { padding: 1 }));
+    this.nonlinearity = this.registerModule('nonlinearity', activation(options.nonLinearity));
+    this.upsample = options.up ? this.registerModule('upsample', new Upsample2D(inChannels, false)) : null;
+    this.downsample = !options.up && options.down ? this.registerModule('downsample', new Downsample2D(inChannels, false, 1)) : null;
+    this.conv_shortcut = inChannels !== convOut
+      ? this.registerModule('conv_shortcut', new Conv2d(inChannels, convOut, 1, { bias: options.convShortcutBias !== false }))
+      : null;
+  }
+
+  forward(input: Tensor, temb: Tensor | null): Tensor {
+    let residual = input;
+    let hidden = this.nonlinearity.forward(this.norm1.forward(input));
+    if (this.upsample) {
+      residual = this.upsample.forward(residual);
+      hidden = this.upsample.forward(hidden);
+    } else if (this.downsample) {
+      residual = this.downsample.forward(residual);
+      hidden = this.downsample.forward(hidden);
+    }
+    hidden = this.conv1.forward(hidden);
+    let time: Tensor | null = temb;
+    if (this.time_emb_proj && temb) {
+      time = this.time_emb_proj.forward(this.skipTimeAct ? temb : this.nonlinearity.forward(temb));
+      time = time.reshape(time.shape[0]!, time.shape[1]!, 1, 1);
+    }
+    if (this.timeEmbeddingNorm === 'default') {
+      if (time) hidden = hidden.add(time);
+      hidden = this.norm2.forward(hidden);
+    } else if (this.timeEmbeddingNorm === 'scale_shift') {
+      if (!time) throw new ValueError(` \`temb\` should not be None when \`time_embedding_norm\` is ${this.timeEmbeddingNorm}`);
+      const [scale, shift] = time.chunk(2, 1) as [Tensor, Tensor];
+      hidden = this.norm2.forward(hidden).mul(scale.add(1)).add(shift);
+    } else {
+      hidden = this.norm2.forward(hidden);
+    }
+    hidden = this.conv2.forward(this.dropout.forward(this.nonlinearity.forward(hidden)));
+    const shortcut = this.conv_shortcut ? this.conv_shortcut.forward(residual) : residual;
+    const output = shortcut.add(hidden);
+    return this.outputScaleFactor === 1 ? output : output.div(this.outputScaleFactor);
+  }
+}
+
+/** ``ResnetBlockCondNorm2D``: a ResNet block whose norms take the time embedding (``ada_group`` or ``spatial``). */
+export class ResnetBlockCondNorm2D extends Module implements Resnet {
+  readonly norm1: AdaGroupNorm | SpatialNorm;
+  readonly conv1: Conv2d;
+  readonly norm2: AdaGroupNorm | SpatialNorm;
+  readonly dropout: Dropout;
+  readonly conv2: Conv2d;
+  readonly nonlinearity: Act;
+  readonly upsample: Upsample2D | null;
+  readonly downsample: Downsample2D | null;
+  readonly conv_shortcut: Conv2d | null;
+  readonly outputScaleFactor: number;
+
+  constructor(options: ResnetOptions) {
+    super();
+    const { inChannels, outChannels, eps } = options;
+    const temb = options.tembChannels ?? 512;
+    const groups = groupCount(options.groups, 'ResnetBlockCondNorm2D');
+    const groupsOut = options.groupsOut ?? groups;
+    this.outputScaleFactor = options.outputScaleFactor;
+    const norm = (channels: number, count: number): AdaGroupNorm | SpatialNorm => {
+      if (options.timeEmbeddingNorm === 'ada_group') return new AdaGroupNorm(temb, channels, count, null, eps);
+      if (options.timeEmbeddingNorm === 'spatial') return new SpatialNorm(channels, temb);
+      throw new ValueError(` unsupported time_embedding_norm: ${options.timeEmbeddingNorm}`);
+    };
+    this.norm1 = this.registerModule('norm1', norm(inChannels, groups));
+    this.conv1 = this.registerModule('conv1', new Conv2d(inChannels, outChannels, 3, { padding: 1 }));
+    this.norm2 = this.registerModule('norm2', norm(outChannels, groupsOut));
+    this.dropout = this.registerModule('dropout', new Dropout(options.dropout));
+    const convOut = options.conv2dOutChannels ?? outChannels;
+    this.conv2 = this.registerModule('conv2', new Conv2d(outChannels, convOut, 3, { padding: 1 }));
+    this.nonlinearity = this.registerModule('nonlinearity', activation(options.nonLinearity));
+    this.upsample = options.up ? this.registerModule('upsample', new Upsample2D(inChannels, false)) : null;
+    this.downsample = !options.up && options.down ? this.registerModule('downsample', new Downsample2D(inChannels, false, 1)) : null;
+    this.conv_shortcut = inChannels !== convOut
+      ? this.registerModule('conv_shortcut', new Conv2d(inChannels, convOut, 1, { bias: options.convShortcutBias !== false }))
+      : null;
+  }
+
+  forward(input: Tensor, temb: Tensor | null): Tensor {
+    let residual = input;
+    let hidden = this.nonlinearity.forward(this.norm1.forward(input, temb!));
+    if (this.upsample) {
+      residual = this.upsample.forward(residual);
+      hidden = this.upsample.forward(hidden);
+    } else if (this.downsample) {
+      residual = this.downsample.forward(residual);
+      hidden = this.downsample.forward(hidden);
+    }
+    hidden = this.conv1.forward(hidden);
+    hidden = this.nonlinearity.forward(this.norm2.forward(hidden, temb!));
+    hidden = this.conv2.forward(this.dropout.forward(hidden));
+    const shortcut = this.conv_shortcut ? this.conv_shortcut.forward(residual) : residual;
+    const output = shortcut.add(hidden);
+    return this.outputScaleFactor === 1 ? output : output.div(this.outputScaleFactor);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Attention.
+// ---------------------------------------------------------------------------
+
+interface AttentionOptions {
+  queryDim: number;
+  crossAttentionDim?: number | null;
+  heads: number;
+  dimHead: number;
+  dropout?: number;
+  bias?: boolean;
+  crossAttentionNorm?: string | null;
+  crossAttentionNormNumGroups?: number;
+  addedKvProjDim?: number | null;
+  normNumGroups?: number | null;
+  spatialNormDim?: number | null;
+  outBias?: boolean;
+  onlyCrossAttention?: boolean;
+  eps?: number;
+  rescaleOutputFactor?: number;
+  residualConnection?: boolean;
+  /** ``AttnAddedKVProcessor2_0`` (simple cross-attention blocks) instead of ``AttnProcessor2_0``. */
+  addedKvProcessor?: boolean;
+}
+
+/** diffusers ``Attention`` with ``AttnProcessor2_0`` or ``AttnAddedKVProcessor2_0``. */
 class DiffusersAttention extends Module {
   readonly heads: number;
   readonly headDim: number;
   readonly residualConnection: boolean;
   readonly rescaleOutputFactor: number;
+  readonly onlyCrossAttention: boolean;
+  readonly addedKvProcessor: boolean;
   readonly group_norm: GroupNorm | null;
+  readonly spatial_norm: SpatialNorm | null;
+  readonly norm_cross: LayerNorm | GroupNorm | null;
   readonly to_q: Linear;
-  readonly to_k: Linear;
-  readonly to_v: Linear;
+  readonly to_k: Linear | null;
+  readonly to_v: Linear | null;
+  readonly add_k_proj: Linear | null;
+  readonly add_v_proj: Linear | null;
   readonly to_out: ModuleList<Module>;
 
-  constructor(options: {
-    queryDim: number; heads: number; dimHead: number; crossAttentionDim?: number | null; bias?: boolean; outBias?: boolean;
-    dropout?: number; groupNormGroups?: number | null; eps?: number; residualConnection?: boolean; rescaleOutputFactor?: number;
-  }) {
+  constructor(options: AttentionOptions) {
     super();
     const inner = options.dimHead * options.heads;
     const cross = options.crossAttentionDim ?? options.queryDim;
     const bias = options.bias ?? false;
+    const added = options.addedKvProjDim ?? null;
     this.heads = options.heads;
     this.headDim = options.dimHead;
     this.residualConnection = options.residualConnection ?? false;
     this.rescaleOutputFactor = options.rescaleOutputFactor ?? 1;
-    this.group_norm = options.groupNormGroups
-      ? this.registerModule('group_norm', new GroupNorm(options.groupNormGroups, options.queryDim, { eps: options.eps ?? 1e-5 }))
+    this.onlyCrossAttention = options.onlyCrossAttention ?? false;
+    this.addedKvProcessor = options.addedKvProcessor ?? false;
+    if (added === null && this.onlyCrossAttention) {
+      throw new ValueError('`only_cross_attention` can only be set to True if `added_kv_proj_dim` is not None. Make sure to set either `only_cross_attention=False` or define `added_kv_proj_dim`.');
+    }
+    this.group_norm = options.normNumGroups !== null && options.normNumGroups !== undefined
+      ? this.registerModule('group_norm', new GroupNorm(options.normNumGroups, options.queryDim, { eps: options.eps ?? 1e-5 }))
       : null;
+    this.spatial_norm = options.spatialNormDim !== null && options.spatialNormDim !== undefined
+      ? this.registerModule('spatial_norm', new SpatialNorm(options.queryDim, options.spatialNormDim))
+      : null;
+    const crossNorm = options.crossAttentionNorm ?? null;
+    if (crossNorm === null) this.norm_cross = null;
+    else if (crossNorm === 'layer_norm') this.norm_cross = this.registerModule('norm_cross', new LayerNorm(cross));
+    else if (crossNorm === 'group_norm') {
+      this.norm_cross = this.registerModule('norm_cross', new GroupNorm(options.crossAttentionNormNumGroups ?? 32, added ?? cross, { eps: 1e-5 }));
+    } else {
+      throw new ValueError(`unknown cross_attention_norm: ${crossNorm}. Should be None, 'layer_norm' or 'group_norm'`);
+    }
     this.to_q = this.registerModule('to_q', new Linear(options.queryDim, inner, { bias }));
-    this.to_k = this.registerModule('to_k', new Linear(cross, inner, { bias }));
-    this.to_v = this.registerModule('to_v', new Linear(cross, inner, { bias }));
+    this.to_k = this.onlyCrossAttention ? null : this.registerModule('to_k', new Linear(cross, inner, { bias }));
+    this.to_v = this.onlyCrossAttention ? null : this.registerModule('to_v', new Linear(cross, inner, { bias }));
+    this.add_k_proj = added === null ? null : this.registerModule('add_k_proj', new Linear(added, inner));
+    this.add_v_proj = added === null ? null : this.registerModule('add_v_proj', new Linear(added, inner));
     this.to_out = this.registerModule('to_out', new ModuleList<Module>([
       new Linear(inner, options.queryDim, { bias: options.outBias ?? true }), new Dropout(options.dropout ?? 0),
     ]));
   }
 
-  /** ``bias`` is an additive ``[batch, 1, keys]`` mask (diffusers' converted attention mask). */
-  forward(hidden: Tensor, encoder: Tensor | null = null, bias: Tensor | null = null): Tensor {
+  private normCross(encoder: Tensor): Tensor {
+    if (this.norm_cross instanceof LayerNorm) return this.norm_cross.forward(encoder);
+    return this.norm_cross!.forward(encoder.transpose(1, 2)).transpose(1, 2);
+  }
+
+  /**
+   * Python ``prepare_attention_mask`` for an additive ``[batch, 1, keys]``
+   * mask: zero-padded by ``targetLength`` when its length differs, as a
+   * ``[batch, 1, 1, keys']`` bias broadcast over heads.
+   */
+  private prepareMask(mask: Tensor | null, targetLength: number): Tensor | null {
+    if (mask === null) return null;
+    let prepared = mask;
+    const current = mask.shape[mask.ndim - 1]!;
+    if (current !== targetLength) {
+      prepared = cat([prepared, zeros([...prepared.shape.slice(0, -1), targetLength], { dtype: prepared.dtype })], prepared.ndim - 1);
+    }
+    return prepared.unsqueeze(1);
+  }
+
+  private output(states: Tensor): Tensor {
+    return (this.to_out.at(1) as Dropout).forward((this.to_out.at(0) as Linear).forward(states));
+  }
+
+  /** ``mask`` is the UNet's additive ``[batch, 1, keys]`` mask (``(1 - mask) * -10000``). */
+  forward(hidden: Tensor, encoder: Tensor | null = null, mask: Tensor | null = null, temb: Tensor | null = null): Tensor {
+    return this.addedKvProcessor ? this.addedKv(hidden, encoder, mask) : this.standard(hidden, encoder, mask, temb);
+  }
+
+  private standard(hidden: Tensor, encoder: Tensor | null, mask: Tensor | null, temb: Tensor | null): Tensor {
     const residual = hidden;
-    const spatial = hidden.ndim === 4;
-    const [batch, channels, height, width] = hidden.shape as [number, number, number, number];
-    let states = spatial ? hidden.reshape(batch, channels, height * width).transpose(1, 2) : hidden;
+    let states = hidden;
+    if (this.spatial_norm) states = this.spatial_norm.forward(states, temb);
+    const spatial = states.ndim === 4;
+    const [batch, channels, height, width] = states.shape as [number, number, number, number];
+    if (spatial) states = states.reshape(batch, channels, height * width).transpose(1, 2);
+    const sequence = (encoder ?? states).shape[1]!;
+    const bias = this.prepareMask(mask, sequence);
     if (this.group_norm) states = this.group_norm.forward(states.transpose(1, 2)).transpose(1, 2);
-    const context = encoder ?? states;
-    const q = splitHeads(this.to_q.forward(states), this.heads);
-    const k = splitHeads(this.to_k.forward(context), this.heads);
-    const v = splitHeads(this.to_v.forward(context), this.heads);
-    const mask = bias ? bias.unsqueeze(1) : null;
-    let output = mergeHeads(attention(q, k, v, { scale: this.headDim ** -0.5, bias: mask }));
-    output = (this.to_out.at(1) as Dropout).forward((this.to_out.at(0) as Linear).forward(output));
+    const query = this.to_q.forward(states);
+    let context = encoder ?? states;
+    if (encoder !== null && this.norm_cross) context = this.normCross(encoder);
+    const q = splitHeads(query, this.heads);
+    const k = splitHeads(this.to_k!.forward(context), this.heads);
+    const v = splitHeads(this.to_v!.forward(context), this.heads);
+    let output = this.output(mergeHeads(attention(q, k, v, { scale: (q.shape[3]!) ** -0.5, bias })));
     if (spatial) output = output.transpose(-1, -2).reshape(batch, channels, height, width);
     if (this.residualConnection) output = output.add(residual);
     return this.rescaleOutputFactor === 1 ? output : output.div(this.rescaleOutputFactor);
+  }
+
+  private addedKv(hidden: Tensor, encoder: Tensor | null, mask: Tensor | null): Tensor {
+    const residual = hidden;
+    const [batch, channels] = hidden.shape as [number, number];
+    let states = hidden.reshape(batch, channels, -1).transpose(1, 2);
+    const sequence = states.shape[1]!;
+    const bias = this.prepareMask(mask, sequence);
+    let context: Tensor;
+    if (encoder === null) context = states;
+    else context = this.norm_cross ? this.normCross(encoder) : encoder;
+    states = this.group_norm!.forward(states.transpose(1, 2)).transpose(1, 2);
+    const q = splitHeads(this.to_q.forward(states), this.heads);
+    let k = splitHeads(this.add_k_proj!.forward(context), this.heads);
+    let v = splitHeads(this.add_v_proj!.forward(context), this.heads);
+    if (!this.onlyCrossAttention) {
+      k = cat([k, splitHeads(this.to_k!.forward(states), this.heads)], 2);
+      v = cat([v, splitHeads(this.to_v!.forward(states), this.heads)], 2);
+    }
+    if (bias && bias.shape[bias.ndim - 1] !== k.shape[2]) {
+      throw new ValueError(`The size of tensor a (${k.shape[2]}) must match the size of tensor b (${bias.shape[bias.ndim - 1]}) at non-singleton dimension 3`);
+    }
+    const output = this.output(mergeHeads(attention(q, k, v, { scale: (q.shape[3]!) ** -0.5, bias })));
+    return output.transpose(-1, -2).reshape(residual.shape).add(residual);
   }
 }
 
@@ -341,9 +729,9 @@ class BasicTransformerBlock extends Module {
     this.ff = this.registerModule('ff', new FeedForward(dim, dropout));
   }
 
-  forward(hidden: Tensor, encoder: Tensor, encoderBias: Tensor | null): Tensor {
+  forward(hidden: Tensor, encoder: Tensor, encoderMask: Tensor | null): Tensor {
     let states = this.attn1.forward(this.norm1.forward(hidden), this.onlyCrossAttention ? encoder : null, null).add(hidden);
-    states = this.attn2.forward(this.norm2.forward(states), encoder, encoderBias).add(states);
+    states = this.attn2.forward(this.norm2.forward(states), encoder, encoderMask).add(states);
     return this.ff.forward(this.norm3.forward(states)).add(states);
   }
 }
@@ -355,10 +743,10 @@ class Transformer2DModel extends Module {
   readonly proj_out: Linear | Conv2d;
 
   constructor(heads: number, headDim: number, readonly channels: number, layers: number, crossAttentionDim: number,
-    groups: number, readonly linearProjection: boolean, onlyCrossAttention: boolean, dropout: number) {
+    groups: number | null, readonly linearProjection: boolean, onlyCrossAttention: boolean, dropout: number) {
     super();
     const inner = heads * headDim;
-    this.norm = this.registerModule('norm', new GroupNorm(groups, channels, { eps: 1e-6 }));
+    this.norm = this.registerModule('norm', new GroupNorm(groupCount(groups, 'Transformer2DModel'), channels, { eps: 1e-6 }));
     this.proj_in = this.registerModule('proj_in', linearProjection ? new Linear(channels, inner) : new Conv2d(channels, inner, 1));
     this.transformer_blocks = this.registerModule('transformer_blocks', new ModuleList(
       Array.from({ length: layers }, () => new BasicTransformerBlock(inner, heads, headDim, crossAttentionDim, dropout, onlyCrossAttention)),
@@ -366,7 +754,7 @@ class Transformer2DModel extends Module {
     this.proj_out = this.registerModule('proj_out', linearProjection ? new Linear(inner, channels) : new Conv2d(inner, channels, 1));
   }
 
-  forward(hidden: Tensor, encoder: Tensor, encoderBias: Tensor | null): Tensor {
+  forward(hidden: Tensor, encoder: Tensor, encoderMask: Tensor | null): Tensor {
     const [batch, , height, width] = hidden.shape as [number, number, number, number];
     const residual = hidden;
     let states = this.norm.forward(hidden);
@@ -379,13 +767,62 @@ class Transformer2DModel extends Module {
       inner = states.shape[1]!;
       states = (this.proj_in as Linear).forward(states.permute(0, 2, 3, 1).reshape(batch, height * width, inner));
     }
-    for (const block of this.transformer_blocks) states = block.forward(states, encoder, encoderBias);
+    for (const block of this.transformer_blocks) states = block.forward(states, encoder, encoderMask);
     if (!this.linearProjection) {
       states = (this.proj_out as Conv2d).forward(states.reshape(batch, height, width, inner).permute(0, 3, 1, 2));
     } else {
       states = (this.proj_out as Linear).forward(states).reshape(batch, height, width, this.channels).permute(0, 3, 1, 2);
     }
     return states.add(residual);
+  }
+}
+
+/** ``KAttentionBlock``: AdaGroupNorm-conditioned self- and cross-attention with residuals. */
+class KAttentionBlock extends Module {
+  readonly norm1: AdaGroupNorm | null;
+  readonly attn1: DiffusersAttention | null;
+  readonly norm2: AdaGroupNorm;
+  readonly attn2: DiffusersAttention;
+
+  constructor(dim: number, heads: number, headDim: number, options: {
+    crossAttentionDim: number | null; tembChannels: number; bias: boolean; addSelfAttention: boolean;
+    crossAttentionNorm: string | null; groupSize: number;
+  }) {
+    super();
+    const groups = Math.max(1, Math.floor(dim / options.groupSize));
+    if (options.addSelfAttention) {
+      this.norm1 = this.registerModule('norm1', new AdaGroupNorm(options.tembChannels, dim, groups));
+      this.attn1 = this.registerModule('attn1', new DiffusersAttention({ queryDim: dim, heads, dimHead: headDim, bias: options.bias }));
+    } else {
+      this.norm1 = null;
+      this.attn1 = null;
+    }
+    this.norm2 = this.registerModule('norm2', new AdaGroupNorm(options.tembChannels, dim, groups));
+    this.attn2 = this.registerModule('attn2', new DiffusersAttention({
+      queryDim: dim, crossAttentionDim: options.crossAttentionDim, heads, dimHead: headDim, bias: options.bias,
+      crossAttentionNorm: options.crossAttentionNorm,
+    }));
+  }
+
+  private static to3d(hidden: Tensor): Tensor {
+    const [batch, channels, height, width] = hidden.shape as [number, number, number, number];
+    return hidden.permute(0, 2, 3, 1).reshape(batch, height * width, channels);
+  }
+
+  private static to4d(hidden: Tensor, height: number, width: number): Tensor {
+    return hidden.permute(0, 2, 1).reshape(hidden.shape[0]!, -1, height, width);
+  }
+
+  forward(hidden: Tensor, encoder: Tensor | null, emb: Tensor, attentionMask: Tensor | null, encoderMask: Tensor | null): Tensor {
+    let states = hidden;
+    const [height, width] = [hidden.shape[2]!, hidden.shape[3]!];
+    if (this.attn1 && this.norm1) {
+      const normed = KAttentionBlock.to3d(this.norm1.forward(states, emb));
+      states = KAttentionBlock.to4d(this.attn1.forward(normed, null, attentionMask), height, width).add(states);
+    }
+    const normed = KAttentionBlock.to3d(this.norm2.forward(states, emb));
+    const output = this.attn2.forward(normed, encoder, encoder === null ? attentionMask : encoderMask);
+    return KAttentionBlock.to4d(output, height, width).add(states);
   }
 }
 
@@ -403,20 +840,40 @@ interface BlockArgs {
   resample: boolean;
   eps: number;
   act: string;
-  groups: number;
-  crossAttentionDim: number;
+  groups: number | null;
+  crossAttentionDim: number | null;
+  /** ``num_attention_heads`` for Transformer2DModel blocks. */
   heads: number;
+  /** ``attention_head_dim`` for attention, simple cross-attention and K blocks. */
+  headDim: number;
   downsamplePadding: number;
   linearProjection: boolean;
   onlyCrossAttention: boolean;
   timeScaleShift: string;
   dropout: number;
+  skipTimeAct: boolean;
+  outputScaleFactor: number;
+  crossAttentionNorm: string | null;
 }
 
-function resnet(args: BlockArgs, inChannels: number, outChannels: number, outputScaleFactor = 1): ResnetBlock2D {
+/** Residuals are ``null`` where K blocks record no skip connection. */
+type Residual = Tensor | null;
+
+interface DownBlock extends Module {
+  readonly hasCrossAttention: boolean;
+  forward(hidden: Tensor, temb: Tensor | null, encoder: Tensor, mask: Tensor | null): [Tensor, Residual[]];
+}
+
+interface UpBlock extends Module {
+  readonly hasCrossAttention: boolean;
+  readonly resnets: ModuleList<Module>;
+  forward(hidden: Tensor, residuals: Residual[], temb: Tensor | null, encoder: Tensor, mask: Tensor | null, size: readonly [number, number] | null): Tensor;
+}
+
+function resnet(args: BlockArgs, inChannels: number, outChannels: number, extra: Partial<ResnetOptions> = {}): ResnetBlock2D {
   return new ResnetBlock2D({
     inChannels, outChannels, tembChannels: args.temb, eps: args.eps, groups: args.groups, dropout: args.dropout,
-    timeEmbeddingNorm: args.timeScaleShift, nonLinearity: args.act, outputScaleFactor,
+    timeEmbeddingNorm: args.timeScaleShift, nonLinearity: args.act, outputScaleFactor: 1, ...extra,
   });
 }
 
@@ -426,44 +883,80 @@ function transformerLayers(args: BlockArgs): number[] {
     : args.transformerLayers;
 }
 
-interface DownBlock extends Module {
-  readonly hasCrossAttention: boolean;
-  forward(hidden: Tensor, temb: Tensor | null, encoder: Tensor, bias: Tensor | null): [Tensor, Tensor[]];
+function crossDim(args: BlockArgs, block: string): number {
+  if (args.crossAttentionDim === null) throw new ValueError(`cross_attention_dim must be specified for ${block}`);
+  return args.crossAttentionDim;
+}
+
+/** Attention modules diffusers creates with ``_from_deprecated_attn_block=True``. */
+const DEPRECATED_ATTENTION = new WeakSet<DiffusersAttention>();
+
+function deprecated(module: DiffusersAttention): DiffusersAttention {
+  DEPRECATED_ATTENTION.add(module);
+  return module;
+}
+
+/** A self-attention block over spatial positions; ``legacy`` marks ``_from_deprecated_attn_block`` attentions. */
+function spatialAttention(channels: number, headDim: number, groups: number | null, eps: number, legacy: boolean): DiffusersAttention {
+  const module = new DiffusersAttention({
+    queryDim: channels, heads: Math.floor(channels / headDim), dimHead: headDim, eps,
+    normNumGroups: groups, residualConnection: true, bias: true,
+  });
+  return legacy ? deprecated(module) : module;
+}
+
+function simpleCrossAttention(args: BlockArgs, channels: number, onlyCross: boolean): DiffusersAttention {
+  return new DiffusersAttention({
+    queryDim: channels, crossAttentionDim: channels, heads: Math.floor(channels / args.headDim), dimHead: args.headDim,
+    addedKvProjDim: args.crossAttentionDim, normNumGroups: args.groups, bias: true, onlyCrossAttention: onlyCross,
+    crossAttentionNorm: args.crossAttentionNorm, addedKvProcessor: true,
+  });
+}
+
+function runDownsamplers(downsamplers: ModuleList<Module> | null, states: Tensor, temb: Tensor | null): Tensor {
+  let result = states;
+  if (downsamplers) {
+    for (const downsampler of downsamplers) {
+      result = downsampler instanceof ResnetBlock2D ? downsampler.forward(result, temb) : (downsampler as Downsample2D).forward(result);
+    }
+  }
+  return result;
 }
 
 class CrossAttnDownBlock2D extends Module implements DownBlock {
   readonly hasCrossAttention = true;
   readonly attentions: ModuleList<Transformer2DModel>;
   readonly resnets: ModuleList<ResnetBlock2D>;
-  readonly downsamplers: ModuleList<Downsample2D> | null;
+  readonly downsamplers: ModuleList<Module> | null;
 
   constructor(args: BlockArgs) {
     super();
+    const cross = crossDim(args, 'CrossAttnDownBlock2D');
     const layers = transformerLayers(args);
     const resnets: ResnetBlock2D[] = [];
     const attentions: Transformer2DModel[] = [];
     for (let index = 0; index < args.layers; index += 1) {
       resnets.push(resnet(args, index === 0 ? args.inChannels : args.outChannels, args.outChannels));
       attentions.push(new Transformer2DModel(args.heads, Math.floor(args.outChannels / args.heads), args.outChannels, layers[index]!,
-        args.crossAttentionDim, args.groups, args.linearProjection, args.onlyCrossAttention, 0));
+        cross, args.groups, args.linearProjection, args.onlyCrossAttention, 0));
     }
     this.attentions = this.registerModule('attentions', new ModuleList(attentions));
     this.resnets = this.registerModule('resnets', new ModuleList(resnets));
     this.downsamplers = args.resample
-      ? this.registerModule('downsamplers', new ModuleList([new Downsample2D(args.outChannels, args.downsamplePadding)]))
+      ? this.registerModule('downsamplers', new ModuleList<Module>([new Downsample2D(args.outChannels, true, args.downsamplePadding)]))
       : null;
   }
 
-  forward(hidden: Tensor, temb: Tensor | null, encoder: Tensor, bias: Tensor | null): [Tensor, Tensor[]] {
+  forward(hidden: Tensor, temb: Tensor | null, encoder: Tensor, mask: Tensor | null): [Tensor, Residual[]] {
     const outputs: Tensor[] = [];
     let states = hidden;
     for (let index = 0; index < this.resnets.length; index += 1) {
       states = this.resnets.at(index).forward(states, temb);
-      states = this.attentions.at(index).forward(states, encoder, bias);
+      states = this.attentions.at(index).forward(states, encoder, mask);
       outputs.push(states);
     }
     if (this.downsamplers) {
-      for (const downsampler of this.downsamplers) states = downsampler.forward(states);
+      states = runDownsamplers(this.downsamplers, states, temb);
       outputs.push(states);
     }
     return [states, outputs];
@@ -473,7 +966,7 @@ class CrossAttnDownBlock2D extends Module implements DownBlock {
 class DownBlock2D extends Module implements DownBlock {
   readonly hasCrossAttention = false;
   readonly resnets: ModuleList<ResnetBlock2D>;
-  readonly downsamplers: ModuleList<Downsample2D> | null;
+  readonly downsamplers: ModuleList<Module> | null;
 
   constructor(args: BlockArgs) {
     super();
@@ -481,11 +974,11 @@ class DownBlock2D extends Module implements DownBlock {
       Array.from({ length: args.layers }, (_, index) => resnet(args, index === 0 ? args.inChannels : args.outChannels, args.outChannels)),
     ));
     this.downsamplers = args.resample
-      ? this.registerModule('downsamplers', new ModuleList([new Downsample2D(args.outChannels, args.downsamplePadding)]))
+      ? this.registerModule('downsamplers', new ModuleList<Module>([new Downsample2D(args.outChannels, true, args.downsamplePadding)]))
       : null;
   }
 
-  forward(hidden: Tensor, temb: Tensor | null): [Tensor, Tensor[]] {
+  forward(hidden: Tensor, temb: Tensor | null): [Tensor, Residual[]] {
     const outputs: Tensor[] = [];
     let states = hidden;
     for (const block of this.resnets) {
@@ -493,95 +986,546 @@ class DownBlock2D extends Module implements DownBlock {
       outputs.push(states);
     }
     if (this.downsamplers) {
-      for (const downsampler of this.downsamplers) states = downsampler.forward(states);
+      states = runDownsamplers(this.downsamplers, states, temb);
       outputs.push(states);
     }
     return [states, outputs];
   }
 }
 
-interface UpBlock extends Module {
+/** ``ResnetDownsampleBlock2D``: ResNets, then a downsampling ResNet (``down=True``). */
+class ResnetDownsampleBlock2D extends Module implements DownBlock {
+  readonly hasCrossAttention = false;
   readonly resnets: ModuleList<ResnetBlock2D>;
-  forward(hidden: Tensor, residuals: Tensor[], temb: Tensor | null, encoder: Tensor, bias: Tensor | null, size: readonly [number, number] | null): Tensor;
-}
-
-function upResnets(args: BlockArgs): ResnetBlock2D[] {
-  return Array.from({ length: args.layers }, (_, index) => {
-    const skip = index === args.layers - 1 ? args.inChannels : args.outChannels;
-    const input = index === 0 ? args.prevOutputChannel! : args.outChannels;
-    return resnet(args, input + skip, args.outChannels);
-  });
-}
-
-class CrossAttnUpBlock2D extends Module implements UpBlock {
-  readonly attentions: ModuleList<Transformer2DModel>;
-  readonly resnets: ModuleList<ResnetBlock2D>;
-  readonly upsamplers: ModuleList<Upsample2D> | null;
+  readonly downsamplers: ModuleList<Module> | null;
 
   constructor(args: BlockArgs) {
     super();
-    const layers = transformerLayers(args);
-    const resnets = upResnets(args);
-    const attentions = resnets.map((_, index) => new Transformer2DModel(args.heads, Math.floor(args.outChannels / args.heads), args.outChannels,
-      layers[index]!, args.crossAttentionDim, args.groups, args.linearProjection, args.onlyCrossAttention, 0));
-    this.attentions = this.registerModule('attentions', new ModuleList(attentions));
-    this.resnets = this.registerModule('resnets', new ModuleList(resnets));
-    this.upsamplers = args.resample ? this.registerModule('upsamplers', new ModuleList([new Upsample2D(args.outChannels)])) : null;
+    const extra = { skipTimeAct: args.skipTimeAct, outputScaleFactor: args.outputScaleFactor };
+    this.resnets = this.registerModule('resnets', new ModuleList(
+      Array.from({ length: args.layers }, (_, index) => resnet(args, index === 0 ? args.inChannels : args.outChannels, args.outChannels, extra)),
+    ));
+    this.downsamplers = args.resample
+      ? this.registerModule('downsamplers', new ModuleList<Module>([resnet(args, args.outChannels, args.outChannels, { ...extra, down: true })]))
+      : null;
   }
 
-  forward(hidden: Tensor, residuals: Tensor[], temb: Tensor | null, encoder: Tensor, bias: Tensor | null, size: readonly [number, number] | null): Tensor {
+  forward(hidden: Tensor, temb: Tensor | null): [Tensor, Residual[]] {
+    const outputs: Tensor[] = [];
+    let states = hidden;
+    for (const block of this.resnets) {
+      states = block.forward(states, temb);
+      outputs.push(states);
+    }
+    if (this.downsamplers) {
+      states = runDownsamplers(this.downsamplers, states, temb);
+      outputs.push(states);
+    }
+    return [states, outputs];
+  }
+}
+
+/** ``AttnDownBlock2D``: ResNets with spatial self-attention (``downsample_type='conv'``). */
+class AttnDownBlock2D extends Module implements DownBlock {
+  readonly hasCrossAttention = false;
+  readonly attentions: ModuleList<DiffusersAttention>;
+  readonly resnets: ModuleList<ResnetBlock2D>;
+  readonly downsamplers: ModuleList<Module> | null;
+
+  constructor(args: BlockArgs) {
+    super();
+    const resnets: ResnetBlock2D[] = [];
+    const attentions: DiffusersAttention[] = [];
+    for (let index = 0; index < args.layers; index += 1) {
+      resnets.push(resnet(args, index === 0 ? args.inChannels : args.outChannels, args.outChannels));
+      attentions.push(spatialAttention(args.outChannels, args.headDim, args.groups, args.eps, true));
+    }
+    this.attentions = this.registerModule('attentions', new ModuleList(attentions));
+    this.resnets = this.registerModule('resnets', new ModuleList(resnets));
+    this.downsamplers = args.resample
+      ? this.registerModule('downsamplers', new ModuleList<Module>([new Downsample2D(args.outChannels, true, args.downsamplePadding)]))
+      : null;
+  }
+
+  forward(hidden: Tensor, temb: Tensor | null): [Tensor, Residual[]] {
+    const outputs: Tensor[] = [];
+    let states = hidden;
+    for (let index = 0; index < this.resnets.length; index += 1) {
+      states = this.attentions.at(index).forward(this.resnets.at(index).forward(states, temb));
+      outputs.push(states);
+    }
+    if (this.downsamplers) {
+      states = runDownsamplers(this.downsamplers, states, temb);
+      outputs.push(states);
+    }
+    return [states, outputs];
+  }
+}
+
+/** ``SimpleCrossAttnDownBlock2D``: ResNets with added-KV cross-attention (UnCLIP style). */
+class SimpleCrossAttnDownBlock2D extends Module implements DownBlock {
+  readonly hasCrossAttention = true;
+  readonly attentions: ModuleList<DiffusersAttention>;
+  readonly resnets: ModuleList<ResnetBlock2D>;
+  readonly downsamplers: ModuleList<Module> | null;
+
+  constructor(args: BlockArgs) {
+    super();
+    crossDim(args, 'SimpleCrossAttnDownBlock2D');
+    const extra = { skipTimeAct: args.skipTimeAct, outputScaleFactor: args.outputScaleFactor };
+    const resnets: ResnetBlock2D[] = [];
+    const attentions: DiffusersAttention[] = [];
+    for (let index = 0; index < args.layers; index += 1) {
+      resnets.push(resnet(args, index === 0 ? args.inChannels : args.outChannels, args.outChannels, extra));
+      attentions.push(simpleCrossAttention(args, args.outChannels, args.onlyCrossAttention));
+    }
+    this.attentions = this.registerModule('attentions', new ModuleList(attentions));
+    this.resnets = this.registerModule('resnets', new ModuleList(resnets));
+    this.downsamplers = args.resample
+      ? this.registerModule('downsamplers', new ModuleList<Module>([resnet(args, args.outChannels, args.outChannels, { ...extra, down: true })]))
+      : null;
+  }
+
+  forward(hidden: Tensor, temb: Tensor | null, encoder: Tensor, mask: Tensor | null): [Tensor, Residual[]] {
+    const outputs: Tensor[] = [];
+    let states = hidden;
+    for (let index = 0; index < this.resnets.length; index += 1) {
+      states = this.attentions.at(index).forward(this.resnets.at(index).forward(states, temb), encoder, mask);
+      outputs.push(states);
+    }
+    if (this.downsamplers) {
+      states = runDownsamplers(this.downsamplers, states, temb);
+      outputs.push(states);
+    }
+    return [states, outputs];
+  }
+}
+
+/** A K-block ResNet: ``groups = in // 32`` and ``groups_out = block out_channels // 32``. */
+function kResnet(args: BlockArgs, inChannels: number, outChannels: number, conv2dOutChannels: number | null = null): ResnetBlockCondNorm2D {
+  return new ResnetBlockCondNorm2D({
+    inChannels, outChannels, tembChannels: args.temb, eps: args.eps, groups: Math.floor(inChannels / 32), groupsOut: Math.floor(args.outChannels / 32),
+    dropout: args.dropout, timeEmbeddingNorm: 'ada_group', nonLinearity: args.act, outputScaleFactor: 1, convShortcutBias: false, conv2dOutChannels,
+  });
+}
+
+/** ``KDownBlock2D``: AdaGroupNorm ResNets and a K-downsampler. */
+class KDownBlock2D extends Module implements DownBlock {
+  readonly hasCrossAttention = false;
+  readonly resnets: ModuleList<ResnetBlockCondNorm2D>;
+  readonly downsamplers: ModuleList<KDownsample2D> | null;
+
+  constructor(args: BlockArgs) {
+    super();
+    this.resnets = this.registerModule('resnets', new ModuleList(
+      Array.from({ length: args.layers }, (_, index) => kResnet(args, index === 0 ? args.inChannels : args.outChannels, args.outChannels)),
+    ));
+    this.downsamplers = args.resample ? this.registerModule('downsamplers', new ModuleList([new KDownsample2D()])) : null;
+  }
+
+  forward(hidden: Tensor, temb: Tensor | null): [Tensor, Residual[]] {
+    const outputs: Tensor[] = [];
+    let states = hidden;
+    for (const block of this.resnets) {
+      states = block.forward(states, temb);
+      outputs.push(states);
+    }
+    if (this.downsamplers) for (const downsampler of this.downsamplers) states = downsampler.forward(states);
+    return [states, outputs];
+  }
+}
+
+/** ``KCrossAttnDownBlock2D``: AdaGroupNorm ResNets with K attention (self-attention only without downsampling). */
+class KCrossAttnDownBlock2D extends Module implements DownBlock {
+  readonly hasCrossAttention = true;
+  readonly resnets: ModuleList<ResnetBlockCondNorm2D>;
+  readonly attentions: ModuleList<KAttentionBlock>;
+  readonly downsamplers: ModuleList<KDownsample2D> | null;
+
+  constructor(args: BlockArgs) {
+    super();
+    const resnets: ResnetBlockCondNorm2D[] = [];
+    const attentions: KAttentionBlock[] = [];
+    for (let index = 0; index < args.layers; index += 1) {
+      resnets.push(kResnet(args, index === 0 ? args.inChannels : args.outChannels, args.outChannels));
+      attentions.push(new KAttentionBlock(args.outChannels, Math.floor(args.outChannels / args.headDim), args.headDim, {
+        crossAttentionDim: args.crossAttentionDim, tembChannels: args.temb!, bias: true, addSelfAttention: !args.resample,
+        crossAttentionNorm: 'layer_norm', groupSize: 32,
+      }));
+    }
+    this.resnets = this.registerModule('resnets', new ModuleList(resnets));
+    this.attentions = this.registerModule('attentions', new ModuleList(attentions));
+    this.downsamplers = args.resample ? this.registerModule('downsamplers', new ModuleList([new KDownsample2D()])) : null;
+  }
+
+  forward(hidden: Tensor, temb: Tensor | null, encoder: Tensor, mask: Tensor | null): [Tensor, Residual[]] {
+    const outputs: Residual[] = [];
+    let states = hidden;
+    for (let index = 0; index < this.resnets.length; index += 1) {
+      states = this.resnets.at(index).forward(states, temb);
+      states = this.attentions.at(index).forward(states, encoder, temb!, null, mask);
+      outputs.push(this.downsamplers ? states : null);
+    }
+    if (this.downsamplers) for (const downsampler of this.downsamplers) states = downsampler.forward(states);
+    return [states, outputs];
+  }
+}
+
+function popResidual(pending: Residual[]): Tensor {
+  const value = pending.pop();
+  if (value === null || value === undefined) throw new TypeError('expected Tensor as element 1 in argument 0, but got NoneType');
+  return value;
+}
+
+function upResnet(args: BlockArgs, index: number, extra: Partial<ResnetOptions> = {}): ResnetBlock2D {
+  const skip = index === args.layers - 1 ? args.inChannels : args.outChannels;
+  const input = index === 0 ? args.prevOutputChannel! : args.outChannels;
+  return resnet(args, input + skip, args.outChannels, extra);
+}
+
+function upResnets(args: BlockArgs, extra: Partial<ResnetOptions> = {}): ResnetBlock2D[] {
+  return Array.from({ length: args.layers }, (_, index) => upResnet(args, index, extra));
+}
+
+/**
+ * Build ``count`` (resnet, attention) pairs in diffusers' order: each layer's
+ * ResNet and then its attention, so seeded initialization draws match Python.
+ */
+function interleaved<R, A>(count: number, makeResnet: (index: number) => R, makeAttention: (index: number) => A): [R[], A[]] {
+  const resnets: R[] = [];
+  const attentions: A[] = [];
+  for (let index = 0; index < count; index += 1) {
+    resnets.push(makeResnet(index));
+    attentions.push(makeAttention(index));
+  }
+  return [resnets, attentions];
+}
+
+function runUpsamplers(upsamplers: ModuleList<Module> | null, states: Tensor, temb: Tensor | null, size: readonly [number, number] | null): Tensor {
+  let result = states;
+  if (upsamplers) {
+    for (const upsampler of upsamplers) {
+      if (upsampler instanceof ResnetBlock2D) result = upsampler.forward(result, temb);
+      else if (upsampler instanceof KUpsample2D) result = upsampler.forward(result);
+      else result = (upsampler as Upsample2D).forward(result, size);
+    }
+  }
+  return result;
+}
+
+class CrossAttnUpBlock2D extends Module implements UpBlock {
+  readonly hasCrossAttention = true;
+  readonly attentions: ModuleList<Transformer2DModel>;
+  readonly resnets: ModuleList<ResnetBlock2D>;
+  readonly upsamplers: ModuleList<Module> | null;
+
+  constructor(args: BlockArgs) {
+    super();
+    const cross = crossDim(args, 'CrossAttnUpBlock2D');
+    const layers = transformerLayers(args);
+    const [resnets, attentions] = interleaved(args.layers, (index) => upResnet(args, index), (index) => new Transformer2DModel(args.heads,
+      Math.floor(args.outChannels / args.heads), args.outChannels, layers[index]!, cross, args.groups, args.linearProjection, args.onlyCrossAttention, 0));
+    this.attentions = this.registerModule('attentions', new ModuleList(attentions));
+    this.resnets = this.registerModule('resnets', new ModuleList(resnets));
+    this.upsamplers = args.resample ? this.registerModule('upsamplers', new ModuleList<Module>([new Upsample2D(args.outChannels, true)])) : null;
+  }
+
+  forward(hidden: Tensor, residuals: Residual[], temb: Tensor | null, encoder: Tensor, mask: Tensor | null, size: readonly [number, number] | null): Tensor {
     let states = hidden;
     const pending = [...residuals];
     for (let index = 0; index < this.resnets.length; index += 1) {
-      states = cat([states, pending.pop()!], 1);
+      states = cat([states, popResidual(pending)], 1);
       states = this.resnets.at(index).forward(states, temb);
-      states = this.attentions.at(index).forward(states, encoder, bias);
+      states = this.attentions.at(index).forward(states, encoder, mask);
     }
-    if (this.upsamplers) for (const upsampler of this.upsamplers) states = upsampler.forward(states, size);
-    return states;
+    return runUpsamplers(this.upsamplers, states, temb, size);
   }
 }
 
 class UpBlock2D extends Module implements UpBlock {
+  readonly hasCrossAttention = false;
   readonly resnets: ModuleList<ResnetBlock2D>;
-  readonly upsamplers: ModuleList<Upsample2D> | null;
+  readonly upsamplers: ModuleList<Module> | null;
 
   constructor(args: BlockArgs) {
     super();
     this.resnets = this.registerModule('resnets', new ModuleList(upResnets(args)));
-    this.upsamplers = args.resample ? this.registerModule('upsamplers', new ModuleList([new Upsample2D(args.outChannels)])) : null;
+    this.upsamplers = args.resample ? this.registerModule('upsamplers', new ModuleList<Module>([new Upsample2D(args.outChannels, true)])) : null;
   }
 
-  forward(hidden: Tensor, residuals: Tensor[], temb: Tensor | null, _encoder: Tensor, _bias: Tensor | null, size: readonly [number, number] | null): Tensor {
+  forward(hidden: Tensor, residuals: Residual[], temb: Tensor | null, _encoder: Tensor, _mask: Tensor | null, size: readonly [number, number] | null): Tensor {
     let states = hidden;
     const pending = [...residuals];
-    for (const block of this.resnets) states = block.forward(cat([states, pending.pop()!], 1), temb);
-    if (this.upsamplers) for (const upsampler of this.upsamplers) states = upsampler.forward(states, size);
-    return states;
+    for (const block of this.resnets) states = block.forward(cat([states, popResidual(pending)], 1), temb);
+    return runUpsamplers(this.upsamplers, states, temb, size);
   }
 }
 
-class UNetMidBlock2DCrossAttn extends Module {
+/** ``ResnetUpsampleBlock2D``: ResNets, then an upsampling ResNet (``up=True``, which ignores ``size``). */
+class ResnetUpsampleBlock2D extends Module implements UpBlock {
+  readonly hasCrossAttention = false;
+  readonly resnets: ModuleList<ResnetBlock2D>;
+  readonly upsamplers: ModuleList<Module> | null;
+
+  constructor(args: BlockArgs) {
+    super();
+    const extra = { skipTimeAct: args.skipTimeAct, outputScaleFactor: args.outputScaleFactor };
+    this.resnets = this.registerModule('resnets', new ModuleList(upResnets(args, extra)));
+    this.upsamplers = args.resample
+      ? this.registerModule('upsamplers', new ModuleList<Module>([resnet(args, args.outChannels, args.outChannels, { ...extra, up: true })]))
+      : null;
+  }
+
+  forward(hidden: Tensor, residuals: Residual[], temb: Tensor | null): Tensor {
+    let states = hidden;
+    const pending = [...residuals];
+    for (const block of this.resnets) states = block.forward(cat([states, popResidual(pending)], 1), temb);
+    return runUpsamplers(this.upsamplers, states, temb, null);
+  }
+}
+
+/** ``AttnUpBlock2D``: ResNets with spatial self-attention and a convolutional upsampler (which ignores ``size``). */
+class AttnUpBlock2D extends Module implements UpBlock {
+  readonly hasCrossAttention = false;
+  readonly attentions: ModuleList<DiffusersAttention>;
+  readonly resnets: ModuleList<ResnetBlock2D>;
+  readonly upsamplers: ModuleList<Module> | null;
+
+  constructor(args: BlockArgs) {
+    super();
+    const [resnets, attentions] = interleaved(args.layers, (index) => upResnet(args, index),
+      () => spatialAttention(args.outChannels, args.headDim, args.groups, args.eps, false));
+    this.attentions = this.registerModule('attentions', new ModuleList(attentions));
+    this.resnets = this.registerModule('resnets', new ModuleList(resnets));
+    this.upsamplers = args.resample ? this.registerModule('upsamplers', new ModuleList<Module>([new Upsample2D(args.outChannels, true)])) : null;
+  }
+
+  forward(hidden: Tensor, residuals: Residual[], temb: Tensor | null): Tensor {
+    let states = hidden;
+    const pending = [...residuals];
+    for (let index = 0; index < this.resnets.length; index += 1) {
+      states = cat([states, popResidual(pending)], 1);
+      states = this.attentions.at(index).forward(this.resnets.at(index).forward(states, temb));
+    }
+    return runUpsamplers(this.upsamplers, states, temb, null);
+  }
+}
+
+/** ``SimpleCrossAttnUpBlock2D``: ResNets with added-KV cross-attention and an upsampling ResNet. */
+class SimpleCrossAttnUpBlock2D extends Module implements UpBlock {
+  readonly hasCrossAttention = true;
+  readonly attentions: ModuleList<DiffusersAttention>;
+  readonly resnets: ModuleList<ResnetBlock2D>;
+  readonly upsamplers: ModuleList<Module> | null;
+
+  constructor(args: BlockArgs) {
+    super();
+    crossDim(args, 'SimpleCrossAttnUpBlock2D');
+    const extra = { skipTimeAct: args.skipTimeAct, outputScaleFactor: args.outputScaleFactor };
+    const [resnets, attentions] = interleaved(args.layers, (index) => upResnet(args, index, extra),
+      () => simpleCrossAttention(args, args.outChannels, args.onlyCrossAttention));
+    this.attentions = this.registerModule('attentions', new ModuleList(attentions));
+    this.resnets = this.registerModule('resnets', new ModuleList(resnets));
+    this.upsamplers = args.resample
+      ? this.registerModule('upsamplers', new ModuleList<Module>([resnet(args, args.outChannels, args.outChannels, { ...extra, up: true })]))
+      : null;
+  }
+
+  forward(hidden: Tensor, residuals: Residual[], temb: Tensor | null, encoder: Tensor, mask: Tensor | null): Tensor {
+    let states = hidden;
+    const pending = [...residuals];
+    for (let index = 0; index < this.resnets.length; index += 1) {
+      states = cat([states, popResidual(pending)], 1);
+      states = this.attentions.at(index).forward(this.resnets.at(index).forward(states, temb), encoder, mask);
+    }
+    return runUpsamplers(this.upsamplers, states, temb, null);
+  }
+}
+
+/** ``KUpBlock2D``: concatenates the last skip (when present), AdaGroupNorm ResNets, a K-upsampler. */
+class KUpBlock2D extends Module implements UpBlock {
+  readonly hasCrossAttention = false;
+  readonly resnets: ModuleList<ResnetBlockCondNorm2D>;
+  readonly upsamplers: ModuleList<KUpsample2D> | null;
+
+  constructor(args: BlockArgs) {
+    super();
+    const kIn = 2 * args.outChannels;
+    const kOut = args.inChannels;
+    const layers = args.layers - 1;
+    this.resnets = this.registerModule('resnets', new ModuleList(Array.from({ length: layers }, (_, index) => kResnet(
+      args, index === 0 ? kIn : args.outChannels, index === layers - 1 ? kOut : args.outChannels,
+    ))));
+    this.upsamplers = args.resample ? this.registerModule('upsamplers', new ModuleList([new KUpsample2D()])) : null;
+  }
+
+  forward(hidden: Tensor, residuals: Residual[], temb: Tensor | null): Tensor {
+    const skip = residuals[residuals.length - 1] ?? null;
+    let states = skip === null ? hidden : cat([hidden, skip], 1);
+    for (const block of this.resnets) states = block.forward(states, temb);
+    return runUpsamplers(this.upsamplers as ModuleList<Module> | null, states, temb, null);
+  }
+}
+
+/** ``KCrossAttnUpBlock2D``: K ResNets and K attention; the first block (in == out == temb channels) adds self-attention. */
+class KCrossAttnUpBlock2D extends Module implements UpBlock {
+  readonly hasCrossAttention = true;
+  readonly resnets: ModuleList<ResnetBlockCondNorm2D>;
+  readonly attentions: ModuleList<KAttentionBlock>;
+  readonly upsamplers: ModuleList<KUpsample2D> | null;
+
+  constructor(args: BlockArgs) {
+    super();
+    const first = args.inChannels === args.outChannels && args.outChannels === args.temb;
+    const middle = args.inChannels !== args.outChannels;
+    const kIn = first ? args.outChannels : 2 * args.outChannels;
+    const kOut = args.inChannels;
+    const layers = args.layers - 1;
+    const resnets: ResnetBlockCondNorm2D[] = [];
+    const attentions: KAttentionBlock[] = [];
+    for (let index = 0; index < layers; index += 1) {
+      const last = index === layers - 1;
+      resnets.push(kResnet(args, index === 0 ? kIn : args.outChannels, args.outChannels, middle && last ? kOut : null));
+      const dim = last ? kOut : args.outChannels;
+      attentions.push(new KAttentionBlock(dim, Math.floor(dim / args.headDim), args.headDim, {
+        crossAttentionDim: args.crossAttentionDim, tembChannels: args.temb!, bias: true, addSelfAttention: first,
+        crossAttentionNorm: 'layer_norm', groupSize: 32,
+      }));
+    }
+    this.resnets = this.registerModule('resnets', new ModuleList(resnets));
+    this.attentions = this.registerModule('attentions', new ModuleList(attentions));
+    this.upsamplers = args.resample ? this.registerModule('upsamplers', new ModuleList([new KUpsample2D()])) : null;
+  }
+
+  forward(hidden: Tensor, residuals: Residual[], temb: Tensor | null, encoder: Tensor, mask: Tensor | null): Tensor {
+    const skip = residuals[residuals.length - 1] ?? null;
+    let states = skip === null ? hidden : cat([hidden, skip], 1);
+    for (let index = 0; index < this.resnets.length; index += 1) {
+      states = this.resnets.at(index).forward(states, temb);
+      states = this.attentions.at(index).forward(states, encoder, temb!, null, mask);
+    }
+    return runUpsamplers(this.upsamplers as ModuleList<Module> | null, states, temb, null);
+  }
+}
+
+interface MidBlock extends Module {
+  readonly hasCrossAttention: boolean;
+  forward(hidden: Tensor, temb: Tensor | null, encoder: Tensor, mask: Tensor | null): Tensor;
+}
+
+class UNetMidBlock2DCrossAttn extends Module implements MidBlock {
+  readonly hasCrossAttention = true;
   readonly attentions: ModuleList<Transformer2DModel>;
   readonly resnets: ModuleList<ResnetBlock2D>;
 
   constructor(args: BlockArgs, outputScaleFactor: number) {
     super();
     const channels = args.inChannels;
+    const groups = args.groups ?? Math.min(Math.floor(channels / 4), 32);
+    const scoped = { ...args, groups };
     const layers = typeof args.transformerLayers === 'number' ? [args.transformerLayers] : args.transformerLayers;
-    const resnets = [resnet(args, channels, channels, outputScaleFactor)];
-    const attentions = [new Transformer2DModel(args.heads, Math.floor(channels / args.heads), channels, layers[0]!, args.crossAttentionDim,
-      args.groups, args.linearProjection, false, 0)];
-    resnets.push(resnet(args, channels, channels, outputScaleFactor));
+    const resnets = [resnet(scoped, channels, channels, { outputScaleFactor })];
+    const attentions = [new Transformer2DModel(args.heads, Math.floor(channels / args.heads), channels, layers[0]!, crossDim(args, 'UNetMidBlock2DCrossAttn'),
+      groups, args.linearProjection, false, 0)];
+    resnets.push(resnet(scoped, channels, channels, { outputScaleFactor }));
     this.attentions = this.registerModule('attentions', new ModuleList(attentions));
     this.resnets = this.registerModule('resnets', new ModuleList(resnets));
   }
 
-  forward(hidden: Tensor, temb: Tensor | null, encoder: Tensor, bias: Tensor | null): Tensor {
+  forward(hidden: Tensor, temb: Tensor | null, encoder: Tensor, mask: Tensor | null): Tensor {
     let states = this.resnets.at(0).forward(hidden, temb);
     for (let index = 0; index < this.attentions.length; index += 1) {
-      states = this.attentions.at(index).forward(states, encoder, bias);
+      states = this.attentions.at(index).forward(states, encoder, mask);
       states = this.resnets.at(index + 1).forward(states, temb);
+    }
+    return states;
+  }
+}
+
+/** ``UNetMidBlock2DSimpleCrossAttn``: ResNets around one added-KV cross-attention. */
+class UNetMidBlock2DSimpleCrossAttn extends Module implements MidBlock {
+  readonly hasCrossAttention = true;
+  readonly attentions: ModuleList<DiffusersAttention>;
+  readonly resnets: ModuleList<ResnetBlock2D>;
+
+  constructor(args: BlockArgs, outputScaleFactor: number, onlyCross: boolean) {
+    super();
+    const channels = args.inChannels;
+    if (!Number.isInteger(args.headDim)) throw new TypeError("unsupported operand type(s) for //: 'int' and 'NoneType'");
+    const groups = args.groups ?? Math.min(Math.floor(channels / 4), 32);
+    const scoped = { ...args, groups };
+    const extra = { skipTimeAct: args.skipTimeAct, outputScaleFactor };
+    const resnets = [resnet(scoped, channels, channels, extra)];
+    const attentions = [simpleCrossAttention(scoped, channels, onlyCross)];
+    resnets.push(resnet(scoped, channels, channels, extra));
+    this.attentions = this.registerModule('attentions', new ModuleList(attentions));
+    this.resnets = this.registerModule('resnets', new ModuleList(resnets));
+  }
+
+  forward(hidden: Tensor, temb: Tensor | null, encoder: Tensor, mask: Tensor | null): Tensor {
+    let states = this.resnets.at(0).forward(hidden, temb);
+    for (let index = 0; index < this.attentions.length; index += 1) {
+      states = this.attentions.at(index).forward(states, encoder, mask);
+      states = this.resnets.at(index + 1).forward(states, temb);
+    }
+    return states;
+  }
+}
+
+/**
+ * ``UNetMidBlock2D``: ResNets with optional single-head-dimension spatial
+ * attention. Inside a UNet it has ``num_layers=0`` (one ResNet); the VAE uses
+ * one attention layer (optional) between two ResNets.
+ */
+class UNetMidBlock2D extends Module implements MidBlock {
+  readonly hasCrossAttention = false;
+  readonly attentions: ModuleList<DiffusersAttention>;
+  readonly resnets: ModuleList<Module>;
+
+  constructor(options: {
+    channels: number; temb: number | null; eps: number; act: string; groups: number | null; layers: number; addAttention: boolean;
+    attentionHeadDim: number | null; timeScaleShift: string; outputScaleFactor: number; dropout: number;
+  }) {
+    super();
+    const { channels } = options;
+    const groups = options.groups ?? Math.min(Math.floor(channels / 4), 32);
+    const attentionGroups = options.timeScaleShift === 'default' ? groups : null;
+    const block = (): Module => (options.timeScaleShift === 'spatial'
+      ? new ResnetBlockCondNorm2D({
+        inChannels: channels, outChannels: channels, tembChannels: options.temb, eps: options.eps, groups, dropout: options.dropout,
+        timeEmbeddingNorm: 'spatial', nonLinearity: options.act, outputScaleFactor: options.outputScaleFactor,
+      })
+      : new ResnetBlock2D({
+        inChannels: channels, outChannels: channels, tembChannels: options.temb, eps: options.eps, groups, dropout: options.dropout,
+        timeEmbeddingNorm: options.timeScaleShift, nonLinearity: options.act, outputScaleFactor: options.outputScaleFactor,
+      }));
+    const headDim = options.attentionHeadDim ?? channels;
+    const resnets = [block()];
+    const attentions = new ModuleList<DiffusersAttention>();
+    for (let index = 0; index < options.layers; index += 1) {
+      if (options.addAttention) {
+        attentions.append(deprecated(new DiffusersAttention({
+          queryDim: channels, heads: Math.floor(channels / headDim), dimHead: headDim, rescaleOutputFactor: options.outputScaleFactor,
+          eps: options.eps, normNumGroups: attentionGroups, spatialNormDim: options.timeScaleShift === 'spatial' ? options.temb : null,
+          residualConnection: true, bias: true,
+        })));
+      } else {
+        attentions.registerModule(String(index), null);
+      }
+      resnets.push(block());
+    }
+    this.attentions = this.registerModule('attentions', attentions);
+    this.resnets = this.registerModule('resnets', new ModuleList(resnets));
+  }
+
+  forward(hidden: Tensor, temb: Tensor | null = null): Tensor {
+    const run = (module: Module, states: Tensor): Tensor => (module as Resnet).forward(states, temb);
+    let states = run(this.resnets.at(0), hidden);
+    const count = this.resnets.length - 1;
+    for (let index = 0; index < count; index += 1) {
+      const attention = this.attentions._modules.get(String(index)) as DiffusersAttention | null | undefined;
+      if (attention) states = attention.forward(states, null, null, temb);
+      states = run(this.resnets.at(index + 1), states);
     }
     return states;
   }
@@ -591,8 +1535,8 @@ class UNetMidBlock2DCrossAttn extends Module {
 // UNet2DConditionModel.
 // ---------------------------------------------------------------------------
 
-const UNSUPPORTED_UNET: [string, (value: JsonValue | undefined) => boolean][] = [
-  ['time_embedding_type', (value) => value !== 'positional'],
+/** Conditioning inputs Python's ``ImageDecoder`` rejects (``unsupported diffusion pipeline``). */
+const IMAGE_DECODER_UNSUPPORTED: [string, (value: JsonValue | undefined) => boolean][] = [
   ['encoder_hid_dim_type', (value) => value !== null && value !== undefined],
   ['class_embed_type', (value) => value !== null && value !== undefined],
   ['addition_embed_type', (value) => value !== null && value !== undefined],
@@ -600,21 +1544,38 @@ const UNSUPPORTED_UNET: [string, (value: JsonValue | undefined) => boolean][] = 
   ['time_cond_proj_dim', (value) => value !== null && value !== undefined],
   ['dual_cross_attention', (value) => value === true],
   ['attention_type', (value) => value !== 'default'],
-  ['center_input_sample', (value) => typeof value !== 'boolean'],
 ];
+
+const UNET_DOWN_BLOCKS: Record<string, new (args: BlockArgs) => DownBlock> = {
+  DownBlock2D, ResnetDownsampleBlock2D, AttnDownBlock2D, CrossAttnDownBlock2D, SimpleCrossAttnDownBlock2D, KDownBlock2D, KCrossAttnDownBlock2D,
+};
+
+const UNET_UP_BLOCKS: Record<string, new (args: BlockArgs) => UpBlock> = {
+  UpBlock2D, ResnetUpsampleBlock2D, CrossAttnUpBlock2D, SimpleCrossAttnUpBlock2D, AttnUpBlock2D, KUpBlock2D, KCrossAttnUpBlock2D,
+};
+
+/** Block types diffusers constructs but cannot run inside the named model. */
+const NOT_RUNNABLE = new Set([
+  'SkipDownBlock2D', 'AttnSkipDownBlock2D', 'DownEncoderBlock2D', 'AttnDownEncoderBlock2D',
+  'SkipUpBlock2D', 'AttnSkipUpBlock2D', 'UpDecoderBlock2D', 'AttnUpDecoderBlock2D',
+]);
+
+function perBlock<T>(value: JsonValue | undefined, count: number): T[] {
+  return Array.isArray(value) ? value as unknown as T[] : Array.from({ length: count }, () => value as unknown as T);
+}
 
 export class UNet2DConditionModel extends Module {
   static override readonly qualifiedName: string = 'diffusers.models.unets.unet_2d_condition.UNet2DConditionModel';
   readonly config: JsonObject;
   readonly conv_in: Conv2d;
-  readonly time_proj: Timesteps;
+  readonly time_proj: Timesteps | GaussianFourierProjection;
   readonly time_embedding: TimestepEmbedding;
-  readonly time_embed_act: (Module & { forward(x: Tensor): Tensor }) | null;
+  readonly time_embed_act: Act | null;
   readonly down_blocks: ModuleList<DownBlock>;
   readonly up_blocks: ModuleList<UpBlock>;
-  readonly mid_block: UNetMidBlock2DCrossAttn | null;
+  readonly mid_block: MidBlock | null;
   readonly conv_norm_out: GroupNorm | null;
-  readonly conv_act: (Module & { forward(x: Tensor): Tensor }) | null;
+  readonly conv_act: Act | null;
   readonly conv_out: Conv2d;
   readonly numUpsamplers: number;
 
@@ -622,65 +1583,114 @@ export class UNet2DConditionModel extends Module {
     super();
     this.config = resolveDiffusersConfig('UNet2DConditionModel', config);
     const c = this.config;
-    for (const [key, unsupported] of UNSUPPORTED_UNET) {
-      if (unsupported(c[key])) throw new NotImplementedError(`UNet2DConditionModel ${key}=${JSON.stringify(c[key])} is not available in TypeScript`);
-    }
     if (c.num_attention_heads !== null && c.num_attention_heads !== undefined) {
       throw new ValueError('At the moment it is not possible to define the number of attention heads via `num_attention_heads` because of a naming issue as described in https://github.com/huggingface/diffusers/issues/2011#issuecomment-1547958131. Passing `num_attention_heads` will only be supported in diffusers v0.19.');
+    }
+    // diffusers registers ``encoder_hid_dim_type='text_proj'`` when only ``encoder_hid_dim`` is given.
+    if ((c.encoder_hid_dim_type === null || c.encoder_hid_dim_type === undefined) && c.encoder_hid_dim !== null && c.encoder_hid_dim !== undefined) {
+      c.encoder_hid_dim_type = 'text_proj';
+    }
+    for (const [key, unsupported] of IMAGE_DECODER_UNSUPPORTED) {
+      if (unsupported(c[key])) throw new ValueError('unsupported diffusion pipeline: only plain cross-attention UNets are supported');
     }
     const down = c.down_block_types as string[];
     const up = c.up_block_types as string[];
     const channels = c.block_out_channels as number[];
     if (!Array.isArray(down) || !Array.isArray(up) || !Array.isArray(channels)) throw new ValueError('block types and block_out_channels must be lists');
-    if (down.length !== up.length) throw new ValueError(`Must provide the same number of \`down_block_types\` as \`up_block_types\`. \`down_block_types\`: ${JSON.stringify(down)}. \`up_block_types\`: ${JSON.stringify(up)}.`);
-    if (channels.length !== down.length) throw new ValueError(`Must provide the same number of \`block_out_channels\` as \`down_block_types\`. \`block_out_channels\`: ${JSON.stringify(channels)}. \`down_block_types\`: ${JSON.stringify(down)}.`);
-    const groups = c.norm_num_groups;
-    if (typeof groups !== 'number') throw new NotImplementedError('UNet2DConditionModel without norm_num_groups is not available in TypeScript');
     const count = down.length;
-    // diffusers' naming quirk: ``attention_head_dim`` is the number of heads.
-    const heads = perBlock<number>(c.attention_head_dim, count, 'attention_head_dim');
-    const crossDims = perBlock<number>(c.cross_attention_dim, count, 'cross_attention_dim');
-    const layersPerBlock = perBlock<number>(c.layers_per_block, count, 'layers_per_block');
-    const transformerLayers = perBlock<number | number[]>(c.transformer_layers_per_block, count, 'transformer_layers_per_block');
-    const onlyCross = perBlock<boolean>(c.only_cross_attention, count, 'only_cross_attention');
+    const mismatch = (name: string): ValueError => new ValueError(
+      `Must provide the same number of \`${name}\` as \`down_block_types\`. \`${name}\`: ${pyRepr(c[name])}. \`down_block_types\`: ${pyRepr(down)}.`,
+    );
+    if (count !== up.length) throw new ValueError(`Must provide the same number of \`down_block_types\` as \`up_block_types\`. \`down_block_types\`: ${pyRepr(down)}. \`up_block_types\`: ${pyRepr(up)}.`);
+    if (channels.length !== count) throw new ValueError(`Must provide the same number of \`block_out_channels\` as \`down_block_types\`. \`block_out_channels\`: ${pyRepr(channels)}. \`down_block_types\`: ${pyRepr(down)}.`);
+    for (const name of ['only_cross_attention', 'attention_head_dim', 'cross_attention_dim', 'layers_per_block']) {
+      if (Array.isArray(c[name]) && (c[name] as JsonValue[]).length !== count) throw mismatch(name);
+    }
+    if (Array.isArray(c.transformer_layers_per_block) && (c.reverse_transformer_layers_per_block ?? null) === null
+      && (c.transformer_layers_per_block as JsonValue[]).some(Array.isArray)) {
+      throw new ValueError("Must provide 'reverse_transformer_layers_per_block` if using asymmetrical UNet.");
+    }
+    const groups = typeof c.norm_num_groups === 'number' ? c.norm_num_groups : null;
+    const eps = num(c, 'norm_eps');
+    const act = String(c.act_fn);
     const inKernel = int(c, 'conv_in_kernel');
     const outKernel = int(c, 'conv_out_kernel');
     this.conv_in = this.registerModule('conv_in', new Conv2d(int(c, 'in_channels'), channels[0]!, inKernel, { padding: Math.floor((inKernel - 1) / 2) }));
-    const timeEmbedDim = (c.time_embedding_dim as number | null) ?? channels[0]! * 4;
-    this.time_proj = this.registerModule('time_proj', new Timesteps(channels[0]!, c.flip_sin_to_cos === true, num(c, 'freq_shift')));
-    const act = String(c.act_fn);
-    this.time_embedding = this.registerModule('time_embedding', new TimestepEmbedding(channels[0]!, timeEmbedDim, act, (c.timestep_post_act as string | null) ?? null));
+    let timeEmbedDim: number;
+    let timestepInputDim: number;
+    if (c.time_embedding_type === 'fourier') {
+      timeEmbedDim = (c.time_embedding_dim as number | null) ?? channels[0]! * 2;
+      if (timeEmbedDim % 2 !== 0) throw new ValueError(`\`time_embed_dim\` should be divisible by 2, but is ${timeEmbedDim}.`);
+      this.time_proj = this.registerModule('time_proj', new GaussianFourierProjection(timeEmbedDim / 2, c.flip_sin_to_cos === true));
+      timestepInputDim = timeEmbedDim;
+    } else if (c.time_embedding_type === 'positional') {
+      timeEmbedDim = (c.time_embedding_dim as number | null) ?? channels[0]! * 4;
+      this.time_proj = this.registerModule('time_proj', new Timesteps(channels[0]!, c.flip_sin_to_cos === true, num(c, 'freq_shift')));
+      timestepInputDim = channels[0]!;
+    } else {
+      throw new ValueError(`${String(c.time_embedding_type)} does not exist. Please make sure to use one of \`fourier\` or \`positional\`.`);
+    }
+    this.time_embedding = this.registerModule('time_embedding', new TimestepEmbedding(timestepInputDim, timeEmbedDim, act, (c.timestep_post_act as string | null) ?? null));
     this.time_embed_act = typeof c.time_embedding_act_fn === 'string' ? this.registerModule('time_embed_act', activation(c.time_embedding_act_fn)) : null;
-    const base = {
-      temb: timeEmbedDim, eps: num(c, 'norm_eps'), act, groups, downsamplePadding: int(c, 'downsample_padding'),
-      linearProjection: c.use_linear_projection === true, timeScaleShift: String(c.resnet_time_scale_shift), dropout: num(c, 'dropout'),
-    };
     this.down_blocks = this.registerModule('down_blocks', new ModuleList<DownBlock>());
     this.up_blocks = this.registerModule('up_blocks', new ModuleList<UpBlock>());
+    let onlyCross: boolean[];
+    let midOnlyCross = c.mid_block_only_cross_attention as boolean | null;
+    if (typeof c.only_cross_attention === 'boolean') {
+      if (midOnlyCross === null || midOnlyCross === undefined) midOnlyCross = c.only_cross_attention;
+      onlyCross = perBlock<boolean>(c.only_cross_attention, count);
+    } else {
+      onlyCross = c.only_cross_attention as boolean[];
+    }
+    if (midOnlyCross === null || midOnlyCross === undefined) midOnlyCross = false;
+    // diffusers' naming quirk: ``attention_head_dim`` doubles as ``num_attention_heads``.
+    const heads = perBlock<number>(c.attention_head_dim, count);
+    const headDims = perBlock<number | null>(c.attention_head_dim, count);
+    const crossDims = perBlock<number | null>(c.cross_attention_dim, count);
+    const layersPerBlock = perBlock<number>(c.layers_per_block, count);
+    const transformerLayers = perBlock<number | number[]>(c.transformer_layers_per_block, count);
+    const blocksTimeEmbedDim = c.class_embeddings_concat === true ? timeEmbedDim * 2 : timeEmbedDim;
+    const base = {
+      temb: blocksTimeEmbedDim, eps, act, groups, downsamplePadding: int(c, 'downsample_padding'),
+      linearProjection: c.use_linear_projection === true, timeScaleShift: String(c.resnet_time_scale_shift), dropout: num(c, 'dropout'),
+      skipTimeAct: c.resnet_skip_time_act === true, outputScaleFactor: num(c, 'resnet_out_scale_factor'),
+      crossAttentionNorm: (c.cross_attention_norm as string | null) ?? null,
+    };
     let output = channels[0]!;
     down.forEach((type, index) => {
       const input = output;
       output = channels[index]!;
+      const name = type.startsWith('UNetRes') ? type.slice(7) : type;
       const args: BlockArgs = {
         ...base, layers: layersPerBlock[index]!, transformerLayers: transformerLayers[index]!, inChannels: input, outChannels: output,
-        resample: index !== channels.length - 1, crossAttentionDim: crossDims[index]!, heads: heads[index]!, onlyCrossAttention: onlyCross[index]!,
+        resample: index !== channels.length - 1, crossAttentionDim: crossDims[index] ?? null, heads: heads[index]!,
+        headDim: headDims[index] ?? output, onlyCrossAttention: onlyCross[index]!,
       };
-      const name = type.startsWith('UNetRes') ? type.slice(7) : type;
-      if (name === 'CrossAttnDownBlock2D') this.down_blocks.append(new CrossAttnDownBlock2D(args));
-      else if (name === 'DownBlock2D') this.down_blocks.append(new DownBlock2D(args));
-      else throw new NotImplementedError(`diffusers down block ${type} is not available in TypeScript`);
+      const Block = UNET_DOWN_BLOCKS[name];
+      if (Block) this.down_blocks.append(new Block(args));
+      else if (NOT_RUNNABLE.has(name)) throw new ValueError(`${name} cannot run inside UNet2DConditionModel (diffusers fails in its forward pass)`);
+      else throw new ValueError(`${name} does not exist.`);
     });
-    const midType = c.mid_block_type;
+    const midType = c.mid_block_type ?? null;
+    const last = count - 1;
+    const midArgs: BlockArgs = {
+      ...base, layers: 1, transformerLayers: transformerLayers[last]!, inChannels: channels[last]!, outChannels: channels[last]!, resample: false,
+      crossAttentionDim: crossDims[last] ?? null, heads: heads[last]!, headDim: headDims[last] ?? Number.NaN, onlyCrossAttention: false,
+    };
+    const midScale = num(c, 'mid_block_scale_factor');
     if (midType === 'UNetMidBlock2DCrossAttn') {
-      const last = transformerLayers[count - 1]!;
-      this.mid_block = this.registerModule('mid_block', new UNetMidBlock2DCrossAttn({
-        ...base, layers: 1, transformerLayers: last, inChannels: channels[count - 1]!, outChannels: channels[count - 1]!, resample: false,
-        crossAttentionDim: crossDims[count - 1]!, heads: heads[count - 1]!, onlyCrossAttention: false,
-      }, num(c, 'mid_block_scale_factor')));
+      this.mid_block = this.registerModule('mid_block', new UNetMidBlock2DCrossAttn(midArgs, midScale));
+    } else if (midType === 'UNetMidBlock2DSimpleCrossAttn') {
+      this.mid_block = this.registerModule('mid_block', new UNetMidBlock2DSimpleCrossAttn(midArgs, midScale, midOnlyCross === true));
+    } else if (midType === 'UNetMidBlock2D') {
+      this.mid_block = this.registerModule('mid_block', new UNetMidBlock2D({
+        channels: channels[last]!, temb: blocksTimeEmbedDim, eps, act, groups, layers: 0, addAttention: false, attentionHeadDim: headDims[last] ?? null,
+        timeScaleShift: base.timeScaleShift, outputScaleFactor: midScale, dropout: base.dropout,
+      }));
     } else if (midType === null) {
       this.mid_block = null;
     } else {
-      throw new NotImplementedError(`diffusers mid block ${String(midType)} is not available in TypeScript`);
+      throw new ValueError(`unknown mid_block_type : ${String(midType)}`);
     }
     const reversedChannels = [...channels].reverse();
     const reversedHeads = [...heads].reverse();
@@ -696,19 +1706,26 @@ export class UNet2DConditionModel extends Module {
       output = reversedChannels[index]!;
       const input = reversedChannels[Math.min(index + 1, channels.length - 1)]!;
       if (!final) upsamplers += 1;
+      const name = type.startsWith('UNetRes') ? type.slice(7) : type;
       const args: BlockArgs = {
         ...base, layers: reversedLayers[index]! + 1, transformerLayers: reversedTransformer[index]!, inChannels: input, outChannels: output,
-        prevOutputChannel: previous, resample: !final, crossAttentionDim: reversedCross[index]!, heads: reversedHeads[index]!,
-        onlyCrossAttention: reversedOnlyCross[index]!,
+        prevOutputChannel: previous, resample: !final, crossAttentionDim: reversedCross[index] ?? null, heads: reversedHeads[index]!,
+        // diffusers passes the *unreversed* ``attention_head_dim[i]`` to up blocks.
+        headDim: headDims[index] ?? output, onlyCrossAttention: reversedOnlyCross[index]!,
       };
-      const name = type.startsWith('UNetRes') ? type.slice(7) : type;
-      if (name === 'CrossAttnUpBlock2D') this.up_blocks.append(new CrossAttnUpBlock2D(args));
-      else if (name === 'UpBlock2D') this.up_blocks.append(new UpBlock2D(args));
-      else throw new NotImplementedError(`diffusers up block ${type} is not available in TypeScript`);
+      const Block = UNET_UP_BLOCKS[name];
+      if (Block) this.up_blocks.append(new Block(args));
+      else if (NOT_RUNNABLE.has(name)) throw new ValueError(`${name} cannot run inside UNet2DConditionModel (diffusers fails in its forward pass)`);
+      else throw new ValueError(`${name} does not exist.`);
     });
     this.numUpsamplers = upsamplers;
-    this.conv_norm_out = this.registerModule('conv_norm_out', new GroupNorm(groups, channels[0]!, { eps: num(c, 'norm_eps') }));
-    this.conv_act = this.registerModule('conv_act', activation(act));
+    if (groups !== null) {
+      this.conv_norm_out = this.registerModule('conv_norm_out', new GroupNorm(groups, channels[0]!, { eps }));
+      this.conv_act = this.registerModule('conv_act', activation(act));
+    } else {
+      this.conv_norm_out = null;
+      this.conv_act = null;
+    }
     this.conv_out = this.registerModule('conv_out', new Conv2d(channels[0]!, int(c, 'out_channels'), outKernel, { padding: Math.floor((outKernel - 1) / 2) }));
   }
 
@@ -719,7 +1736,7 @@ export class UNet2DConditionModel extends Module {
   forward(sample: Tensor, timestep: Tensor, encoderHiddenStates: Tensor, encoderAttentionMask: Tensor | null = null): Tensor {
     const factor = 2 ** this.numUpsamplers;
     const forwardSize = sample.shape.slice(-2).some((size) => size % factor !== 0);
-    const bias = encoderAttentionMask
+    const mask = encoderAttentionMask
       ? encoderAttentionMask.to(sample.dtype).neg().add(1).mul(-10000).unsqueeze(1)
       : null;
     let input = sample;
@@ -729,20 +1746,25 @@ export class UNet2DConditionModel extends Module {
     let emb = this.time_embedding.forward(this.time_proj.forward(expanded).to(sample.dtype));
     if (this.time_embed_act) emb = this.time_embed_act.forward(emb);
     let states = this.conv_in.forward(input);
-    let residuals: Tensor[] = [states];
+    let residuals: Residual[] = [states];
     for (const block of this.down_blocks) {
-      const [next, outputs] = block.forward(states, emb, encoderHiddenStates, bias);
+      const [next, outputs] = block.forward(states, emb, encoderHiddenStates, mask);
       states = next;
       residuals.push(...outputs);
     }
-    if (this.mid_block) states = this.mid_block.forward(states, emb, encoderHiddenStates, bias);
+    if (this.mid_block) states = this.mid_block.forward(states, emb, encoderHiddenStates, mask);
     [...this.up_blocks].forEach((block, index) => {
       const final = index === this.up_blocks.length - 1;
       const count = block.resnets.length;
       const current = residuals.slice(residuals.length - count);
       residuals = residuals.slice(0, residuals.length - count);
-      const size = !final && forwardSize ? residuals[residuals.length - 1]!.shape.slice(2) as [number, number] : null;
-      states = block.forward(states, current, emb, encoderHiddenStates, bias, size);
+      let size: [number, number] | null = null;
+      if (!final && forwardSize) {
+        const previous = residuals[residuals.length - 1];
+        if (!previous) throw new ValueError("'NoneType' object has no attribute 'shape'");
+        size = previous.shape.slice(2) as [number, number];
+      }
+      states = block.forward(states, current, emb, encoderHiddenStates, mask, size);
     });
     if (this.conv_norm_out && this.conv_act) states = this.conv_act.forward(this.conv_norm_out.forward(states));
     return this.conv_out.forward(states);
@@ -753,17 +1775,35 @@ export class UNet2DConditionModel extends Module {
 // AutoencoderKL.
 // ---------------------------------------------------------------------------
 
-class DownEncoderBlock2D extends Module {
+interface VaeBlockArgs {
+  layers: number;
+  input: number;
+  output: number;
+  groups: number;
+  act: string;
+  resample: boolean;
+  timeScaleShift: string;
+}
+
+function vaeResnet(args: VaeBlockArgs, index: number): ResnetBlock2D {
+  return new ResnetBlock2D({
+    inChannels: index === 0 ? args.input : args.output, outChannels: args.output, tembChannels: null, eps: 1e-6, groups: args.groups,
+    dropout: 0, timeEmbeddingNorm: args.timeScaleShift, nonLinearity: args.act, outputScaleFactor: 1,
+  });
+}
+
+interface VaeBlock extends Module {
+  forward(hidden: Tensor): Tensor;
+}
+
+class DownEncoderBlock2D extends Module implements VaeBlock {
   readonly resnets: ModuleList<ResnetBlock2D>;
   readonly downsamplers: ModuleList<Downsample2D> | null;
 
-  constructor(layers: number, input: number, output: number, groups: number, act: string, downsample: boolean) {
+  constructor(args: VaeBlockArgs) {
     super();
-    this.resnets = this.registerModule('resnets', new ModuleList(Array.from({ length: layers }, (_, index) => new ResnetBlock2D({
-      inChannels: index === 0 ? input : output, outChannels: output, tembChannels: null, eps: 1e-6, groups, dropout: 0,
-      timeEmbeddingNorm: 'default', nonLinearity: act, outputScaleFactor: 1,
-    }))));
-    this.downsamplers = downsample ? this.registerModule('downsamplers', new ModuleList([new Downsample2D(output, 0)])) : null;
+    this.resnets = this.registerModule('resnets', new ModuleList(Array.from({ length: args.layers }, (_, index) => vaeResnet(args, index))));
+    this.downsamplers = args.resample ? this.registerModule('downsamplers', new ModuleList([new Downsample2D(args.output, true, 0)])) : null;
   }
 
   forward(hidden: Tensor): Tensor {
@@ -774,17 +1814,36 @@ class DownEncoderBlock2D extends Module {
   }
 }
 
-class UpDecoderBlock2D extends Module {
+class AttnDownEncoderBlock2D extends Module implements VaeBlock {
+  readonly attentions: ModuleList<DiffusersAttention>;
+  readonly resnets: ModuleList<ResnetBlock2D>;
+  readonly downsamplers: ModuleList<Downsample2D> | null;
+
+  constructor(args: VaeBlockArgs) {
+    super();
+    const [resnets, attentions] = interleaved(args.layers, (index) => vaeResnet(args, index),
+      () => spatialAttention(args.output, args.output, args.groups, 1e-6, true));
+    this.attentions = this.registerModule('attentions', new ModuleList(attentions));
+    this.resnets = this.registerModule('resnets', new ModuleList(resnets));
+    this.downsamplers = args.resample ? this.registerModule('downsamplers', new ModuleList([new Downsample2D(args.output, true, 0)])) : null;
+  }
+
+  forward(hidden: Tensor): Tensor {
+    let states = hidden;
+    for (let index = 0; index < this.resnets.length; index += 1) states = this.attentions.at(index).forward(this.resnets.at(index).forward(states, null));
+    if (this.downsamplers) for (const downsampler of this.downsamplers) states = downsampler.forward(states);
+    return states;
+  }
+}
+
+class UpDecoderBlock2D extends Module implements VaeBlock {
   readonly resnets: ModuleList<ResnetBlock2D>;
   readonly upsamplers: ModuleList<Upsample2D> | null;
 
-  constructor(layers: number, input: number, output: number, groups: number, act: string, upsample: boolean) {
+  constructor(args: VaeBlockArgs) {
     super();
-    this.resnets = this.registerModule('resnets', new ModuleList(Array.from({ length: layers }, (_, index) => new ResnetBlock2D({
-      inChannels: index === 0 ? input : output, outChannels: output, tembChannels: null, eps: 1e-6, groups, dropout: 0,
-      timeEmbeddingNorm: 'group', nonLinearity: act, outputScaleFactor: 1,
-    }))));
-    this.upsamplers = upsample ? this.registerModule('upsamplers', new ModuleList([new Upsample2D(output)])) : null;
+    this.resnets = this.registerModule('resnets', new ModuleList(Array.from({ length: args.layers }, (_, index) => vaeResnet(args, index))));
+    this.upsamplers = args.resample ? this.registerModule('upsamplers', new ModuleList([new Upsample2D(args.output, true)])) : null;
   }
 
   forward(hidden: Tensor): Tensor {
@@ -795,40 +1854,44 @@ class UpDecoderBlock2D extends Module {
   }
 }
 
-/** ``UNetMidBlock2D`` of the VAE (no time embedding; single-head spatial attention). */
-class UNetMidBlock2D extends Module {
+class AttnUpDecoderBlock2D extends Module implements VaeBlock {
   readonly attentions: ModuleList<DiffusersAttention>;
   readonly resnets: ModuleList<ResnetBlock2D>;
+  readonly upsamplers: ModuleList<Upsample2D> | null;
 
-  constructor(channels: number, groups: number, act: string, addAttention: boolean) {
+  constructor(args: VaeBlockArgs) {
     super();
-    const block = (): ResnetBlock2D => new ResnetBlock2D({
-      inChannels: channels, outChannels: channels, tembChannels: null, eps: 1e-6, groups, dropout: 0,
-      timeEmbeddingNorm: 'default', nonLinearity: act, outputScaleFactor: 1,
-    });
-    const resnets = [block()];
-    const attentions: DiffusersAttention[] = [];
-    if (addAttention) {
-      attentions.push(new DiffusersAttention({
-        queryDim: channels, heads: 1, dimHead: channels, rescaleOutputFactor: 1, eps: 1e-6, groupNormGroups: groups,
-        residualConnection: true, bias: true,
-      }));
-    }
-    resnets.push(block());
+    const [resnets, attentions] = interleaved(args.layers, (index) => vaeResnet(args, index), () => new DiffusersAttention({
+      queryDim: args.output, heads: 1, dimHead: args.output, eps: 1e-6, normNumGroups: args.groups, residualConnection: true, bias: true,
+    }));
     this.attentions = this.registerModule('attentions', new ModuleList(attentions));
     this.resnets = this.registerModule('resnets', new ModuleList(resnets));
+    this.upsamplers = args.resample ? this.registerModule('upsamplers', new ModuleList([new Upsample2D(args.output, true)])) : null;
   }
 
   forward(hidden: Tensor): Tensor {
-    let states = this.resnets.at(0).forward(hidden, null);
-    if (this.attentions.length) states = this.attentions.at(0).forward(states);
-    return this.resnets.at(1).forward(states, null);
+    let states = hidden;
+    for (let index = 0; index < this.resnets.length; index += 1) states = this.attentions.at(index).forward(this.resnets.at(index).forward(states, null));
+    if (this.upsamplers) for (const upsampler of this.upsamplers) states = upsampler.forward(states);
+    return states;
   }
+}
+
+const VAE_DOWN_BLOCKS: Record<string, new (args: VaeBlockArgs) => VaeBlock> = { DownEncoderBlock2D, AttnDownEncoderBlock2D };
+const VAE_UP_BLOCKS: Record<string, new (args: VaeBlockArgs) => VaeBlock> = { UpDecoderBlock2D, AttnUpDecoderBlock2D };
+const UNET_ONLY = new Set([...Object.keys(UNET_DOWN_BLOCKS), ...Object.keys(UNET_UP_BLOCKS), 'SkipDownBlock2D', 'AttnSkipDownBlock2D', 'SkipUpBlock2D', 'AttnSkipUpBlock2D']);
+
+function vaeBlock<T>(table: Record<string, T>, type: string, where: string): T {
+  const name = type.startsWith('UNetRes') ? type.slice(7) : type;
+  const Block = table[name];
+  if (Block) return Block;
+  if (UNET_ONLY.has(name)) throw new ValueError(`${name} cannot run inside the AutoencoderKL ${where} (diffusers fails in its forward pass)`);
+  throw new ValueError(`${name} does not exist.`);
 }
 
 class VaeEncoder extends Module {
   readonly conv_in: Conv2d;
-  readonly down_blocks: ModuleList<DownEncoderBlock2D>;
+  readonly down_blocks: ModuleList<VaeBlock>;
   readonly mid_block: UNetMidBlock2D;
   readonly conv_norm_out: GroupNorm;
   readonly conv_act: SiLU;
@@ -843,15 +1906,21 @@ class VaeEncoder extends Module {
     this.down_blocks = this.registerModule('down_blocks', new ModuleList());
     let output = channels[0]!;
     (c.down_block_types as string[]).forEach((type, index) => {
-      if (type !== 'DownEncoderBlock2D') throw new NotImplementedError(`diffusers VAE down block ${type} is not available in TypeScript`);
+      const Block = vaeBlock(VAE_DOWN_BLOCKS, type, 'encoder');
       const input = output;
       output = channels[index]!;
-      this.down_blocks.append(new DownEncoderBlock2D(int(c, 'layers_per_block'), input, output, groups, act, index !== channels.length - 1));
+      this.down_blocks.append(new Block({
+        layers: int(c, 'layers_per_block'), input, output, groups, act, resample: index !== channels.length - 1, timeScaleShift: 'default',
+      }));
     });
-    this.mid_block = this.registerModule('mid_block', new UNetMidBlock2D(channels[channels.length - 1]!, groups, act, c.mid_block_add_attention !== false));
-    this.conv_norm_out = this.registerModule('conv_norm_out', new GroupNorm(groups, channels[channels.length - 1]!, { eps: 1e-6 }));
+    const last = channels[channels.length - 1]!;
+    this.mid_block = this.registerModule('mid_block', new UNetMidBlock2D({
+      channels: last, temb: null, eps: 1e-6, act, groups, layers: 1, addAttention: c.mid_block_add_attention !== false, attentionHeadDim: last,
+      timeScaleShift: 'default', outputScaleFactor: 1, dropout: 0,
+    }));
+    this.conv_norm_out = this.registerModule('conv_norm_out', new GroupNorm(groups, last, { eps: 1e-6 }));
     this.conv_act = this.registerModule('conv_act', new SiLU());
-    this.conv_out = this.registerModule('conv_out', new Conv2d(channels[channels.length - 1]!, 2 * int(c, 'latent_channels'), 3, { padding: 1 }));
+    this.conv_out = this.registerModule('conv_out', new Conv2d(last, 2 * int(c, 'latent_channels'), 3, { padding: 1 }));
   }
 
   forward(sample: Tensor): Tensor {
@@ -864,7 +1933,7 @@ class VaeEncoder extends Module {
 
 class VaeDecoder extends Module {
   readonly conv_in: Conv2d;
-  readonly up_blocks: ModuleList<UpDecoderBlock2D>;
+  readonly up_blocks: ModuleList<VaeBlock>;
   readonly mid_block: UNetMidBlock2D;
   readonly conv_norm_out: GroupNorm;
   readonly conv_act: SiLU;
@@ -879,14 +1948,19 @@ class VaeDecoder extends Module {
     this.conv_in = this.registerModule('conv_in', new Conv2d(int(c, 'latent_channels'), last, 3, { padding: 1 }));
     // diffusers registers ``up_blocks`` before ``mid_block`` (state-dict order).
     this.up_blocks = this.registerModule('up_blocks', new ModuleList());
-    this.mid_block = this.registerModule('mid_block', new UNetMidBlock2D(last, groups, act, c.mid_block_add_attention !== false));
+    this.mid_block = this.registerModule('mid_block', new UNetMidBlock2D({
+      channels: last, temb: null, eps: 1e-6, act, groups, layers: 1, addAttention: c.mid_block_add_attention !== false, attentionHeadDim: last,
+      timeScaleShift: 'default', outputScaleFactor: 1, dropout: 0,
+    }));
     const reversed = [...channels].reverse();
     let output = reversed[0]!;
     (c.up_block_types as string[]).forEach((type, index) => {
-      if (type !== 'UpDecoderBlock2D') throw new NotImplementedError(`diffusers VAE up block ${type} is not available in TypeScript`);
+      const Block = vaeBlock(VAE_UP_BLOCKS, type, 'decoder');
       const previous = output;
       output = reversed[index]!;
-      this.up_blocks.append(new UpDecoderBlock2D(int(c, 'layers_per_block') + 1, previous, output, groups, act, index !== channels.length - 1));
+      this.up_blocks.append(new Block({
+        layers: int(c, 'layers_per_block') + 1, input: previous, output, groups, act, resample: index !== channels.length - 1, timeScaleShift: 'group',
+      }));
     });
     this.conv_norm_out = this.registerModule('conv_norm_out', new GroupNorm(groups, channels[0]!, { eps: 1e-6 }));
     this.conv_act = this.registerModule('conv_act', new SiLU());
@@ -1120,12 +2194,33 @@ export class DDIMScheduler {
   }
 }
 
-/** Legacy VAE attention parameter names (diffusers ``_convert_deprecated_attention_blocks``). */
-export function convertDeprecatedAttentionKey(key: string): string {
-  return key.replace(/(mid_block\.attentions\.\d+)\.query\./, '$1.to_q.')
-    .replace(/(mid_block\.attentions\.\d+)\.key\./, '$1.to_k.')
-    .replace(/(mid_block\.attentions\.\d+)\.value\./, '$1.to_v.')
-    .replace(/(mid_block\.attentions\.\d+)\.proj_attn\./, '$1.to_out.0.');
+/**
+ * Paths of the attention modules diffusers marks ``_from_deprecated_attn_block``
+ * (VAE and UNet mid-block attentions, ``AttnDownBlock2D`` and
+ * ``AttnDownEncoderBlock2D`` attentions), whose legacy parameter names
+ * ``query``/``key``/``value``/``proj_attn`` load as ``to_q``/``to_k``/``to_v``/``to_out.0``.
+ */
+export function deprecatedAttentionPaths(module: Module): Set<string> {
+  const paths = new Set<string>();
+  for (const [path, child] of module.namedModules()) {
+    if (child instanceof DiffusersAttention && DEPRECATED_ATTENTION.has(child)) paths.add(path);
+  }
+  return paths;
+}
+
+const LEGACY_NAMES: Record<string, string> = { query: 'to_q', key: 'to_k', value: 'to_v', proj_attn: 'to_out.0' };
+
+/**
+ * Legacy attention parameter names (diffusers ``_fix_state_dict_keys_on_load``).
+ * With ``paths`` (from {@link deprecatedAttentionPaths}) exactly those modules
+ * are converted, as diffusers does; without it, mid-block attentions are.
+ */
+export function convertDeprecatedAttentionKey(key: string, paths?: ReadonlySet<string>): string {
+  const match = /^(.*)\.(query|key|value|proj_attn)\.(weight|bias)$/.exec(key);
+  if (!match) return key;
+  const [, path, name, kind] = match as unknown as [string, string, string, string];
+  const deprecated = paths ? paths.has(path) : /(^|\.)mid_block\.attentions\.\d+$/.test(path);
+  return deprecated ? `${path}.${LEGACY_NAMES[name]}.${kind}` : key;
 }
 
 /** A float32 ``torch.arange``-style int64 helper for timesteps. */
