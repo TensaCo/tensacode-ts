@@ -18,6 +18,7 @@
  *   memory between calls (default 1536; ``0`` disables the cache).
  */
 import { RELAXED_MEMORY_FLAGS, RELAXED_WASM, SIMD_MEMORY_FLAGS, SIMD_WASM } from './kernels.generated.js';
+import { createLibm, type Libm } from '../randomMath.js';
 
 const PAGE = 65536;
 const MAX_PAGES = 65536;
@@ -41,6 +42,11 @@ export const enum Kernel {
   CopyOut = 6,
   SwapAxes = 7,
   Binary = 8,
+  /**
+   * ATen's 16-wide Box-Muller blocks over float64 uniforms in kernel memory
+   * (JavaScript, see ``makeNormalTask``): PyTorch's ``normal_`` fill.
+   */
+  NormalFill = 9,
 }
 
 type TaskFunction = (args: number, task: number, thread: number) => void;
@@ -95,6 +101,27 @@ function decodeBase64(text: string): Uint8Array {
   return bytes;
 }
 
+/**
+ * The ``NormalFill`` task over ``memory``. Arguments: pointer to ``[mean, std]``
+ * (float64) followed by the uniforms, block count, blocks per task and whether
+ * the samples are float64. Self-contained so its source also runs in workers.
+ */
+function makeNormalTask(memory: { readonly buffer: ArrayBufferLike }, libm: Libm): TaskFunction {
+  return function normalTask(args: number, index: number): void {
+    const header = new Uint32Array(memory.buffer, args, 4);
+    const pointer = header[0]!;
+    const blocks = header[1]!;
+    const perTask = header[2]!;
+    const params = new Float64Array(memory.buffer, pointer, 2);
+    const mean = params[0]!;
+    const std = params[1]!;
+    const data = new Float64Array(memory.buffer, pointer + 16, blocks * 16);
+    const fill = header[3] ? libm.normalFill16Double : libm.normalFill16Float;
+    const end = Math.min(blocks, (index + 1) * perTask);
+    for (let block = index * perTask; block < end; block += 1) fill(data, block * 16, mean, std);
+  };
+}
+
 // ------------------------------------------------------------------ worker pool
 
 // Control words (Int32 indices), each on its own cache line.
@@ -123,6 +150,9 @@ const { workerData, receiveMessageOnPort } = require('node:worker_threads');
 const { module, memory, control, thread, spin, port } = workerData;
 const instance = new WebAssembly.Instance(module, { env: { memory } });
 const e = instance.exports;
+// Transpilers may wrap function sources in a name-keeping helper.
+const __name = (target) => target;
+const normalTask = (${makeNormalTask.toString()})(memory, (${createLibm.toString()})());
 // Output buffers of copy jobs arrive on the port; only the newest is kept
 // (so a worker may hold the latest output buffer until the next copy job).
 let target = null;
@@ -141,7 +171,7 @@ function copyOut(args, index) {
   const count = Math.min(length, start + chunk) - start;
   new Float32Array(target, start * 4, count).set(new Float32Array(memory.buffer, source + start * 4, count));
 }
-const kernels = [e.task_gemm_nt, e.task_transpose, e.task_softmax, e.task_attention, e.task_unary, e.task_layernorm, copyOut, e.task_swap_axes, e.task_binary];
+const kernels = [e.task_gemm_nt, e.task_transpose, e.task_softmax, e.task_attention, e.task_unary, e.task_layernorm, copyOut, e.task_swap_axes, e.task_binary, normalTask];
 const words = new Int32Array(control);
 const next = new BigInt64Array(control, ${NEXT_OFFSET}, 1);
 for (;;) {
@@ -326,6 +356,7 @@ export class Engine {
     this.kernels = [
       exports.task_gemm_nt!, exports.task_transpose!, exports.task_softmax!, exports.task_attention!, exports.task_unary!,
       exports.task_layernorm!, (args, task) => this.copyTask(args, task), exports.task_swap_axes!, exports.task_binary!,
+      makeNormalTask(memory, createLibm()),
     ];
     this.f32 = new Float32Array(memory.buffer);
     this.u32 = new Uint32Array(memory.buffer);

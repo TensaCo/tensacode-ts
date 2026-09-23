@@ -16,7 +16,8 @@
  * produces different normal samples there.
  */
 import { roundToDType, type DType } from './dtype.js';
-import { cos, fma, fmaf, log, log1p, logf, sin, sincosfPair, sincosfResult } from './randomMath.js';
+import { Kernel, activeEngine } from './backend/engine.js';
+import { cos, fma, fmaf, log1p, normalFill16Double, normalFill16Float, sin } from './randomMath.js';
 
 const MERSENNE_STATE_N = 624;
 const MERSENNE_STATE_M = 397;
@@ -361,29 +362,78 @@ export function fillUniform(data: FloatData, dtype: DType, from: number, to: num
   }
 }
 
-function normalFill16Float(buffer: Float64Array, offset: number, mean: number, std: number): void {
-  const identity = std === 1 && mean === 0;
-  for (let j = 0; j < 8; j += 1) {
-    const u1 = Math.fround(1 - buffer[offset + j]!);
-    const u2 = buffer[offset + j + 8]!;
-    const radius = Math.fround(Math.sqrt(Math.fround(-2 * logf(u1))));
-    sincosfPair(Math.fround(TWO_PI * u2));
-    const first = Math.fround(radius * sincosfResult.cos);
-    const second = Math.fround(radius * sincosfResult.sin);
-    buffer[offset + j] = identity ? first : fmaf(first, std, mean);
-    buffer[offset + j + 8] = identity ? second : fmaf(second, std, mean);
-  }
-}
+/** Elements transformed per step of the 16-wide fill (a multiple of 16). */
+const NORMAL_CHUNK = 1 << 16;
+/** Elements per step when the transforms run on the worker pool. */
+const NORMAL_PARALLEL_CHUNK = 1 << 20;
+/** Smallest fill that uses the worker pool. */
+const NORMAL_PARALLEL_MIN = 1 << 15;
 
-function normalFill16Double(buffer: Float64Array, offset: number, mean: number, std: number): void {
-  for (let j = 0; j < 8; j += 1) {
-    const u1 = 1 - buffer[offset + j]!;
-    const u2 = buffer[offset + j + 8]!;
-    const radius = Math.sqrt(-2 * log(u1));
-    const theta = TWO_PI * u2;
-    buffer[offset + j] = fma(radius * cos(theta), std, mean);
-    buffer[offset + j + 8] = fma(radius * sin(theta), std, mean);
+/**
+ * ATen's vectorized ``normal_`` for a contiguous tensor of at least 16
+ * elements: float32/float64 draw every uniform first and then transform
+ * blocks of 16 in place; float16/bfloat16 draw each block's uniforms just
+ * before its transform. Either way the transforms draw nothing, so the
+ * uniforms are drawn in order a chunk at a time and each chunk's blocks are
+ * transformed (on the worker pool when there is one) before the next chunk.
+ * A trailing partial block is recomputed from 16 fresh uniforms.
+ */
+function fillNormalBlocks(data: FloatData, dtype: DType, mean: number, std: number, generator: Generator): void {
+  const size = data.length;
+  const double = dtype === 'float64';
+  const reduced = dtype === 'float16' || dtype === 'bfloat16';
+  const fill = double ? normalFill16Double : normalFill16Float;
+  const opMean = double ? mean : Math.fround(mean);
+  const opStd = double ? std : Math.fround(std);
+  const draw = (target: Float64Array, count: number): void => {
+    if (double) for (let index = 0; index < count; index += 1) target[index] = generator.uniformDouble();
+    else for (let index = 0; index < count; index += 1) target[index] = generator.uniformFloat();
+  };
+  const store = (source: Float64Array, offset: number, count: number): void => {
+    if (reduced) for (let index = 0; index < count; index += 1) data[offset + index] = roundToDType(dtype, source[index]!);
+    else data.set(count === source.length ? source : source.subarray(0, count), offset);
+  };
+  const full = size - (size % 16);
+  let engine = full >= NORMAL_PARALLEL_MIN ? activeEngine() : null;
+  if (engine && engine.parallelism() <= 1) engine = null;
+  const chunk = engine ? NORMAL_PARALLEL_CHUNK : NORMAL_CHUNK;
+  const bytes = 16 + chunk * 8;
+  let pointer = 0;
+  if (engine) {
+    engine.beginCall();
+    pointer = engine.alloc(bytes);
+    if (!pointer) engine = null;
   }
+  try {
+    const local = engine ? null : new Float64Array(Math.min(chunk, full));
+    for (let start = 0; start < full; start += chunk) {
+      const count = Math.min(chunk, full - start);
+      if (engine) {
+        const params = new Float64Array(engine.memory.buffer, pointer, 2);
+        params[0] = opMean;
+        params[1] = opStd;
+        const buffer = new Float64Array(engine.memory.buffer, pointer + 16, count);
+        draw(buffer, count);
+        const blocks = count / 16;
+        const perTask = Math.max(256, Math.ceil(blocks / (engine.parallelism() * 4)));
+        engine.run(Kernel.NormalFill, [pointer, blocks, perTask, double ? 1 : 0], Math.ceil(blocks / perTask), true);
+        store(buffer, start, count);
+      } else {
+        draw(local!, count);
+        for (let offset = 0; offset < count; offset += 16) fill(local!, offset, opMean, opStd);
+        store(local!, start, count);
+      }
+    }
+  } finally {
+    if (engine) engine.release(pointer, bytes);
+  }
+  if (size === full) return;
+  // float32/float64 drew the partial block's uniforms with the rest.
+  if (!reduced) draw(new Float64Array(size - full), size - full);
+  const tail = new Float64Array(16);
+  draw(tail, 16);
+  fill(tail, 0, opMean, opStd);
+  store(tail, size - 16, 16);
 }
 
 /**
@@ -399,35 +449,7 @@ export function fillNormal(
   if (suppressedInit > 0) return;
   const size = data.length;
   if (size >= 16 && contiguous) {
-    const double = dtype === 'float64';
-    const fill = double ? normalFill16Double : normalFill16Float;
-    const draw = double ? () => generator.uniformDouble() : () => generator.uniformFloat();
-    const opMean = double ? mean : Math.fround(mean);
-    const opStd = double ? std : Math.fround(std);
-    const buffer = new Float64Array(size);
-    if (dtype === 'float32' || dtype === 'float64') {
-      // Uniforms for the whole tensor first, then Box-Muller in place.
-      if (double) for (let index = 0; index < size; index += 1) buffer[index] = generator.uniformDouble();
-      else for (let index = 0; index < size; index += 1) buffer[index] = generator.uniformFloat();
-      for (let index = 0; index + 16 <= size; index += 16) fill(buffer, index, opMean, opStd);
-    } else {
-      // Reduced precision: each block of 16 draws its uniforms just before its transform.
-      for (let index = 0; index + 16 <= size; index += 16) {
-        for (let j = 0; j < 16; j += 1) buffer[index + j] = draw();
-        fill(buffer, index, opMean, opStd);
-      }
-    }
-    if (size % 16 !== 0) {
-      // Recompute the last 16 values from fresh uniforms.
-      const offset = size - 16;
-      for (let index = 0; index < 16; index += 1) buffer[offset + index] = draw();
-      fill(buffer, offset, opMean, opStd);
-    }
-    if (dtype === 'float16' || dtype === 'bfloat16') {
-      for (let index = 0; index < size; index += 1) data[index] = roundToDType(dtype, buffer[index]!);
-    } else {
-      data.set(buffer);
-    }
+    fillNormalBlocks(data, dtype, mean, std, generator);
     return;
   }
   for (let index = 0; index < size; index += 1) {

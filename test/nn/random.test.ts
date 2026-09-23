@@ -9,8 +9,9 @@ import { describe, expect, it } from 'vitest';
 import {
   Conv2d, Embedding, EmbeddingBag, F, GRU, GRUCell, Generator, LayerNorm, Linear, MultiheadAttention, PythonRandom,
   arange, bernoulli, bernoulli_, exponential_, getRngState, rngStateTensor, init, manualSeed, multinomial, rand, randint,
-  randn, randperm, setRngState, tensor, zeros, type Module, type Tensor,
+  randn, randperm, setBackend, setRngState, tensor, zeros, type Module, type Tensor,
 } from '../../src/nn/index.js';
+import { fillNormal } from '../../src/nn/random.js';
 import { float32ToBFloat16Bits, float32ToFloat16Bits, type DType } from '../../src/nn/dtype.js';
 import * as libm from '../../src/nn/randomMath.js';
 
@@ -263,5 +264,26 @@ describe('C library ports', () => {
     expect(libm.fma(2 ** 1000, 2 ** 1000, -Infinity)).toBe(-Infinity);
     expect(libm.fma(2 ** -600, 2 ** -600, 0)).toBe(0);
     expect(libm.fmaf(Math.fround(1.1), Math.fround(1.1), Math.fround(-1.21))).toBe(Math.fround(Math.fround(1.1) * Math.fround(1.1) - Math.fround(1.21)));
+  });
+});
+
+describe('normal_ on the worker pool', () => {
+  it.each(['float32', 'float64', 'bfloat16', 'float16'] as const)('%s samples and generator state equal the single-threaded fill', (dtype) => {
+    const size = 70_001; // above the pool threshold, not a multiple of 16
+    const run = (backend: 'wasm' | 'js'): [Float64Array, Uint8Array] => {
+      setBackend(backend);
+      try {
+        const generator = new Generator(11);
+        const data = new (dtype === 'float64' ? Float64Array : Float32Array)(size);
+        fillNormal(data, dtype, 0.25, 0.02, generator);
+        return [Float64Array.from(data), generator.getState()];
+      } finally {
+        setBackend('wasm');
+      }
+    };
+    const [pooled, pooledState] = run('wasm');
+    const [serial, serialState] = run('js');
+    expect(Buffer.from(pooled.buffer).equals(Buffer.from(serial.buffer))).toBe(true);
+    expect(Buffer.from(pooledState).equals(Buffer.from(serialState))).toBe(true);
   });
 });
