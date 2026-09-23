@@ -44,6 +44,22 @@ function expectBatch(actual: ReturnType<Idefics3Processor['call']>, expected: Re
   }
 }
 
+describe('Idefics3 image processor names', () => {
+  it('resolves the Fast and Pil names to the default backend, as transformers does', () => {
+    const folder = join(root, 'smol', 'processor');
+    const names = ['tokenizer.json', 'tokenizer_config.json', 'processor_config.json', 'chat_template.jinja'];
+    const assets = Object.fromEntries(names.map((name) => [name, readFileSync(join(folder, name), 'utf8')]));
+    const config = JSON.parse(assets['processor_config.json']!);
+    const sample = image([[[0, 255], [128, 64]], [[1, 2], [3, 4]], [[9, 8], [7, 6]]]);
+    const reference = Idefics3Processor.fromAssets(assets).imageProcessor.preprocess(sample);
+    for (const type of ['Idefics3ImageProcessorPil', 'Idefics3ImageProcessorFast']) {
+      const named = { ...assets, 'processor_config.json': JSON.stringify({ ...config, image_processor: { ...config.image_processor, image_processor_type: type } }) };
+      const processed = Idefics3Processor.fromAssets(named).imageProcessor.preprocess(sample);
+      expect(processed.pixelValues.equal(reference.pixelValues), type).toBe(true);
+    }
+  });
+});
+
 describe('Idefics3Processor batches with several images per prompt (SmolVLM)', () => {
   const smol = records.smol;
   it.skipIf(!smol)('nested and flat image lists, padding, text-only batches and errors', () => {

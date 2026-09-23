@@ -410,7 +410,10 @@ export class Idefics3Processor {
     const imageConfig = isPlainObject(processorConfig.image_processor)
       ? processorConfig.image_processor as JsonObject : json('preprocessor_config.json') ?? {};
     const type = imageConfig.image_processor_type;
-    if (type !== undefined && type !== 'Idefics3ImageProcessor' && type !== 'Idefics3ImageProcessorFast') {
+    // transformers 5 resolves the ``Fast`` and ``Pil`` names to the default
+    // (torchvision) backend; the PIL backend is only selected by an explicit
+    // ``backend='pil'`` argument, which ``from_pretrained`` callers never pass.
+    if (type !== undefined && type !== 'Idefics3ImageProcessor' && type !== 'Idefics3ImageProcessorFast' && type !== 'Idefics3ImageProcessorPil') {
       throw new NotImplementedError(`image processor ${String(type)} is not supported (Idefics3ImageProcessor only)`);
     }
     const { image_processor_type: _type, processor_class: _class, ...settings } = imageConfig;
