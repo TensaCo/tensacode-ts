@@ -80,17 +80,22 @@ function workerMain(threads: Threads, engineSource: string, load: (specifier: st
     const decoded = await transformers.RawImage.fromBlob(new Blob([image.data], image.mediaType ? { type: image.mediaType } : {}));
     return decoded.rgb();
   };
-  const http = async (task: { url: string; headers: Record<string, string>; body: string; timeoutMs: number }) => {
+  const http = async (task: {
+    url: string; headers?: Record<string, string>; body?: string | null; timeoutMs: number | null; method?: string; redirect?: 'follow' | 'manual' | 'error';
+  }) => {
     const controller = new AbortController();
     let timedOut = false;
-    const timer = setTimeout(() => {
+    const timer = task.timeoutMs === null ? null : setTimeout(() => {
       timedOut = true;
       controller.abort();
     }, task.timeoutMs);
     try {
       let response: Response;
       try {
-        response = await fetch(task.url, { method: 'POST', headers: task.headers, body: task.body, redirect: 'manual', signal: controller.signal });
+        response = await fetch(task.url, {
+          method: task.method ?? 'POST', headers: task.headers ?? {}, ...(task.body === null || task.body === undefined ? {} : { body: task.body }),
+          redirect: task.redirect ?? 'manual', signal: controller.signal,
+        });
       } catch (error) {
         if (timedOut) return { outcome: 'timeout' };
         const reason = error instanceof Error ? ((error.cause as Error | undefined)?.message ?? error.message) : String(error);
@@ -107,7 +112,7 @@ function workerMain(threads: Threads, engineSource: string, load: (specifier: st
       if (response.type === 'opaqueredirect' && !status) status = 302;
       return { outcome: 'response', status, bytes };
     } finally {
-      clearTimeout(timer);
+      if (timer !== null) clearTimeout(timer);
     }
   };
   const handle = async (task: any): Promise<unknown> => {

@@ -33,7 +33,9 @@ deliberate. See [Parity with Python](docs/parity.md) for what remains.
   `loadImageAsync` match transformers' `load_image_as_tensor`, and `openImage`
   returns a `RasterImage` with Pillow's modes, `convert`, `resize` and
   `exifTranspose`. `ImageEncoder.preprocess` accepts every input Python's
-  `ViTImageProcessor` accepts; `apreprocess` also fetches URLs.
+  `ViTImageProcessor` accepts, fetching `http(s)` URLs while the caller
+  blocks like Python's `httpx.get` (`apreprocess` / `loadImageAsync` fetch
+  without blocking).
 - **Python numbers and dictionaries.** `float()`, `int()` and
   `orderedObject()` from `tensorcode` mark whole-number floats, ints and
   ordered dictionaries. Values read from Python files remember their number

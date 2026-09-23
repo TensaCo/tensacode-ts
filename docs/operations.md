@@ -50,7 +50,7 @@ shape.
 | Operation | Contract |
 |---|---|
 | `TextEncoder(config)` | Owned T5/BERT-family text transformer: raw text → `output_space`. `readout` is `'sequence'`, `'pooled'` (masked mean) or output encoding |
-| `ImageEncoder(config)` | Owned ViT plus its `ViTImageProcessor`: CHW image → `output_space`. `preprocess` takes tensors, decoded images, file paths, base64 text or data URIs (`apreprocess` also fetches URLs) |
+| `ImageEncoder(config)` | Owned ViT plus its `ViTImageProcessor`: CHW image → `output_space`. `preprocess` takes tensors, decoded images, URLs (fetched while the call blocks, as in Python), file paths, base64 text or data URIs; `apreprocess` fetches without blocking |
 | `TextDecoder(config)` | `input_space` → generated text through an explicit linear or identity bridge |
 | `ImageDecoder(config)` | Owned latent diffusion (diffusers UNet2DConditionModel with every block family it can run, AutoencoderKL, DDIM): `input_space` → RGB pixels. Sampling needs `context.noise` or `context.seed`; `fromFoundation` imports a diffusers-format repository |
 | `VocabularyEncoder(config)` | A `vocabulary` list, `dimensions`, optional `output_space`; lowercase regex tokens, mean-pooled trainable embeddings |

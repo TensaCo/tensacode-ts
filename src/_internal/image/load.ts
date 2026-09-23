@@ -5,6 +5,7 @@
  * ``data:image/...;base64,`` prefix), plus Python's lenient
  * ``base64.decodebytes``.
  */
+import { blockingCall } from '../../integrations/blocking.js';
 import { ValueError } from '../../errors.js';
 
 interface FsModule {
@@ -106,14 +107,28 @@ function incorrectSource(source: string, error: unknown): ValueError {
 }
 
 /**
- * Encoded bytes for a string source (``load_image_as_tensor``): a file path
- * or base64 (``data:image/...`` prefix allowed). URLs need
- * {@link fetchSourceBytes}.
+ * ``httpx.get(url, timeout=timeout, follow_redirects=True).content``, blocking
+ * the calling thread while a worker thread fetches (as Python's call blocks).
  */
-export function sourceBytes(source: string): Uint8Array {
-  if (isUrl(source)) {
-    throw new TypeError('image URLs are fetched asynchronously; use the async variant (apreprocess / loadImageAsync)');
-  }
+function fetchBlocking(source: string, timeout: number | null): Uint8Array {
+  const reply = blockingCall<{ outcome: string; status?: number; bytes?: Uint8Array; reason?: string }>({
+    kind: 'http', method: 'GET', url: source, redirect: 'follow', timeoutMs: timeout ? timeout * 1000 : null,
+  }, { waitSeconds: timeout ? timeout + 30 : null });
+  if (reply.outcome === 'timeout') throw new Error(`timed out fetching ${source}`, { cause: 'timeout' });
+  if (reply.outcome !== 'response') throw new Error(`fetching ${source} failed: ${reply.reason ?? reply.outcome}`);
+  const bytes = reply.bytes!;
+  if (!bytes.length) throw new ValueError('both buffer length (0) and count (-1) must not be 0');
+  return bytes;
+}
+
+/**
+ * Encoded bytes for a string source (``load_image_as_tensor``): an
+ * ``http(s)://`` URL (fetched while the caller blocks, see
+ * {@link fetchSourceBytes} for the asynchronous form), a file path or base64
+ * (``data:image/...`` prefix allowed).
+ */
+export function sourceBytes(source: string, options: { timeout?: number | null } = {}): Uint8Array {
+  if (isUrl(source)) return fetchBlocking(source, options.timeout ?? null);
   if (isFile(source)) return readFileBytes(source);
   let text = source;
   if (text.startsWith('data:image/')) text = text.split(',')[1] ?? '';

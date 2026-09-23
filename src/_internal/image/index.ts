@@ -42,9 +42,8 @@ function toTensor(decoded: DecodedArray): Tensor {
 
 /**
  * ``torchvision.io.decode_image(input, mode, apply_exif_orientation)``:
- * a ``uint8`` ``[C, H, W]`` tensor (``[N, 3, H, W]`` for animated GIFs).
- * 16-bit PNGs decode to exact 0-65535 values in an ``int32`` tensor
- * (torchvision returns ``uint16``). ``mode`` defaults to ``'UNCHANGED'``.
+ * a ``uint8`` ``[C, H, W]`` tensor (``[N, 3, H, W]`` for animated GIFs;
+ * ``uint16`` for 16-bit PNGs, as torchvision). ``mode`` defaults to ``'UNCHANGED'``.
  */
 export function decodeImage(input: EncodedImage, options: { mode?: ImageReadMode; applyExifOrientation?: boolean } = {}): Tensor {
   const bytes = toBytes(input);
@@ -52,15 +51,16 @@ export function decodeImage(input: EncodedImage, options: { mode?: ImageReadMode
 }
 
 /**
- * transformers ``load_image_as_tensor(source)`` for a file path, base64 text
- * or ``data:image/...`` URI: an ``RGB`` ``[3, H, W]`` tensor. ``http(s)://``
- * URLs need {@link loadImageAsync}.
+ * transformers ``load_image_as_tensor(source, timeout)`` for an ``http(s)://``
+ * URL (fetched while the caller blocks, like ``httpx.get``), a file path,
+ * base64 text or a ``data:image/...`` URI: an ``RGB`` ``[3, H, W]`` tensor.
+ * {@link loadImageAsync} fetches without blocking.
  */
-export function loadImage(source: string): Tensor {
+export function loadImage(source: string, options: { timeout?: number | null } = {}): Tensor {
   if (typeof source !== 'string') {
     throw new TypeError('Incorrect format used for image. Should be a URL, a local path, a base64 string, or a PIL image.');
   }
-  return toTensor(torchvisionDecode(sourceBytes(source), 'RGB'));
+  return toTensor(torchvisionDecode(sourceBytes(source, options), 'RGB'));
 }
 
 /** {@link loadImage} that also fetches ``http(s)://`` URLs (redirects followed). */

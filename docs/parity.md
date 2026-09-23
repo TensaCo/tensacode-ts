@@ -205,8 +205,7 @@ smoothing. Where torchvision itself returns uninitialized memory (palettes
 below 8 bits in `UNCHANGED` mode, palette PNGs without transparency in the
 alpha modes, GIF frames beyond the canvas), the pixels cannot match. Some
 decoder error messages are worded differently from the C libraries; the error
-types match. The synchronous `preprocess` and `loadImage` cannot fetch
-`http(s)` URLs; use `apreprocess` or `loadImageAsync`.
+types match.
 
 ### Providers
 

@@ -218,9 +218,30 @@ describe('ViTImageProcessor input parity', () => {
     expect(() => resizeImage(image, [2, 2], 'hamming')).toThrow(/got hamming/);
   });
 
-  it('fetches URLs only through apreprocess', async () => {
+  it('fetches URLs synchronously (blocking, like httpx.get) and asynchronously', async () => {
     const processor = new ImageProcessor({ size: { height: 4, width: 4 } });
-    expect(() => processor.preprocess('https://example.invalid/image.png')).toThrow(/asynchronously/);
+    // The server runs on its own thread: the synchronous fetch blocks this one.
+    const { Worker } = await import('node:worker_threads');
+    const server = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+      const { createServer } = require('node:http');
+      const server = createServer((request, response) => {
+        if (request.url === '/moved') { response.writeHead(302, { location: '/image.jpg' }); response.end(); return; }
+        response.writeHead(200, { 'content-type': 'image/jpeg' });
+        response.end(Buffer.from(workerData.image, 'base64'));
+      });
+      server.listen(0, '127.0.0.1', () => parentPort.postMessage(server.address().port));
+      parentPort.on('message', () => { server.closeAllConnections(); server.close(() => process.exit(0)); });
+    `, { eval: true, workerData: { image: readFileSync(`${directory}jpg_37x21_q95_s2.jpg`).toString('base64') } });
+    const port = await new Promise<number>((resolve) => server.once('message', resolve));
+    try {
+      const fromPath = processor.preprocess(`${directory}jpg_37x21_q95_s2.jpg`).pixel_values;
+      expect(processor.preprocess(`http://127.0.0.1:${port}/moved`).pixel_values.equal(fromPath)).toBe(true);
+      expect((await processor.apreprocess(`http://127.0.0.1:${port}/image.jpg`)).pixel_values.equal(fromPath)).toBe(true);
+      expect(loadImage(`http://127.0.0.1:${port}/image.jpg`).equal(decodeImage(`${directory}jpg_37x21_q95_s2.jpg`, { mode: 'RGB' }))).toBe(true);
+    } finally {
+      server.postMessage('close');
+    }
     const fromPath = processor.preprocess(`${directory}jpg_37x21_q95_s2.jpg`).pixel_values;
     const fromAsync = (await processor.apreprocess(`${directory}jpg_37x21_q95_s2.jpg`)).pixel_values;
     expect(fromAsync.equal(fromPath)).toBe(true);
