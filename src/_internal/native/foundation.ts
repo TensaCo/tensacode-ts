@@ -17,7 +17,7 @@ import { deserializeSafetensors } from '../../nn/safetensors.js';
 import { isDType, isFloatingDType, roundToDType, type DType } from '../../nn/dtype.js';
 import { ValueError } from '../../errors.js';
 import { parseJsonStrict, type JsonObject } from '../json.js';
-import { resolveArtifactDirectory, type HubOptions } from '../hub.js';
+import { resolveArtifactDirectory, safetensorsConversionRevision, type HubOptions } from '../hub.js';
 import { pathExists } from '../files.js';
 import { FastTokenizer } from '../tokenizers/index.js';
 import { NativeConfig, generationConfigFromFile, generationConfigFromModel } from './config.js';
@@ -73,6 +73,10 @@ function legacyVitKey(key: string): string {
     .replace('attention.output.dense', 'attention.o_proj')
     .replace('intermediate.dense', 'mlp.fc1')
     .replace(/(^|\.)output\.dense/, '$1mlp.fc2');
+}
+
+async function hasSafetensors(directory: string): Promise<boolean> {
+  return (await pathExists(join(directory, 'model.safetensors'))) || pathExists(join(directory, 'model.safetensors.index.json'));
 }
 
 async function readWeights(directory: string): Promise<Map<string, Tensor>> {
@@ -200,9 +204,19 @@ function resolveDtype(requested: DType | 'auto', rawConfig: JsonObject, weights:
 /** ``AutoModel*.from_pretrained(source)`` for supported native architectures. */
 export async function loadNativeFoundation(source: string, options: FoundationOptions = {}): Promise<LoadedFoundation> {
   const { head = 'base', addPoolingLayer, tokenizer: wantTokenizer, restoreRawTieFlags, configOverrides, dtype: requested = 'auto', ...hub } = options;
-  const { path } = await resolveArtifactDirectory(source, { ...hub, allowPatterns: FOUNDATION_FILES });
+  const { path, remote } = await resolveArtifactDirectory(source, { ...hub, allowPatterns: FOUNDATION_FILES });
   const rawConfig = parseJsonStrict(await readFile(join(path, 'config.json'), 'utf8')) as JsonObject;
-  const weights = await readWeights(path);
+  let weightsPath = path;
+  if (remote && !(await hasSafetensors(path))) {
+    // transformers loads ``model.safetensors`` from the Hub's conversion PR.
+    const conversion = await safetensorsConversionRevision(source, hub);
+    if (conversion) {
+      weightsPath = (await resolveArtifactDirectory(source, {
+        ...hub, revision: conversion, allowPatterns: ['model.safetensors', 'model.safetensors.index.json', 'model-*.safetensors'],
+      })).path;
+    }
+  }
+  const weights = await readWeights(weightsPath);
   const dtype = resolveDtype(requested, rawConfig, weights);
   let config = NativeConfig.fromPretrainedDict({ ...rawConfig, ...(configOverrides ?? {}) }, source, dtype);
   const model = createNativeModel(config, head, addPoolingLayer === undefined ? {} : { addPoolingLayer });

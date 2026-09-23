@@ -250,6 +250,55 @@ export async function snapshotDownload(repoId: string, options: HubOptions = {})
   return snapshot;
 }
 
+const CONVERSION_PR_TITLE = 'Adding `safetensors` variant of this model';
+
+async function hubJson(url: string, token: string | null, transport: typeof fetch): Promise<unknown> {
+  const response = await transport(url, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+  if (!response.ok) throw new HubError(`Hub request failed (${url}): HTTP ${response.status}`, response.status);
+  return response.json();
+}
+
+/**
+ * transformers' safetensors auto-conversion lookup (``get_conversion_pr_reference``):
+ * for a repository whose ``main`` branch has only PyTorch weights, the open
+ * "Adding `safetensors` variant of this model" pull request (by SFconvertbot
+ * for public repositories) based on the current ``main`` commit provides
+ * ``model.safetensors``. Returns ``refs/pr/<n>``, or ``null`` offline, for a
+ * pinned revision, or when no such PR exists. Unlike Python, TypeScript never
+ * asks the Hub to create a conversion.
+ */
+export async function safetensorsConversionRevision(repoId: string, options: HubOptions = {}): Promise<string | null> {
+  const revision = options.revision ?? 'main';
+  const disabled = ['1', 'ON', 'YES', 'TRUE'].includes((env('DISABLE_SAFETENSORS_CONVERSION') ?? '').toUpperCase());
+  if (revision !== 'main' || options.localFilesOnly || hubOffline() || disabled) return null;
+  validateRepoId(repoId);
+  const endpoint = (options.endpoint ?? env('HF_ENDPOINT') ?? DEFAULT_ENDPOINT).replace(/\/+$/, '');
+  const transport = options.fetch ?? globalThis.fetch;
+  if (typeof transport !== 'function') return null;
+  const token = await resolveToken(options.token);
+  const info = await hubJson(`${endpoint}/api/models/${repoId}`, token, transport) as { private?: unknown };
+  const commits = async (reference: string): Promise<string[]> => {
+    const list = await hubJson(`${endpoint}/api/models/${repoId}/commits/${encodeURIComponent(reference)}`, token, transport);
+    return Array.isArray(list) ? list.map((item) => String((item as { id?: unknown }).id)) : [];
+  };
+  const mainCommit = (await commits('main'))[0];
+  for (let page = 0; page < 100; page += 1) {
+    const body = await hubJson(`${endpoint}/api/models/${repoId}/discussions?p=${page}`, token, transport) as { discussions?: unknown };
+    const discussions = Array.isArray(body.discussions) ? body.discussions as Record<string, unknown>[] : [];
+    if (!discussions.length) break;
+    for (const discussion of discussions) {
+      if (discussion.title !== CONVERSION_PR_TITLE || discussion.status !== 'open' || discussion.isPullRequest !== true) continue;
+      const reference = `refs/pr/${String(discussion.num)}`;
+      const history = await commits(reference);
+      if (history[1] !== mainCommit) continue;
+      const author = (discussion.author as { name?: unknown } | undefined)?.name;
+      if (info.private !== true && author !== 'SFconvertbot') continue;
+      return reference;
+    }
+  }
+  return null;
+}
+
 /** Whether ``source`` must be treated as a local path rather than a Hub id. */
 export function looksLikeLocalPath(source: string): boolean {
   return isAbsolute(source) || source.startsWith('.') || source.startsWith('~');

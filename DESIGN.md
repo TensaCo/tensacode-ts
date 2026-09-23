@@ -243,9 +243,11 @@ others with `ValueError`.
   slow. Random streams differ from PyTorch (initializations, dropout, sampling),
   so freshly initialized models are not numerically identical to Python ones;
   loaded weights are.
-- **Weights.** Only safetensors checkpoints (no `pytorch_model.bin`/pickle); the
-  Hub safetensors-conversion PR lookup is not emulated — pin a revision that
-  contains `model.safetensors`.
+- **Weights.** Only safetensors checkpoints (no `pytorch_model.bin`/pickle). A
+  Hub repository whose `main` has only PyTorch weights loads `model.safetensors`
+  from its open SFconvertbot conversion PR based on `main`, as transformers
+  does; unlike Python, TypeScript never asks the Hub to create that PR (set
+  `DISABLE_SAFETENSORS_CONVERSION` to skip the lookup).
 - **Latent diffusion.** `ops.vec.ImageDecoder` ports diffusers 0.40
   `UNet2DConditionModel` (cross-attention down/up blocks, `UNetMidBlock2DCrossAttn`),
   `AutoencoderKL` (`DownEncoderBlock2D`/`UpDecoderBlock2D`) and `DDIMScheduler`
