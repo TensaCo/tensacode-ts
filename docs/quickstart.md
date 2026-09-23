@@ -1,9 +1,9 @@
 # Quickstart
 
-Install from GitHub (Node.js 20.16 or newer):
+Install from npm (Node.js 20.16 or newer):
 
 ```bash
-npm install github:TensaCo/tensacode-ts
+npm install tensorcode
 ```
 
 From a checkout, run `npm install` in the repository root instead. It builds

@@ -27,11 +27,10 @@ arbitrary JavaScript or remote model calls differentiable.
 
 ## Install
 
-This needs Node.js 20.16 or newer. The package is not on npm yet, so install it
-from GitHub. The `prepare` script builds `dist/`:
+This needs Node.js 20.16 or newer:
 
 ```bash
-npm install github:TensaCo/tensacode-ts
+npm install tensorcode
 ```
 
 The package is ESM-only (`import`, not `require`) and ships its own type
