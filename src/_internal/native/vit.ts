@@ -1,8 +1,8 @@
 /** ``ViTModel`` with transformers 5.17 parameter names (``layers.N.attention.q_proj`` ...). */
+import { activationModule, type ActivationModule } from './activations.js';
 import { Module } from '../../nn/module.js';
 import { Parameter, Tensor } from '../../nn/tensor.js';
 import { Conv2d, Dropout, Embedding, LayerNorm, Linear, ModuleList } from '../../nn/layers.js';
-import { activation } from '../../nn/ops/nn.js';
 import { cat } from '../../nn/ops/shape.js';
 import { noGrad } from '../../nn/autograd.js';
 import * as init from '../../nn/init.js';
@@ -95,17 +95,17 @@ class ViTAttention extends Module {
 class ViTMLP extends Module {
   readonly fc1: Linear;
   readonly fc2: Linear;
-  private readonly act: (x: Tensor) => Tensor;
+  readonly activation_fn: ActivationModule;
 
   constructor(config: NativeConfig) {
     super();
+    this.activation_fn = this.registerModule('activation_fn', activationModule(config.string('hidden_act')));
     this.fc1 = this.registerModule('fc1', new Linear(config.number('hidden_size'), config.number('intermediate_size')));
     this.fc2 = this.registerModule('fc2', new Linear(config.number('intermediate_size'), config.number('hidden_size')));
-    this.act = activation(config.string('hidden_act'));
   }
 
   forward(hidden: Tensor): Tensor {
-    return this.fc2.forward(this.act(this.fc1.forward(hidden)));
+    return this.fc2.forward(this.activation_fn.forward(this.fc1.forward(hidden)));
   }
 }
 
@@ -135,16 +135,16 @@ class ViTLayer extends Module {
 
 class ViTPooler extends Module {
   readonly dense: Linear;
-  private readonly act: (x: Tensor) => Tensor;
+  readonly activation: ActivationModule;
 
   constructor(config: NativeConfig) {
     super();
     this.dense = this.registerModule('dense', new Linear(config.number('hidden_size'), config.number('pooler_output_size')));
-    this.act = activation(config.string('pooler_act'));
+    this.activation = this.registerModule('activation', activationModule(config.string('pooler_act')));
   }
 
   forward(hidden: Tensor): Tensor {
-    return this.act(this.dense.forward(hidden.select(1, 0)));
+    return this.activation.forward(this.dense.forward(hidden.select(1, 0)));
   }
 }
 

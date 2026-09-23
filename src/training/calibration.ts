@@ -96,6 +96,9 @@ export class TemperatureCalibration extends Module {
 
   constructor(options: { minTemperature?: number; maxTemperature?: number; iterations?: number } = {}) {
     super();
+    const unknown = Object.keys(options ?? {}).filter((key) => !['minTemperature', 'maxTemperature', 'iterations'].includes(key));
+    // Python raises TypeError for unexpected keyword arguments.
+    if (unknown.length) throw new TypeError(`TemperatureCalibration got unexpected options: ${unknown.join(', ')}`);
     const min = options.minTemperature ?? 0.05;
     const max = options.maxTemperature ?? 100;
     const iterations = options.iterations ?? 64;

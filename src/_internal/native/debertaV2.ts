@@ -13,6 +13,7 @@
  * the ``ContextPooler`` classification head. ``registry.ts`` routes
  * ``deberta-v2`` here.
  */
+import { activationModule, type ActivationModule } from './activations.js';
 import { Module } from '../../nn/module.js';
 import { Parameter, Tensor, tensor, zeros } from '../../nn/tensor.js';
 import { Dropout, Embedding, LayerNorm, Linear, ModuleList } from '../../nn/layers.js';
@@ -294,16 +295,16 @@ class DebertaV2Attention extends Module {
 
 class DebertaV2Intermediate extends Module {
   readonly dense: Linear;
-  private readonly act: (x: Tensor) => Tensor;
+  readonly intermediate_act_fn: ActivationModule;
 
   constructor(config: NativeConfig) {
     super();
     this.dense = this.registerModule('dense', new Linear(num(config, 'hidden_size'), num(config, 'intermediate_size')));
-    this.act = activation(config.string('hidden_act'));
+    this.intermediate_act_fn = this.registerModule('intermediate_act_fn', activationModule(config.string('hidden_act')));
   }
 
   forward(hidden: Tensor): Tensor {
-    return this.act(this.dense.forward(hidden));
+    return this.intermediate_act_fn.forward(this.dense.forward(hidden));
   }
 }
 

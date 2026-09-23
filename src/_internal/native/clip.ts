@@ -1,8 +1,9 @@
 /** ``CLIPModel`` (text and vision towers with projections), transformers 5.17 names. */
+import { activationModule, type ActivationModule } from './activations.js';
 import { Module } from '../../nn/module.js';
 import { Parameter, Tensor, tensor, scalar } from '../../nn/tensor.js';
 import { Conv2d, Embedding, LayerNorm, Linear, ModuleList } from '../../nn/layers.js';
-import { activation, normalize } from '../../nn/ops/nn.js';
+import { normalize } from '../../nn/ops/nn.js';
 import { cat } from '../../nn/ops/shape.js';
 import { noGrad } from '../../nn/autograd.js';
 import * as init from '../../nn/init.js';
@@ -42,17 +43,17 @@ class CLIPAttention extends Module {
 class CLIPMLP extends Module {
   readonly fc1: Linear;
   readonly fc2: Linear;
-  private readonly act: (x: Tensor) => Tensor;
+  readonly activation_fn: ActivationModule;
 
   constructor(config: NativeConfig) {
     super();
+    this.activation_fn = this.registerModule('activation_fn', activationModule(config.string('hidden_act')));
     this.fc1 = this.registerModule('fc1', new Linear(config.number('hidden_size'), config.number('intermediate_size')));
     this.fc2 = this.registerModule('fc2', new Linear(config.number('intermediate_size'), config.number('hidden_size')));
-    this.act = activation(config.string('hidden_act'));
   }
 
   forward(hidden: Tensor): Tensor {
-    return this.fc2.forward(this.act(this.fc1.forward(hidden)));
+    return this.fc2.forward(this.activation_fn.forward(this.fc1.forward(hidden)));
   }
 }
 

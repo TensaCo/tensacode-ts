@@ -3,10 +3,11 @@
  * transformers 5.17 parameter names, teacher-forced loss and a decoder
  * key/value cache for generation.
  */
+import { activationModule, type ActivationModule } from './activations.js';
 import { Module } from '../../nn/module.js';
 import { Tensor, tensor, zeros } from '../../nn/tensor.js';
 import { Dropout, Embedding, Linear, ModuleList } from '../../nn/layers.js';
-import { activation, crossEntropy, rmsNorm } from '../../nn/ops/nn.js';
+import { crossEntropy, rmsNorm } from '../../nn/ops/nn.js';
 import { cat } from '../../nn/ops/shape.js';
 import { Parameter } from '../../nn/tensor.js';
 import { noGrad } from '../../nn/autograd.js';
@@ -37,7 +38,7 @@ class T5DenseActDense extends Module {
   readonly wi: Linear;
   readonly wo: Linear;
   readonly dropout: Dropout;
-  private readonly act: (x: Tensor) => Tensor;
+  readonly act: ActivationModule;
 
   constructor(config: NativeConfig) {
     super();
@@ -46,11 +47,11 @@ class T5DenseActDense extends Module {
     this.wi = this.registerModule('wi', new Linear(model, ff, { bias: false }));
     this.wo = this.registerModule('wo', new Linear(ff, model, { bias: false }));
     this.dropout = this.registerModule('dropout', new Dropout(config.number('dropout_rate')));
-    this.act = activation(config.string('dense_act_fn'));
+    this.act = this.registerModule('act', activationModule(config.string('dense_act_fn')));
   }
 
   forward(hidden: Tensor): Tensor {
-    return this.wo.forward(this.dropout.forward(this.act(this.wi.forward(hidden))));
+    return this.wo.forward(this.dropout.forward(this.act.forward(this.wi.forward(hidden))));
   }
 }
 
@@ -59,7 +60,7 @@ class T5DenseGatedActDense extends Module {
   readonly wi_1: Linear;
   readonly wo: Linear;
   readonly dropout: Dropout;
-  private readonly act: (x: Tensor) => Tensor;
+  readonly act: ActivationModule;
 
   constructor(config: NativeConfig) {
     super();
@@ -69,11 +70,11 @@ class T5DenseGatedActDense extends Module {
     this.wi_1 = this.registerModule('wi_1', new Linear(model, ff, { bias: false }));
     this.wo = this.registerModule('wo', new Linear(ff, model, { bias: false }));
     this.dropout = this.registerModule('dropout', new Dropout(config.number('dropout_rate')));
-    this.act = activation(config.string('dense_act_fn'));
+    this.act = this.registerModule('act', activationModule(config.string('dense_act_fn')));
   }
 
   forward(hidden: Tensor): Tensor {
-    const gated = this.act(this.wi_0.forward(hidden)).mul(this.wi_1.forward(hidden));
+    const gated = this.act.forward(this.wi_0.forward(hidden)).mul(this.wi_1.forward(hidden));
     return this.wo.forward(this.dropout.forward(gated));
   }
 }

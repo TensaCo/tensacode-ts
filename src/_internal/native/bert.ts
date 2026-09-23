@@ -2,6 +2,7 @@
  * BERT-family encoders with transformers 5.17 parameter names: BERT, RoBERTa,
  * Electra and DistilBERT, plus their ``*ForSequenceClassification`` heads.
  */
+import { activationModule, type ActivationModule } from './activations.js';
 import { Module } from '../../nn/module.js';
 import { Tensor, tensor } from '../../nn/tensor.js';
 import { Dropout, Embedding, LayerNorm, Linear, ModuleList } from '../../nn/layers.js';
@@ -92,16 +93,16 @@ class BertAttention extends Module {
 
 class BertIntermediate extends Module {
   readonly dense: Linear;
-  private readonly act: (x: Tensor) => Tensor;
+  readonly intermediate_act_fn: ActivationModule;
 
   constructor(config: NativeConfig) {
     super();
     this.dense = this.registerModule('dense', new Linear(num(config, 'hidden_size'), num(config, 'intermediate_size')));
-    this.act = activation(config.string('hidden_act'));
+    this.intermediate_act_fn = this.registerModule('intermediate_act_fn', activationModule(config.string('hidden_act')));
   }
 
   forward(hidden: Tensor): Tensor {
-    return this.act(this.dense.forward(hidden));
+    return this.intermediate_act_fn.forward(this.dense.forward(hidden));
   }
 }
 
@@ -142,15 +143,17 @@ export class BertEncoder extends Module {
 
 class BertPooler extends Module {
   readonly dense: Linear;
+  readonly activation: ActivationModule;
 
   constructor(config: NativeConfig) {
     super();
     const hidden = num(config, 'hidden_size');
     this.dense = this.registerModule('dense', new Linear(hidden, hidden));
+    this.activation = this.registerModule('activation', activationModule('tanh'));
   }
 
   forward(hidden: Tensor): Tensor {
-    return this.dense.forward(hidden.select(1, 0)).tanh();
+    return this.activation.forward(this.dense.forward(hidden.select(1, 0)));
   }
 }
 
@@ -376,19 +379,20 @@ class DistilFFN extends Module {
   readonly lin1: Linear;
   readonly lin2: Linear;
   readonly dropout: Dropout;
-  private readonly act: (x: Tensor) => Tensor;
+  readonly activation: ActivationModule;
 
   constructor(config: NativeConfig) {
     super();
     const dim = num(config, 'dim');
+    // HF FFN registration order: dropout, lin1, lin2, activation.
+    this.dropout = this.registerModule('dropout', new Dropout(num(config, 'dropout')));
     this.lin1 = this.registerModule('lin1', new Linear(dim, num(config, 'hidden_dim')));
     this.lin2 = this.registerModule('lin2', new Linear(num(config, 'hidden_dim'), dim));
-    this.dropout = this.registerModule('dropout', new Dropout(num(config, 'dropout')));
-    this.act = activation(config.string('activation'));
+    this.activation = this.registerModule('activation', activationModule(config.string('activation')));
   }
 
   forward(hidden: Tensor): Tensor {
-    return this.dropout.forward(this.lin2.forward(this.act(this.lin1.forward(hidden))));
+    return this.dropout.forward(this.lin2.forward(this.activation.forward(this.lin1.forward(hidden))));
   }
 }
 
@@ -503,13 +507,22 @@ class ClassificationHead extends Module {
   readonly out_proj: Linear;
   private readonly act: (x: Tensor) => Tensor;
 
-  constructor(config: NativeConfig, act: string) {
+  /**
+   * ``registered`` mirrors HF: Electra's head registers ``activation`` as a
+   * submodule, RoBERTa's applies ``torch.tanh`` inline.
+   */
+  constructor(config: NativeConfig, act: string, registered: boolean) {
     super();
     const hidden = num(config, 'hidden_size');
     this.dense = this.registerModule('dense', new Linear(hidden, hidden));
+    if (registered) {
+      const module = this.registerModule('activation', activationModule(act));
+      this.act = (x) => module.forward(x);
+    } else {
+      this.act = activation(act);
+    }
     this.dropout = this.registerModule('dropout', new Dropout(classifierDropout(config, 'hidden_dropout_prob')));
     this.out_proj = this.registerModule('out_proj', new Linear(hidden, config.numLabels));
-    this.act = activation(act);
   }
 
   forward(features: Tensor): Tensor {
@@ -527,7 +540,7 @@ export class RobertaForSequenceClassification extends NativeModel implements Nat
   constructor(config: NativeConfig) {
     super(config);
     this.roberta = this.registerModule('roberta', new RobertaModel(config, { addPoolingLayer: false }));
-    this.classifier = this.registerModule('classifier', new ClassificationHead(config, 'tanh'));
+    this.classifier = this.registerModule('classifier', new ClassificationHead(config, 'tanh', false));
     initializeWeights(this.classifier, num(config, 'initializer_range'));
   }
 
@@ -548,7 +561,7 @@ export class ElectraForSequenceClassification extends NativeModel implements Nat
   constructor(config: NativeConfig) {
     super(config);
     this.electra = this.registerModule('electra', new ElectraModel(config));
-    this.classifier = this.registerModule('classifier', new ClassificationHead(config, 'gelu'));
+    this.classifier = this.registerModule('classifier', new ClassificationHead(config, 'gelu', true));
     initializeWeights(this.classifier, num(config, 'initializer_range'));
   }
 

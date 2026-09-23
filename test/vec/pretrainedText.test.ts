@@ -15,6 +15,7 @@ import { bindingRecords } from '../../src/_internal/fingerprint.js';
 import { generateSeq2Seq } from '../../src/_internal/native/generation.js';
 import { FastTokenizer } from '../../src/_internal/tokenizers/index.js';
 import { trace } from '../../src/_internal/tracing.js';
+import { Trainer, loadExperience } from '../../src/training/index.js';
 import { expectClose } from '../helpers/gradcheck.js';
 import { fixtureJson, fromJson } from '../helpers/fixtures.js';
 import { fixturePath } from './helpers.js';
@@ -332,5 +333,92 @@ describe('pretrained text operations (tests/vec/test_pretrained_text.py)', () =>
     const restored = await TextEncoder.fromPretrained(join(scratch, `conditioning-${readout}`));
     close(restored.call('hello world', { context: { latents: [prefix] } }).tensor, expected);
     close((session.replay(session.ref(result)) as Latent).tensor, expected);
+  });
+});
+
+describe('pretrained text conditioning (remaining tests/vec/test_pretrained_text.py cases)', () => {
+  it('training capture keeps a context envelope and replays after a fresh restart', async () => {
+    const decoder = await TextDecoder.fromFoundation(T5, { inputSpace: new Space('input', 3, { organization: 'sequence' }) });
+    const trainer = Trainer.fromTool(decoder);
+    const value = new Latent(randn([1, 2, 3]), decoder.inputSpace);
+    const raw = randn([1, 1, 3]);
+    raw.requiresGrad = true;
+    const prefix = new Latent(raw, decoder.inputSpace);
+    const envelope = { value, context: { latents: [prefix] } };
+    const loss = decoder.trainingOperation.call({ inputs: envelope, targets: 'answer' });
+    loss.backward();
+    expect(raw.grad!.abs().sum().item()).toBeGreaterThan(0);
+    const session = trainer.capture(envelope, 'answer', { source: 'fixture' });
+    const codecs = { latent: Latent, space: Space };
+    await session.save(join(scratch, 'context.json'), { operations: trainer.operations, codecs });
+    await decoder.savePretrained(join(scratch, 'context-model'));
+    const restored = await TextDecoder.fromPretrained(join(scratch, 'context-model'));
+    const restarted = Trainer.fromTool(restored);
+    const experience = await loadExperience(join(scratch, 'context.json'), { operations: restarted.operations, codecs });
+    expect(Number.isFinite(restarted.step(experience))).toBe(true);
+    expect(() => trainer.capture({ ...envelope, targets: 'leaked' }, 'answer', { source: 'fixture' })).toThrow(/envelope/);
+    expect(() => trainer.capture({ value, context: { targets: 'leaked' } }, 'answer', { source: 'fixture' })).toThrow(/context/);
+  });
+
+  it.each(['sequence', 'pooled'] as const)('encoder prefix padding is position and gradient invariant (%s)', async (readout) => {
+    const space = new Space('native-context', 8, { organization: 'sequence' });
+    const encoder = await TextEncoder.fromFoundation(T5, { readout, contextSpace: space });
+    encoder.tokenizer.paddingSide = 'left';
+    const raw = randn([2, 4, 8]);
+    raw.requiresGrad = true;
+    const keep = tensor([[false, true, false, true], [true, false, false, false]]);
+    const batch = encoder.call(['hello world', 'hello'], { context: { latents: [new Latent(raw, space, { mask: keep })] } });
+    ['hello world', 'hello'].forEach((text, row) => {
+      const compact = new Latent(noGrad(() => raw.select(0, row).maskedSelect(keep.select(0, row)).unsqueeze(0)), space);
+      const single = noGrad(() => encoder.call(text, { context: { latents: [compact] } }));
+      if (readout === 'sequence') {
+        close(noGrad(() => batch.tensor.select(0, row).maskedSelect(batch.mask!.select(0, row))),
+          single.tensor.select(0, 0).maskedSelect(single.mask!.select(0, 0)), 1e-6);
+      } else {
+        close(noGrad(() => batch.tensor.select(0, row)), single.tensor.select(0, 0), 1e-6);
+      }
+    });
+    if (readout === 'sequence') {
+      expect(batch.mask!.tolist()).toEqual([[true, true], [false, true]]);
+      expect(noGrad(() => batch.tensor.maskedSelect(batch.mask!.logicalNot()).abs().sum().item())).toBe(0);
+    }
+    batch.tensor.square().sum().backward();
+    const grad = raw.grad!;
+    expect(grad.maskedSelect(keep.logicalNot()).abs().sum().item()).toBe(0);
+    expect(grad.allFinite()).toBe(true);
+    expect(grad.maskedSelect(keep).abs().sum().item()).toBeGreaterThan(0);
+  });
+
+  it.each(['decoder', 'sequence', 'pooled'] as const)('masked text conditioning survives the artifact and durable replay (%s)', async (kind) => {
+    const space = new Space('conditioning', kind === 'decoder' ? 3 : 8, { organization: 'sequence' });
+    const model: TextDecoder | TextEncoder = kind === 'decoder'
+      ? await TextDecoder.fromFoundation(T5, { inputSpace: space })
+      : await TextEncoder.fromFoundation(T5, { contextSpace: space, readout: kind });
+    const value = kind === 'decoder' ? new Latent(randn([1, 2, 3]), space) : 'hello world';
+    const raw = randn([1, 1, space.dimensions]);
+    const huge = tensor(new Array(20 * space.dimensions).fill(1e30), { shape: [1, 20, space.dimensions] });
+    const prefix = new Latent(cat([raw, huge], 1), space, { mask: tensor([[true, ...new Array(20).fill(false)]]) });
+    const compact = new Latent(raw, space);
+    let session;
+    let expected: Tensor;
+    if (model instanceof TextDecoder) {
+      const trainer = Trainer.fromTool(model);
+      session = trainer.capture({ value, context: { latents: [prefix] } }, 'answer', { source: 'padding regression fixture' });
+      expected = noGrad(() => model.loss(value as Latent, 'answer', { context: { latents: [compact] } }));
+    } else {
+      session = trace();
+      const result = session.run(() => model.call(value as string, { context: { latents: [prefix] } }));
+      expected = noGrad(() => model.call(value as string, { context: { latents: [compact] } }).tensor);
+      close(result.tensor, expected, 1e-6);
+    }
+    const directory = join(scratch, `masked-${kind}`);
+    await model.savePretrained(directory);
+    const restored = kind === 'decoder' ? await TextDecoder.fromPretrained(directory) : await TextEncoder.fromPretrained(directory);
+    const codecs = { latent: Latent, space: Space };
+    await session.save(join(directory, 'trace.json'), { operations: model.operationBindings(), codecs });
+    const replayed = await loadExperience(join(directory, 'trace.json'), { operations: restored.operationBindings(), codecs });
+    const actual = replayed.replay(replayed.calls.at(-1)!.output) as Tensor | Latent;
+    close(noGrad(() => (actual instanceof Latent ? actual.tensor : actual)), expected, 1e-6);
+    if (kind === 'decoder') expect(Number.isFinite(Trainer.fromTool(restored as TextDecoder).step(replayed))).toBe(true);
   });
 });

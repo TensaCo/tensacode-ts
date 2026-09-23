@@ -62,4 +62,9 @@ describe('calibration', () => {
     expect(empty.error).toBeNull();
     expect(() => fitThreshold(tensor([1.1]), tensor([true]), { maxError: 0 })).toThrow();
   });
+
+  it('rejects unknown options like Python keyword arguments', () => {
+    expect(() => new TemperatureCalibration({ bogus: 1 } as never)).toThrow(TypeError);
+    expect(() => new TemperatureCalibration({ minTemperature: 0.1, iterations: 8 })).not.toThrow();
+  });
 });

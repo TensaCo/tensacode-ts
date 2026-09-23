@@ -159,7 +159,8 @@ Built-in codecs cover primitives, `Uint8Array` bytes, arrays, frozen arrays
 counterpart of frozen dataclasses: a class with `static recordFields`,
 `static fromRecord` and `toRecord()`) need an explicit allowlist when saving and
 loading, such as `codecs: { 'record-v1': MyRecord }`. `latentCodecs()` from
-`tensorcode/ops/vec` covers `Latent`, `Space` and the vector results. Message
+`tensorcode/ops/vec` allowlists `Latent` and `Space` only. Other vector records,
+such as a `CandidateSet` built outside an operation, need their own entries. Message
 experiences need `codecs: { message: text.Message }`.
 
 ## Optimizers, losses and checkpoints
