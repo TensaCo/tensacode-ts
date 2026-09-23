@@ -252,31 +252,100 @@ export async function snapshotDownload(repoId: string, options: HubOptions = {})
 
 const CONVERSION_PR_TITLE = 'Adding `safetensors` variant of this model';
 
+/** transformers' ``safetensors_convert_space_url``. */
+export const SAFETENSORS_CONVERT_SPACE = 'https://safetensors-convert.hf.space';
+
+/** ``httpx``'s default timeout, which transformers' conversion requests use. */
+const HTTPX_TIMEOUT_SECONDS = 5;
+
 async function hubJson(url: string, token: string | null, transport: typeof fetch): Promise<unknown> {
   const response = await transport(url, { headers: token ? { authorization: `Bearer ${token}` } : {} });
   if (!response.ok) throw new HubError(`Hub request failed (${url}): HTTP ${response.status}`, response.status);
   return response.json();
 }
 
+function envTrue(name: string): boolean {
+  return ['1', 'ON', 'YES', 'TRUE'].includes((env(name) ?? '').toUpperCase());
+}
+
+/** Resolve after ``seconds`` with ``null`` unless ``promise`` settles first. */
+async function within<T>(promise: Promise<T>, seconds: number, onTimeout: () => void): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        onTimeout();
+        reject(new HubError(`request timed out after ${seconds} seconds`));
+      }, seconds * 1000);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
- * transformers' safetensors auto-conversion lookup (``get_conversion_pr_reference``):
- * for a repository whose ``main`` branch has only PyTorch weights, the open
- * "Adding `safetensors` variant of this model" pull request (by SFconvertbot
- * for public repositories) based on the current ``main`` commit provides
- * ``model.safetensors``. Returns ``refs/pr/<n>``, or ``null`` offline, for a
- * pinned revision, or when no such PR exists. Unlike Python, TypeScript never
- * asks the Hub to create a conversion.
+ * transformers' ``spawn_conversion``: ask the public safetensors conversion
+ * Space to open a conversion pull request for ``repoId`` and follow its
+ * server-sent events until ``complete`` (or the stream ends). Starting the
+ * job fails loudly; errors while following it are reported as warnings, as
+ * in transformers. ``token`` is the explicitly supplied token (transformers
+ * sends ``kwargs.get('token')``, never the saved login).
  */
-export async function safetensorsConversionRevision(repoId: string, options: HubOptions = {}): Promise<string | null> {
-  const revision = options.revision ?? 'main';
-  const disabled = ['1', 'ON', 'YES', 'TRUE'].includes((env('DISABLE_SAFETENSORS_CONVERSION') ?? '').toUpperCase());
-  if (revision !== 'main' || options.localFilesOnly || hubOffline() || disabled) return null;
-  validateRepoId(repoId);
-  const endpoint = (options.endpoint ?? env('HF_ENDPOINT') ?? DEFAULT_ENDPOINT).replace(/\/+$/, '');
-  const transport = options.fetch ?? globalThis.fetch;
-  if (typeof transport !== 'function') return null;
-  const token = await resolveToken(options.token);
-  const info = await hubJson(`${endpoint}/api/models/${repoId}`, token, transport) as { private?: unknown };
+export async function spawnSafetensorsConversion(
+  repoId: string, isPrivate: boolean, token: string | null, transport: typeof fetch = globalThis.fetch,
+): Promise<void> {
+  const url = `${SAFETENSORS_CONVERT_SPACE}/call/run`;
+  const controller = new AbortController();
+  const started = await within((async () => {
+    const response = await transport(url, {
+      method: 'POST', redirect: 'follow', signal: controller.signal,
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: [repoId, isPrivate, token] }),
+    });
+    return response.json() as Promise<unknown>;
+  })(), HTTPX_TIMEOUT_SECONDS, () => controller.abort());
+  const eventId = (started as { event_id?: unknown } | null)?.event_id;
+  if (eventId === undefined) throw new HubError(`safetensors conversion did not start for ${repoId}: no event_id`);
+  const stream = new AbortController();
+  try {
+    const response = await within(transport(`${url}/${String(eventId)}`, { signal: stream.signal }), HTTPX_TIMEOUT_SECONDS, () => stream.abort());
+    if (!response.body) return;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    for (;;) {
+      const { done, value } = await within(reader.read(), HTTPX_TIMEOUT_SECONDS, () => stream.abort());
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      const lines = pending.split(/\r\n|\r|\n/);
+      pending = lines.pop() ?? '';
+      for (const line of lines) {
+        // transformers: ``status = line[7:]`` for ``event: <status>`` lines.
+        if (line.startsWith('event:') && line.slice(7) === 'complete') {
+          await reader.cancel().catch(() => undefined);
+          return;
+        }
+      }
+    }
+  } catch (error) {
+    console.warn(`Error during conversion: ${error instanceof Error ? `${error.name}(${JSON.stringify(error.message)})` : String(error)}`);
+  } finally {
+    stream.abort();
+  }
+}
+
+interface ConversionPr {
+  readonly reference: string;
+  readonly author: unknown;
+}
+
+/**
+ * transformers' ``previous_pr``: the open conversion pull request whose parent
+ * is the current ``main`` commit. For a public repository only a pull request
+ * opened by SFconvertbot is returned (other authors are skipped).
+ */
+async function previousConversionPr(
+  repoId: string, endpoint: string, token: string | null, transport: typeof fetch, isPrivate: boolean,
+): Promise<ConversionPr | null> {
   const commits = async (reference: string): Promise<string[]> => {
     const list = await hubJson(`${endpoint}/api/models/${repoId}/commits/${encodeURIComponent(reference)}`, token, transport);
     return Array.isArray(list) ? list.map((item) => String((item as { id?: unknown }).id)) : [];
@@ -292,11 +361,47 @@ export async function safetensorsConversionRevision(repoId: string, options: Hub
       const history = await commits(reference);
       if (history[1] !== mainCommit) continue;
       const author = (discussion.author as { name?: unknown } | undefined)?.name;
-      if (info.private !== true && author !== 'SFconvertbot') continue;
-      return reference;
+      if (!isPrivate && author !== 'SFconvertbot') continue;
+      return { reference, author };
     }
   }
   return null;
+}
+
+/**
+ * transformers' safetensors auto-conversion (``get_conversion_pr_reference``):
+ * for a repository whose ``main`` branch has only PyTorch weights, the open
+ * "Adding `safetensors` variant of this model" pull request (by SFconvertbot
+ * for public repositories) based on the current ``main`` commit provides
+ * ``model.safetensors``. When no such pull request exists, the conversion is
+ * requested from the safetensors conversion Space (``spawn_conversion``) and
+ * the lookup is repeated; if there is still none, a {@link HubError} is
+ * raised with transformers' message. Returns ``refs/pr/<n>``, or ``null``
+ * offline (``localFilesOnly``, ``HF_HUB_OFFLINE``), for a pinned revision, or
+ * when ``DISABLE_SAFETENSORS_CONVERSION`` is set.
+ */
+export async function safetensorsConversionRevision(repoId: string, options: HubOptions = {}): Promise<string | null> {
+  const revision = options.revision ?? 'main';
+  if (revision !== 'main' || options.localFilesOnly || hubOffline() || envTrue('DISABLE_SAFETENSORS_CONVERSION')) return null;
+  validateRepoId(repoId);
+  const endpoint = (options.endpoint ?? env('HF_ENDPOINT') ?? DEFAULT_ENDPOINT).replace(/\/+$/, '');
+  const transport = options.fetch ?? globalThis.fetch;
+  if (typeof transport !== 'function') return null;
+  const token = await resolveToken(options.token);
+  const info = await hubJson(`${endpoint}/api/models/${repoId}`, token, transport) as { private?: unknown };
+  const isPrivate = info.private === true;
+  let pr = await previousConversionPr(repoId, endpoint, token, transport, isPrivate);
+  if (pr === null) {
+    await spawnSafetensorsConversion(repoId, isPrivate, options.token ?? null, transport);
+    pr = await previousConversionPr(repoId, endpoint, token, transport, isPrivate);
+  }
+  if (pr === null) {
+    throw new HubError(
+      'Could not create safetensors conversion PR. The repo does not appear to have a file named pytorch_model.bin or model.safetensors.'
+      + 'If you are loading with variant, use `use_safetensors=False` to load the original model.',
+    );
+  }
+  return pr.reference;
 }
 
 /** Whether ``source`` must be treated as a local path rather than a Hub id. */
