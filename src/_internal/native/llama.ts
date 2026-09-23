@@ -1,6 +1,7 @@
 /**
  * ``LlamaModel`` (transformers 5.17 names): RMSNorm, rotary position
- * embeddings (``default``, ``linear`` and ``llama3`` RoPE), grouped-query
+ * embeddings (every ``ROPE_INIT_FUNCTIONS`` type: ``default``, ``linear``,
+ * ``dynamic``, ``yarn``, ``longrope``, ``llama3`` and ``proportional``), grouped-query
  * attention and the gated SiLU MLP, with a key/value cache for incremental
  * decoding. Used as the Idefics3 (SmolVLM) text model.
  */
@@ -9,8 +10,9 @@ import { Module } from '../../nn/module.js';
 import { Parameter, Tensor, ones, tensor } from '../../nn/tensor.js';
 import { Embedding, Linear, ModuleList } from '../../nn/layers.js';
 import { cat } from '../../nn/ops/shape.js';
-import { NotImplementedError, ValueError } from '../../errors.js';
+import { ValueError } from '../../errors.js';
 import { isPlainObject, type JsonObject } from '../json.js';
+import { baseInitWeights, initializerStd, postInit } from './hfInit.js';
 import type { NativeConfig } from './config.js';
 import { NativeModel, attention, causalBias, combineBias, keyPaddingBias, mergeHeads } from './modules.js';
 
@@ -35,25 +37,151 @@ export class LlamaRMSNorm extends Module {
 
 const f32 = Math.fround;
 
-/** RoPE inverse frequencies (float32) and attention scaling for a Llama configuration. */
-export function ropeInverseFrequencies(config: NativeConfig): { invFreq: Float32Array; scaling: number } {
-  const parameters = config.get('rope_parameters');
-  const rope: JsonObject = isPlainObject(parameters) ? parameters as JsonObject : { rope_type: 'default', rope_theta: 10000 };
-  const type = String(rope.rope_type ?? 'default');
-  const base = Number(rope.rope_theta ?? 10000);
-  const headDim = config.optionalNumber('head_dim') ?? Math.floor(config.number('hidden_size') / config.number('num_attention_heads'));
+/** Standardized ``rope_parameters`` (``RotaryEmbeddingConfigMixin.standardize_rope_params``). */
+export function ropeParameters(config: NativeConfig): JsonObject {
+  const parameters = config.get('rope_parameters') ?? config.get('rope_scaling');
+  const rope: JsonObject = isPlainObject(parameters) ? { ...(parameters as JsonObject) } : {};
+  if (rope.rope_type === undefined) rope.rope_type = rope.type ?? 'default';
+  if (rope.rope_theta === undefined || rope.rope_theta === null) rope.rope_theta = config.optionalNumber('rope_theta') ?? 10000;
+  if (['llama3', 'yarn', 'longrope'].includes(String(rope.rope_type))) {
+    const original = config.optionalNumber('original_max_position_embeddings');
+    if (original !== null) rope.original_max_position_embeddings = original;
+    else if (rope.original_max_position_embeddings === undefined) rope.original_max_position_embeddings = config.number('max_position_embeddings');
+  }
+  return rope;
+}
+
+/** ``1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))`` in float32. */
+function baseFrequencies(base: number, dim: number, count = Math.ceil(dim / 2)): Float32Array {
+  const out = new Float32Array(count);
+  for (let index = 0; index < count; index += 1) out[index] = f32(1 / f32(base ** f32((2 * index) / dim)));
+  return out;
+}
+
+function headDimension(config: NativeConfig): number {
+  return config.optionalNumber('head_dim') ?? Math.floor(config.number('hidden_size') / config.number('num_attention_heads'));
+}
+
+/** ``_compute_dynamic_ntk_parameters`` for a sequence length (``null``: the configuration's). */
+function dynamicFrequencies(config: NativeConfig, rope: JsonObject, seqLen: number | null): Float32Array {
+  const base = Number(rope.rope_theta);
   const partial = typeof rope.partial_rotary_factor === 'number' ? rope.partial_rotary_factor : 1;
-  const dim = Math.floor(headDim * partial);
-  const invFreq = new Float32Array(dim / 2);
-  // ``1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))`` in float32.
-  for (let index = 0; index < invFreq.length; index += 1) invFreq[index] = f32(1 / f32(base ** f32((2 * index) / dim)));
-  if (type === 'default') return { invFreq, scaling: 1 };
+  const dim = Math.trunc(headDimension(config) * partial);
+  const factor = Number(rope.factor);
+  const maxPositions = config.number('max_position_embeddings');
+  const exponent = dim / (dim - 2);
+  let scaled: number;
+  if (seqLen === null) {
+    // Python floats (double precision) at construction.
+    scaled = base * ((factor * maxPositions) / maxPositions - (factor - 1)) ** exponent;
+  } else {
+    // A tensor ``seq_len``: float32 arithmetic.
+    const seq = Math.max(seqLen, maxPositions);
+    let value = f32(f32(factor) * f32(seq));
+    value = f32(value / f32(maxPositions));
+    value = f32(value - f32(factor - 1));
+    value = f32(value ** f32(exponent));
+    scaled = f32(f32(base) * value);
+  }
+  const out = new Float32Array(Math.ceil(dim / 2));
+  for (let index = 0; index < out.length; index += 1) out[index] = f32(1 / f32(scaled ** f32((2 * index) / dim)));
+  return out;
+}
+
+/** ``_compute_longrope_parameters`` for a sequence length (``null``: construction). */
+function longropeFrequencies(config: NativeConfig, rope: JsonObject, seqLen: number | null): { invFreq: Float32Array; scaling: number } {
+  const base = Number(rope.rope_theta);
+  const partial = typeof rope.partial_rotary_factor === 'number' ? rope.partial_rotary_factor : 1;
+  const dim = Math.trunc(headDimension(config) * partial);
+  const original = Number(rope.original_max_position_embeddings);
+  let factor = typeof rope.factor === 'number' ? rope.factor : null;
+  if (factor === null) factor = config.number('max_position_embeddings') / original;
+  let scaling = typeof rope.attention_factor === 'number' ? rope.attention_factor : null;
+  if (scaling === null) scaling = factor <= 1 ? 1 : Math.sqrt(1 + Math.log(factor) / Math.log(original));
+  const factors = (seqLen !== null && seqLen > original ? rope.long_factor : rope.short_factor) as number[];
+  const count = Math.ceil(dim / 2);
+  if (!Array.isArray(factors) || factors.length !== count) {
+    throw new ValueError(`The size of tensor a (${Array.isArray(factors) ? factors.length : 0}) must match the size of tensor b (${count}) at non-singleton dimension 0`);
+  }
+  const out = new Float32Array(count);
+  for (let index = 0; index < count; index += 1) {
+    out[index] = f32(1 / f32(f32(factors[index]!) * f32(base ** f32((2 * index) / dim))));
+  }
+  return { invFreq: out, scaling };
+}
+
+/** ``_compute_yarn_parameters``. */
+function yarnFrequencies(config: NativeConfig, rope: JsonObject): { invFreq: Float32Array; scaling: number } {
+  const base = Number(rope.rope_theta);
+  const partial = typeof rope.partial_rotary_factor === 'number' ? rope.partial_rotary_factor : 1;
+  const dim = Math.trunc(headDimension(config) * partial);
+  const original = Number(rope.original_max_position_embeddings);
+  let factor = typeof rope.factor === 'number' ? rope.factor : null;
+  if (factor === null) factor = config.number('max_position_embeddings') / original;
+  const mscaleOf = (scale: number, mscale = 1): number => (scale <= 1 ? 1 : 0.1 * mscale * Math.log(scale) + 1);
+  let scaling = typeof rope.attention_factor === 'number' ? rope.attention_factor : null;
+  if (scaling === null) {
+    const mscale = typeof rope.mscale === 'number' ? rope.mscale : null;
+    const mscaleAll = typeof rope.mscale_all_dim === 'number' ? rope.mscale_all_dim : null;
+    scaling = mscale && mscaleAll ? mscaleOf(factor, mscale) / mscaleOf(factor, mscaleAll) : mscaleOf(factor);
+  }
+  const betaFast = (typeof rope.beta_fast === 'number' && rope.beta_fast) || 32;
+  const betaSlow = (typeof rope.beta_slow === 'number' && rope.beta_slow) || 1;
+  const correction = (rotations: number): number => (dim * Math.log(original / (rotations * 2 * Math.PI))) / (2 * Math.log(base));
+  // ``config.rope_parameters.get('truncate', True)`` (an explicit ``None`` disables truncation).
+  const truncate = rope.truncate === undefined ? true : Boolean(rope.truncate);
+  let low = correction(betaFast);
+  let high = correction(betaSlow);
+  if (truncate) {
+    low = Math.floor(low);
+    high = Math.ceil(high);
+  }
+  low = Math.max(low, 0);
+  high = Math.min(high, dim - 1);
+  if (low === high) high += 0.001;
+  const count = Math.ceil(dim / 2);
+  const half = Math.floor(dim / 2);
+  const out = new Float32Array(count);
+  const f = f32(factor);
+  for (let index = 0; index < count; index += 1) {
+    const position = f32(base ** f32((2 * index) / dim));
+    const extrapolation = f32(1 / position);
+    const interpolation = f32(1 / f32(f * position));
+    const ramp = index < half ? Math.min(Math.max(f32(f32(f32(index) - f32(low)) / f32(high - low)), 0), 1) : 0;
+    const extrapolationFactor = f32(1 - ramp);
+    out[index] = f32(f32(interpolation * f32(1 - extrapolationFactor)) + f32(extrapolation * extrapolationFactor));
+  }
+  return { invFreq: out, scaling };
+}
+
+/** RoPE inverse frequencies (float32) and attention scaling of a Llama configuration at construction. */
+export function ropeInverseFrequencies(config: NativeConfig): { invFreq: Float32Array; scaling: number } {
+  const rope = ropeParameters(config);
+  const type = String(rope.rope_type);
+  const base = Number(rope.rope_theta);
+  const headDim = headDimension(config);
+  const partial = typeof rope.partial_rotary_factor === 'number' ? rope.partial_rotary_factor : 1;
+  const dim = Math.trunc(headDim * partial);
+  if (type === 'default') return { invFreq: baseFrequencies(base, headDim), scaling: 1 };
   if (type === 'linear') {
-    const factor = Number(rope.factor);
+    const invFreq = baseFrequencies(base, dim);
+    const factor = f32(Number(rope.factor));
     for (let index = 0; index < invFreq.length; index += 1) invFreq[index] = f32(invFreq[index]! / factor);
     return { invFreq, scaling: 1 };
   }
+  if (type === 'dynamic') return { invFreq: dynamicFrequencies(config, rope, null), scaling: 1 };
+  if (type === 'yarn') return yarnFrequencies(config, rope);
+  if (type === 'longrope') return longropeFrequencies(config, rope, null);
+  if (type === 'proportional') {
+    const factor = typeof rope.factor === 'number' ? rope.factor : 1;
+    const angles = Math.trunc(Math.floor((partial * headDim) / 2));
+    const invFreq = new Float32Array(Math.floor(headDim / 2));
+    for (let index = 0; index < angles; index += 1) invFreq[index] = f32(1 / f32(base ** f32((2 * index) / headDim)));
+    for (let index = 0; index < invFreq.length; index += 1) invFreq[index] = f32(invFreq[index]! / f32(factor));
+    return { invFreq, scaling: 1 };
+  }
   if (type === 'llama3') {
+    const invFreq = baseFrequencies(base, dim);
     const factor = Number(rope.factor);
     const low = Number(rope.low_freq_factor);
     const high = Number(rope.high_freq_factor);
@@ -72,35 +200,85 @@ export function ropeInverseFrequencies(config: NativeConfig): { invFreq: Float32
     }
     return { invFreq, scaling: 1 };
   }
-  throw new NotImplementedError(`RoPE type ${JSON.stringify(type)} is not implemented natively (supported: default, linear, llama3)`);
+  throw new KeyError(`'${type}'`);
 }
 
-/** ``LlamaRotaryEmbedding`` (the frequency buffers are not persistent). */
+/** Python ``KeyError`` (an unknown ``rope_type`` in ``ROPE_INIT_FUNCTIONS``). */
+export class KeyError extends Error {
+  constructor(message?: string) {
+    super(message);
+    this.name = 'KeyError';
+  }
+}
+
+/**
+ * ``LlamaRotaryEmbedding`` (the frequency buffers are not persistent). The
+ * ``dynamic`` and ``longrope`` types update their frequencies from the largest
+ * position of each forward pass (``dynamic_rope_update``), statefully as in
+ * transformers.
+ */
 export class LlamaRotaryEmbedding extends Module {
   static override readonly qualifiedName: string = 'transformers.models.llama.modeling_llama.LlamaRotaryEmbedding';
-  readonly attentionScaling: number;
+  attentionScaling: number;
+  readonly #config: NativeConfig;
+  readonly #rope: JsonObject;
+  readonly #type: string;
+  #maxSeqLenCached: number;
+  readonly #originalMaxSeqLen: number;
 
   constructor(config: NativeConfig) {
     super();
     const { invFreq, scaling } = ropeInverseFrequencies(config);
+    this.#config = config;
+    this.#rope = ropeParameters(config);
+    this.#type = String(this.#rope.rope_type);
+    this.#maxSeqLenCached = config.number('max_position_embeddings');
+    this.#originalMaxSeqLen = this.#maxSeqLenCached;
     this.attentionScaling = scaling;
     this.registerBuffer('inv_freq', tensor(invFreq), false);
     this.registerBuffer('original_inv_freq', tensor(Float32Array.from(invFreq)), false);
   }
 
+  /** ``dynamic_rope_update``. */
+  #update(positionIds: Tensor): void {
+    if (this.#type !== 'dynamic' && this.#type !== 'longrope') return;
+    let max = -Infinity;
+    for (const value of positionIds.data) if (value > max) max = value;
+    const seqLen = max + 1;
+    if (this.#type === 'dynamic') {
+      if (seqLen > this.#maxSeqLenCached) {
+        this.registerBuffer('inv_freq', tensor(dynamicFrequencies(this.#config, this.#rope, seqLen)), false);
+        this.attentionScaling = 1;
+        this.#maxSeqLenCached = seqLen;
+      }
+      if (seqLen < this.#originalMaxSeqLen && this.#maxSeqLenCached > this.#originalMaxSeqLen) {
+        this.registerBuffer('inv_freq', tensor(Float32Array.from(this.getBuffer('original_inv_freq')!.data)), false);
+        this.#maxSeqLenCached = this.#originalMaxSeqLen;
+      }
+      return;
+    }
+    const original = Number(this.#rope.original_max_position_embeddings);
+    const invFreq = seqLen > original
+      ? longropeFrequencies(this.#config, this.#rope, original + 1).invFreq
+      : Float32Array.from(this.getBuffer('original_inv_freq')!.data);
+    this.registerBuffer('inv_freq', tensor(invFreq), false);
+  }
+
   /** ``cos``/``sin`` ``[batch, length, dim]`` in ``dtype`` for int64 ``positionIds`` ``[batch, length]``. */
   forward(positionIds: Tensor, dtype: Tensor['dtype']): [Tensor, Tensor] {
+    this.#update(positionIds);
     const invFreq = this.getBuffer('inv_freq')!.data;
     const half = invFreq.length;
     const [batch, length] = positionIds.shape as [number, number];
     const cos = new Float32Array(batch * length * half * 2);
     const sin = new Float32Array(batch * length * half * 2);
+    const scaling = f32(this.attentionScaling);
     for (let row = 0; row < batch * length; row += 1) {
       const position = f32(positionIds.data[row]!);
       for (let index = 0; index < half; index += 1) {
         const angle = f32(invFreq[index]! * position);
-        const c = f32(Math.cos(angle) * this.attentionScaling);
-        const s = f32(Math.sin(angle) * this.attentionScaling);
+        const c = scaling === 1 ? f32(Math.cos(angle)) : f32(f32(Math.cos(angle)) * scaling);
+        const s = scaling === 1 ? f32(Math.sin(angle)) : f32(f32(Math.sin(angle)) * scaling);
         const offset = row * half * 2;
         cos[offset + index] = c;
         cos[offset + half + index] = c;
@@ -124,13 +302,6 @@ export function applyRotary(x: Tensor, cos: Tensor, sin: Tensor): Tensor {
   const c = cos.unsqueeze(1);
   const s = sin.unsqueeze(1);
   return x.mul(c).add(rotateHalf(x).mul(s));
-}
-
-/** ``repeat_kv``: ``[batch, kvHeads, length, dim]`` → ``[batch, kvHeads * groups, length, dim]``. */
-function repeatKv(x: Tensor, groups: number): Tensor {
-  if (groups === 1) return x;
-  const [batch, heads, length, dim] = x.shape as [number, number, number, number];
-  return x.unsqueeze(2).expand([batch, heads, groups, length, dim]).reshape(batch, heads * groups, length, dim);
 }
 
 /** Per-layer key/value cache (keys and values after RoPE, before head repetition). */
@@ -176,9 +347,9 @@ export class LlamaAttention extends Module {
       cache.key = key;
       cache.value = value;
     }
-    const groups = this.heads / this.kvHeads;
-    const output = attention(query, repeatKv(key, groups), repeatKv(value, groups), {
-      scale: this.headDim ** -0.5, bias, dropout: this.dropoutRate, training: this.training,
+    // ``repeat_kv`` happens inside attention (transformers' SDPA ``enable_gqa``).
+    const output = attention(query, key, value, {
+      scale: this.headDim ** -0.5, bias, dropout: this.dropoutRate, training: this.training, enableGqa: this.heads !== this.kvHeads,
     });
     return this.o_proj.forward(mergeHeads(output));
   }
@@ -257,6 +428,9 @@ export class LlamaModel extends NativeModel {
     this.layers = this.registerModule('layers', new ModuleList(Array.from({ length: config.number('num_hidden_layers') }, () => new LlamaDecoderLayer(config))));
     this.norm = this.registerModule('norm', new LlamaRMSNorm(hidden, config.number('rms_norm_eps')));
     this.rotary_emb = this.registerModule('rotary_emb', new LlamaRotaryEmbedding(config));
+    // ``LlamaPreTrainedModel`` uses the base ``_init_weights`` (normal Linear/Embedding weights, unit RMSNorm).
+    const std = initializerStd(config);
+    postInit(this, (module) => baseInitWeights(module, std));
   }
 
   getInputEmbeddings(): Embedding {

@@ -1,0 +1,1 @@
+{"tokenizer_class": "PreTrainedTokenizerFast", "bos_token": "<s>", "eos_token": "</s>", "truncation_side": "left"}

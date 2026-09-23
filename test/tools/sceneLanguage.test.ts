@@ -132,7 +132,7 @@ describe('Scene language mechanics (tests/models/test_scene_language.py)', () =>
     const processor = tool.language!.processor;
     const processed = processor.call(processor.applyChatTemplate(
       [{ role: 'user', content: [{ type: 'image' }, { type: 'text', text: 'describe object' }] }], { addGenerationPrompt: true }), [pixelsToUint8(pixels)]);
-    const features = noGrad(() => tool.language!.model.getImageFeatures(processed.pixelValues, processed.pixelAttentionMask));
+    const features = noGrad(() => tool.language!.model.getImageFeatures(processed.pixelValues!, processed.pixelAttentionMask));
     expect(batch.imageHiddenStates.equal(features)).toBe(true);
     expect(noGrad(() => tool.language!.model.forward(batch)).logits.allFinite()).toBe(true);
     noGrad(() => tool.language!.gate.fill_(0.5));
@@ -196,8 +196,8 @@ describe('SmolVLM processor and a small Idefics3 model', () => {
     for (const record of smol.processing) {
       const out = processor.call('<|im_start|>User:<image>describe<end_of_utterance>\nAssistant:', [pixelsToUint8(fromJson(record.pixels))]);
       expect([...out.inputIds.data]).toEqual(record.input_ids);
-      expect(out.pixelValues.shape).toEqual(record.pixel_shape);
-      expect(sha256Hex(tensorBytes(out.pixelValues))).toBe(record.pixel_sha256);
+      expect(out.pixelValues!.shape).toEqual(record.pixel_shape);
+      expect(sha256Hex(tensorBytes(out.pixelValues!))).toBe(record.pixel_sha256);
       expect(out.pixelAttentionMask!.sum().item()).toBe(record.mask_sum);
     }
   }, 120_000);

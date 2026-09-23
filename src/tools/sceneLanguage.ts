@@ -16,7 +16,8 @@ import { Workspace, type WorkspaceOutput } from '../_internal/workspace.js';
 import { TensorAdapter as Transform } from '../_internal/vec/adapter.js';
 import { deepCopy, isPlainObject, sha256Hex, type JsonObject, type JsonValue } from '../_internal/json.js';
 import { NativeConfig } from '../_internal/native/config.js';
-import { Idefics3ForConditionalGeneration, greedySettings } from '../_internal/native/idefics3.js';
+import { Idefics3ForConditionalGeneration } from '../_internal/native/idefics3.js';
+import { generationConfigFromDict } from '../_internal/native/causalGeneration.js';
 import { Idefics3Processor, safeAssetName } from '../_internal/native/idefics3Processing.js';
 
 /** Scene language-mode input: a CHW RGB image in ``[0, 1]`` and a question. */
@@ -116,6 +117,8 @@ export class SceneLanguage extends Module {
     const nativeConfig = NativeConfig.fromDict(config.language_config);
     this.model = this.registerModule('model', new Idefics3ForConditionalGeneration(nativeConfig));
     if (!isPlainObject(config.generation_config)) throw new ValueError('language construction requires generation_config');
+    // ``GenerationConfig.from_dict`` validates the settings (raising transformers' errors).
+    generationConfigFromDict(config.generation_config);
     this.generationConfig = deepCopy(config.generation_config as JsonObject);
     if (config.freeze_foundation === true) {
       this.model.requiresGrad_(false);
@@ -163,7 +166,7 @@ export class SceneLanguage extends Module {
       throw new ValueError('processed image/question exceeds configured token limit');
     }
     const dtype = this.down.module.weight.dtype;
-    const pixelValues = processed.pixelValues.to(dtype);
+    const pixelValues = processed.pixelValues!.to(dtype);
     const pixelMask = processed.pixelAttentionMask ? processed.pixelAttentionMask.to(dtype) : null;
     // Foundation visual tokens retain their pretrained spatial organization.
     const visual = this.model.model.getImageFeatures(pixelValues, pixelMask);
@@ -211,7 +214,7 @@ export class SceneLanguage extends Module {
     return this.model.forward({ inputIds, attentionMask, imageHiddenStates: batch.imageHiddenStates, labels }).loss!;
   }
 
-  /** Unverified full-image interpretation (greedy decoding). */
+  /** Unverified full-image interpretation (transformers ``generate`` with ``do_sample=False``). */
   interpret(value: SceneLanguageInputs, options: { maxNewTokens?: number | null } = {}): SceneInterpretation {
     const limit = options.maxNewTokens ?? (this.config.max_new_tokens as number);
     if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > (this.config.max_new_tokens as number)) {
@@ -223,10 +226,11 @@ export class SceneLanguage extends Module {
       if (prompt + limit > this.model.config.sub('text_config').number('max_position_embeddings')) {
         throw new ValueError('generation and input exceed model context capacity');
       }
-      const generated = this.model.generateGreedy(
+      // ``self.model.generate(**batch, max_new_tokens=limit, do_sample=False, return_dict_in_generate=False)``.
+      const generated = this.model.generate(
         { inputIds: batch.inputIds, attentionMask: batch.attentionMask, imageHiddenStates: batch.imageHiddenStates },
-        greedySettings(this.generationConfig, limit),
-      );
+        { generationConfig: this.generationConfig, settings: { max_new_tokens: limit, do_sample: false, return_dict_in_generate: false } },
+      ).sequences[0]!;
       const answer = generated.slice(prompt);
       const description = this.processor.tokenizer.decode(answer, { skipSpecialTokens: true }).trim();
       const eos = this.eosIds();

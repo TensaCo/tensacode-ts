@@ -251,11 +251,12 @@ function rebuildGPT2(root: RawNode, flags: TokenizerFlags): void {
     type: 'ByteLevel', add_prefix_space: flag(flags, 'add_prefix_space', false), trim_offsets: true, use_regex: true,
   }));
   rawSet(root, 'decoder', rawFromValue({ type: 'ByteLevel', add_prefix_space: true, trim_offsets: true, use_regex: true }));
-  const explicit = 'add_bos_token' in flags || 'add_eos_token' in flags;
+  // ``_from_pretrained`` drops ``add_bos_token``/``add_eos_token`` when a
+  // tokenizer.json exists, so only a missing post-processor is rebuilt, plainly.
   const post = rawGet(root, 'post_processor');
-  if (explicit || !post || post.t === 'l') {
-    const addBos = flag(flags, 'add_bos_token', false);
-    const addEos = flag(flags, 'add_eos_token', false);
+  if (!post || post.t === 'l') {
+    const addBos = false;
+    const addEos = false;
     const bos = text(flags, 'bos_token', '<|endoftext|>');
     const eos = text(flags, 'eos_token', '<|endoftext|>');
     const token = (id: string, typeId: number): unknown => ({ SpecialToken: { id, type_id: typeId } });
@@ -267,6 +268,60 @@ function rebuildGPT2(root: RawNode, flags: TokenizerFlags): void {
     if (addEos) special[eos] = { id: eos, ids: [tokenId(root, eos)], tokens: [eos] };
     rawSet(root, 'post_processor', rawFromValue({ type: 'TemplateProcessing', single, pair, special_tokens: special }));
   }
+}
+
+/**
+ * transformers 5 ``LlamaTokenizer.__init__`` (also ``LlamaTokenizerFast``):
+ * the BPE vocabulary and merges are kept with ``fuse_unk`` and
+ * ``byte_fallback``; normalization is removed, pre-tokenization is a
+ * non-splitting ``Metaspace`` (``_get_prepend_scheme``), decoding replaces
+ * ``▁``, falls back to bytes and fuses (stripping one leading space when
+ * ``add_prefix_space``), and the file's post-processor is kept unless
+ * ``add_bos_token``/``add_eos_token`` are given or it is missing.
+ */
+function rebuildLlama(root: RawNode, flags: TokenizerFlags): void {
+  const model = rawGet(root, 'model');
+  if (model?.t === 'o') {
+    rawSet(model, 'type', rawFromValue('BPE'));
+    rawSet(model, 'dropout', rawFromValue(null));
+    rawSet(model, 'unk_token', rawFromValue(null));
+    rawSet(model, 'continuing_subword_prefix', rawFromValue(null));
+    rawSet(model, 'end_of_word_suffix', rawFromValue(null));
+    rawSet(model, 'fuse_unk', rawFromValue(true));
+    rawSet(model, 'byte_fallback', rawFromValue(true));
+    rawSet(model, 'ignore_merges', rawFromValue(false));
+  }
+  const addPrefixSpace = typeof flags.add_prefix_space === 'boolean' ? flags.add_prefix_space : true;
+  const legacy = typeof flags.legacy === 'boolean' ? flags.legacy : false;
+  const scheme = addPrefixSpace ? (legacy ? 'always' : 'first') : 'never';
+  rawSet(root, 'normalizer', rawFromValue(null));
+  rawSet(root, 'pre_tokenizer', rawFromValue({ type: 'Metaspace', replacement: '▁', prepend_scheme: scheme, split: false }));
+  const decoders: unknown[] = [
+    { type: 'Replace', pattern: { String: '▁' }, content: ' ' }, { type: 'ByteFallback' }, { type: 'Fuse' },
+  ];
+  if (addPrefixSpace) decoders.push({ type: 'Strip', content: ' ', start: 1, stop: 0 });
+  rawSet(root, 'decoder', rawFromValue({ type: 'Sequence', decoders }));
+  templatePostProcessor(root, flags, '<s>', '</s>');
+}
+
+/** ``TokenizersBackend.update_post_processor`` when the class rebuild requires it. */
+function templatePostProcessor(root: RawNode, flags: TokenizerFlags, bosDefault: string, eosDefault: string): void {
+  // ``_from_pretrained`` drops ``add_bos_token``/``add_eos_token`` when a
+  // tokenizer.json exists, so only a missing post-processor is rebuilt, plainly.
+  const post = rawGet(root, 'post_processor');
+  if (post && post.t !== 'l') return;
+  const addBos = false;
+  const addEos = false;
+  const bos = text(flags, 'bos_token', bosDefault);
+  const eos = text(flags, 'eos_token', eosDefault);
+  const token = (id: string, typeId: number): unknown => ({ SpecialToken: { id, type_id: typeId } });
+  const sequence = (id: string, typeId: number): unknown => ({ Sequence: { id, type_id: typeId } });
+  const single = [...(addBos ? [token(bos, 0)] : []), sequence('A', 0), ...(addEos ? [token(eos, 0)] : [])];
+  const pair = [...single, ...(addBos ? [token(bos, 1)] : []), sequence('B', 1), ...(addEos ? [token(eos, 1)] : [])];
+  const special: Record<string, unknown> = {};
+  if (addBos) special[bos] = { id: bos, ids: [tokenId(root, bos)], tokens: [bos] };
+  if (addEos) special[eos] = { id: eos, ids: [tokenId(root, eos)], tokens: [eos] };
+  rawSet(root, 'post_processor', rawFromValue({ type: 'TemplateProcessing', single, pair, special_tokens: special }));
 }
 
 /**
@@ -367,7 +422,7 @@ function rebuildT5(root: RawNode): void {
 /** Tokenizer classes whose transformers 5 construction is emulated. */
 export const REBUILT_TOKENIZER_CLASSES = new Set([
   'T5Tokenizer', 'T5TokenizerFast', 'DebertaV2Tokenizer', 'DebertaV2TokenizerFast', 'AlbertTokenizer', 'AlbertTokenizerFast',
-  'GPT2Tokenizer', 'GPT2TokenizerFast',
+  'GPT2Tokenizer', 'GPT2TokenizerFast', 'LlamaTokenizer', 'LlamaTokenizerFast',
 ]);
 
 /**
@@ -396,6 +451,7 @@ export function canonicalBackendJson(
   else if (base === 'DebertaV2Tokenizer') rebuildDebertaV2(root, options.flags ?? {});
   else if (base === 'AlbertTokenizer') rebuildAlbert(root, options.flags ?? {});
   else if (base === 'GPT2Tokenizer') rebuildGPT2(root, options.flags ?? {});
+  else if (base === 'LlamaTokenizer') rebuildLlama(root, options.flags ?? {});
   for (const key of ['normalizer', 'pre_tokenizer', 'post_processor', 'decoder']) normalizeComponent(rawGet(root, key));
   return emitJsonRaw(root, { sortKeys: true, separators: [',', ':'] });
 }

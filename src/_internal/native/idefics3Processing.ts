@@ -2,12 +2,14 @@
  * ``Idefics3ImageProcessor`` (torchvision backend) and ``Idefics3Processor``
  * of transformers 5.17 over decoded ``uint8`` images: longest-edge resizing,
  * image splitting into ``max_image_size`` tiles plus a global image, fused
- * rescale/normalize, padding, and the prompt expansion of ``<image>`` into
- * ``<fake_token_around_image>``/row-column/``<image>`` token runs.
+ * rescale/normalize, padding, batching of prompts with any number of images
+ * each, the prompt expansion of ``<image>`` into
+ * ``<fake_token_around_image>``/row-column/``<image>`` token runs, and the
+ * special tokens the processor adds to its tokenizer.
  */
 import { Tensor, tensor } from '../../nn/tensor.js';
 import { NotImplementedError, ValueError } from '../../errors.js';
-import { deepCopy, isPlainObject, parseJsonStrict, type JsonObject, type JsonValue } from '../json.js';
+import { deepCopy, emitJsonRaw, isPlainObject, parseJsonRaw, parseJsonStrict, rawFromValue, rawGet, rawSet, type JsonObject, type JsonValue, type RawNode } from '../json.js';
 import { FastTokenizer } from '../tokenizers/index.js';
 import { ChatTemplate } from '../text/jinja.js';
 import { PIL_RESAMPLING, resizeImage, type InterpolationMode } from '../vec/imageProcessing.js';
@@ -60,12 +62,13 @@ function longestEdge(value: JsonValue | undefined, name: string): number {
 }
 
 export interface Idefics3ImageBatch {
-  /** ``[1, images, channels, height, width]`` float32. */
+  /** ``[batch, images, channels, height, width]`` float32 (padding images are all zero). */
   pixelValues: Tensor;
-  /** ``[1, images, height, width]`` (1 valid, 0 padding). */
+  /** ``[batch, images, height, width]`` (1 valid, 0 padding). */
   pixelAttentionMask: Tensor | null;
-  rows: number[];
-  cols: number[];
+  /** Split rows and columns of each image, per sample. */
+  rows: number[][];
+  cols: number[][];
 }
 
 /** ``Idefics3ImageProcessor`` over decoded ``uint8`` ``CHW`` images. */
@@ -165,8 +168,8 @@ export class Idefics3ImageProcessor {
     return tensor(out, { shape: [...image.shape] });
   }
 
-  /** Process one decoded ``uint8`` ``CHW`` RGB image. */
-  preprocess(image: Tensor): Idefics3ImageBatch {
+  /** Resized, split and normalized frames of one decoded ``uint8`` ``CHW`` RGB image. */
+  private frames(image: Tensor): { frames: Tensor[]; rows: number; cols: number } {
     if (!(image instanceof Tensor) || image.ndim !== 3 || image.dtype !== 'uint8' || image.shape[0] !== 3) {
       throw new ValueError('Idefics3 images must be decoded uint8 RGB CHW tensors');
     }
@@ -189,30 +192,68 @@ export class Idefics3ImageProcessor {
     } else {
       frames = [this.resize(current, { height: maxSize, width: maxSize })];
     }
-    const processed = frames.map((frame) => this.normalize(frame));
-    const height = Math.max(...processed.map((frame) => frame.shape[1]!));
-    const width = Math.max(...processed.map((frame) => frame.shape[2]!));
-    if (!this.flag('do_pad')) {
-      if (processed.some((frame) => frame.shape[1] !== height || frame.shape[2] !== width)) throw new ValueError('processed images must share one size');
-      const flat = new Float32Array(processed.length * 3 * height * width);
-      processed.forEach((frame, index) => flat.set(frame.data as Float32Array, index * frame.numel));
-      return { pixelValues: tensor(flat, { shape: [1, processed.length, 3, height, width] }), pixelAttentionMask: null, rows: [rows], cols: [cols] };
+    return { frames: frames.map((frame) => this.normalize(frame)), rows, cols };
+  }
+
+  /** Process one decoded ``uint8`` ``CHW`` RGB image. */
+  preprocess(image: Tensor): Idefics3ImageBatch {
+    return this.preprocessBatch([[image]]);
+  }
+
+  /**
+   * Process a batch of samples, each a list of decoded ``uint8`` ``CHW`` RGB
+   * images: every sample is padded with all-zero images to the largest image
+   * count and every frame to the largest frame size of the batch.
+   */
+  preprocessBatch(samples: readonly (readonly Tensor[])[]): Idefics3ImageBatch {
+    const processed: Tensor[][] = [];
+    const rows: number[][] = [];
+    const cols: number[][] = [];
+    for (const images of samples) {
+      const sample: Tensor[] = [];
+      const sampleRows: number[] = [];
+      const sampleCols: number[] = [];
+      for (const image of images) {
+        const result = this.frames(image);
+        sample.push(...result.frames);
+        sampleRows.push(result.rows);
+        sampleCols.push(result.cols);
+      }
+      processed.push(sample);
+      rows.push(sampleRows);
+      cols.push(sampleCols);
     }
-    const pixels = new Float32Array(processed.length * 3 * height * width);
-    const mask = new Float32Array(processed.length * height * width);
-    processed.forEach((frame, index) => {
-      const [channels, h, w] = frame.shape as [number, number, number];
-      for (let c = 0; c < channels; c += 1) {
+    const all = processed.flat();
+    if (!all.length) throw new ValueError('No images found in the batch.');
+    const height = Math.max(...all.map((frame) => frame.shape[1]!));
+    const width = Math.max(...all.map((frame) => frame.shape[2]!));
+    const channels = all[0]!.shape[0]!;
+    if (!this.flag('do_pad')) {
+      const count = processed[0]!.length;
+      if (processed.some((sample) => sample.length !== count) || all.some((frame) => frame.shape[1] !== height || frame.shape[2] !== width)) {
+        throw new ValueError('stack expects each tensor to be equal size');
+      }
+      const flat = new Float32Array(all.length * channels * height * width);
+      all.forEach((frame, index) => flat.set(frame.data as Float32Array, index * frame.numel));
+      return { pixelValues: tensor(flat, { shape: [processed.length, count, channels, height, width] }), pixelAttentionMask: null, rows, cols };
+    }
+    const maxImages = Math.max(...processed.map((sample) => sample.length));
+    const pixels = new Float32Array(processed.length * maxImages * channels * height * width);
+    const mask = new Float32Array(processed.length * maxImages * height * width);
+    processed.forEach((sample, b) => sample.forEach((frame, j) => {
+      const index = b * maxImages + j;
+      const [c, h, w] = frame.shape as [number, number, number];
+      for (let channel = 0; channel < c; channel += 1) {
         for (let y = 0; y < h; y += 1) {
-          for (let x = 0; x < w; x += 1) pixels[((index * channels + c) * height + y) * width + x] = frame.data[(c * h + y) * w + x]!;
+          for (let x = 0; x < w; x += 1) pixels[((index * channels + channel) * height + y) * width + x] = frame.data[(channel * h + y) * w + x]!;
         }
       }
       for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) mask[(index * height + y) * width + x] = 1;
-    });
+    }));
     return {
-      pixelValues: tensor(pixels, { shape: [1, processed.length, 3, height, width] }),
-      pixelAttentionMask: tensor(mask, { shape: [1, processed.length, height, width] }),
-      rows: [rows], cols: [cols],
+      pixelValues: tensor(pixels, { shape: [processed.length, maxImages, channels, height, width] }),
+      pixelAttentionMask: tensor(mask, { shape: [processed.length, maxImages, height, width] }),
+      rows, cols,
     };
   }
 }
@@ -220,8 +261,100 @@ export class Idefics3ImageProcessor {
 export interface Idefics3ProcessorOutput {
   inputIds: Tensor;
   attentionMask: Tensor;
-  pixelValues: Tensor;
+  /** ``null`` without images. */
+  pixelValues: Tensor | null;
   pixelAttentionMask: Tensor | null;
+}
+
+/** Images accepted by {@link Idefics3Processor.call}: one image, a flat list, or one list per prompt. */
+export type Idefics3Images = Tensor | readonly Tensor[] | readonly (readonly Tensor[])[];
+
+export interface Idefics3CallOptions {
+  /** ``padding=True``/``'longest'`` (required for prompts of different lengths). */
+  padding?: boolean | 'longest' | 'max_length';
+  maxLength?: number | null;
+  truncation?: boolean;
+  addSpecialTokens?: boolean;
+  /** Override of ``image_seq_len``. */
+  imageSeqLen?: number | null;
+}
+
+/** ``AddedToken`` flags (``tokenizers`` field names). */
+export interface AddedTokenSpec {
+  content: string;
+  lstrip: boolean;
+  normalized: boolean;
+  rstrip: boolean;
+  single_word: boolean;
+  special: boolean;
+}
+
+/** The ``AddedToken`` transformers creates for a special token string. */
+export function specialAddedToken(content: string): AddedTokenSpec {
+  return { content, lstrip: false, normalized: false, rstrip: false, single_word: false, special: true };
+}
+
+/**
+ * ``Tokenizer.add_tokens``/``add_special_tokens`` of the ``tokenizers``
+ * ``AddedVocabulary``: an identical added token is kept, an existing added or
+ * vocabulary token keeps its id (taking the new flags), and new tokens take the
+ * next id. Returns the tokenizer unchanged when nothing is added.
+ */
+export function addTokens(tokenizer: FastTokenizer, tokens: readonly AddedTokenSpec[]): FastTokenizer {
+  const root = parseJsonRaw(tokenizer.jsonText);
+  const list = rawGet(root, 'added_tokens');
+  const items = list?.t === 'a' ? [...list.items] : [];
+  const value = (node: RawNode, key: string): unknown => {
+    const item = rawGet(node, key);
+    if (!item) return undefined;
+    if (item.t === 'n') return Number(item.raw);
+    if (item.t === 's' || item.t === 'l') return item.v;
+    return undefined;
+  };
+  const flags = ['lstrip', 'normalized', 'rstrip', 'single_word', 'special'] as const;
+  const same = (node: RawNode, token: AddedTokenSpec): boolean => value(node, 'content') === token.content
+    && flags.every((key) => value(node, key) === token[key]);
+  const modelSize = tokenizer.backend.baseVocabSize();
+  let changed = false;
+  for (const token of tokens) {
+    if (!token.content || items.some((node) => same(node, token))) continue;
+    const existing = items.find((node) => value(node, 'content') === token.content);
+    let id: number;
+    if (existing) id = value(existing, 'id') as number;
+    else {
+      // Rust ``Model::token_to_id`` (the TypeScript Unigram lookup falls back to the unknown id).
+      const found = tokenizer.backend.model.tokenToId(token.content);
+      const inVocabulary = found !== undefined && tokenizer.backend.model.idToToken(found) === token.content ? found : undefined;
+      if (inVocabulary !== undefined) id = inVocabulary;
+      else {
+        const ids = items.map((node) => value(node, 'id') as number);
+        const max = ids.length ? Math.max(...ids) : null;
+        id = max === null ? modelSize : (max >= modelSize || modelSize === 0 ? max + 1 : modelSize);
+      }
+    }
+    const node = rawFromValue({ ...token, id });
+    const index = items.findIndex((item) => value(item, 'id') === id);
+    if (index >= 0) items[index] = node;
+    else items.push(node);
+    changed = true;
+  }
+  if (!changed) return tokenizer;
+  items.sort((a, b) => (value(a, 'id') as number) - (value(b, 'id') as number));
+  rawSet(root, 'added_tokens', { t: 'a', items });
+  return withBackendJson(tokenizer, emitJsonRaw(root, { sortKeys: true, separators: [',', ':'] }));
+}
+
+/** The tokenizer with a replaced canonical backend JSON (same special tokens and options). */
+export function withBackendJson(tokenizer: FastTokenizer, json: string): FastTokenizer {
+  return new FastTokenizer(json, {
+    specialTokens: tokenizer.specialTokens, options: tokenizer.options, paddingSide: tokenizer.paddingSide,
+    truncationSide: tokenizer.truncationSide, canonical: true, tokenizerClass: tokenizer.tokenizerClass,
+  });
+}
+
+/** ``tokenizer.add_special_tokens({'additional_special_tokens': tokens})`` (see {@link addTokens}). */
+export function addSpecialTokens(tokenizer: FastTokenizer, tokens: readonly string[]): FastTokenizer {
+  return addTokens(tokenizer, tokens.map(specialAddedToken));
 }
 
 const ASSET_SUFFIXES = new Set(['.json', '.jinja', '.txt']);
@@ -236,7 +369,12 @@ export function safeAssetName(name: unknown): name is string {
   return dot > 0 && ASSET_SUFFIXES.has(base.slice(dot));
 }
 
-/** ``Idefics3Processor`` built from the files ``processor.save_pretrained`` writes. */
+/**
+ * ``Idefics3Processor`` built from the files ``processor.save_pretrained``
+ * writes. Like transformers, construction adds ``<fake_token_around_image>``,
+ * ``<image>`` and ``<end_of_utterance>`` as special tokens when the tokenizer
+ * lacks them.
+ */
 export class Idefics3Processor {
   readonly imageProcessor: Idefics3ImageProcessor;
   readonly tokenizer: FastTokenizer;
@@ -244,16 +382,19 @@ export class Idefics3Processor {
   readonly chatTemplate: ChatTemplate | null;
   readonly fakeImageToken = '<fake_token_around_image>';
   readonly imageToken = '<image>';
+  readonly endOfUtteranceToken = '<end_of_utterance>';
   readonly globalImageTag = '<global-img>';
 
   constructor(imageProcessor: Idefics3ImageProcessor, tokenizer: FastTokenizer, imageSeqLen = 169, chatTemplate: string | null = null) {
     this.imageProcessor = imageProcessor;
-    this.tokenizer = tokenizer;
+    this.tokenizer = addSpecialTokens(tokenizer, [this.fakeImageToken, this.imageToken, this.endOfUtteranceToken]);
     this.imageSeqLen = imageSeqLen;
     this.chatTemplate = chatTemplate === null ? null : new ChatTemplate(chatTemplate);
-    for (const token of [this.fakeImageToken, this.imageToken, '<end_of_utterance>']) {
-      if (tokenizer.backend.tokenToId(token) === undefined) throw new NotImplementedError(`the processor tokenizer lacks ${token}; adding tokens is not supported`);
-    }
+  }
+
+  /** ``image_token_id``. */
+  get imageTokenId(): number | null {
+    return this.tokenizer.backend.tokenToId(this.imageToken) ?? this.tokenizer.unkTokenId;
   }
 
   /** ``Idefics3Processor.from_pretrained`` over saved processor assets (name to text). */
@@ -293,8 +434,8 @@ export class Idefics3Processor {
   }
 
   /** ``replace_image_token`` for one image with ``rows``/``cols`` splits. */
-  imagePromptString(rows: number, cols: number): string {
-    const image = this.imageToken.repeat(this.imageSeqLen);
+  imagePromptString(rows: number, cols: number, imageSeqLen = this.imageSeqLen): string {
+    const image = this.imageToken.repeat(imageSeqLen);
     const global = `${this.fakeImageToken}${this.globalImageTag}${image}${this.fakeImageToken}`;
     if (rows === 0 && cols === 0) return global;
     let text = '';
@@ -305,22 +446,96 @@ export class Idefics3Processor {
     return `${text}\n${global}`;
   }
 
-  /** ``processor(text=prompt, images=[image], return_tensors='pt')`` for one prompt and ``uint8`` image. */
-  call(prompt: string, images: readonly Tensor[]): Idefics3ProcessorOutput {
-    const count = prompt.split(this.imageToken).length - 1;
-    if (count !== images.length) {
-      throw new ValueError(`The total number of ${this.imageToken} tokens in the prompts should be the same as the number of images passed. Found [${count}] ${this.imageToken} tokens and [${images.length}] images per sample.`);
+  private count(text: string): number {
+    return text.split(this.imageToken).length - 1;
+  }
+
+  /** ``prepare_inputs_layout``: images nested per prompt. */
+  private layout(images: Idefics3Images | null, text: string[] | null): Tensor[][] | null {
+    if (images === null) return null;
+    if (images instanceof Tensor) {
+      if (images.ndim === 4) return [Array.from({ length: images.shape[0]! }, (_, index) => images.select(0, index))];
+      return [[images]];
     }
-    if (images.length !== 1) throw new NotImplementedError('the Idefics3 processor port handles exactly one image');
-    const batch = this.imageProcessor.preprocess(images[0]!);
-    const expanded = prompt.split(this.imageToken).join(this.imagePromptString(batch.rows[0]!, batch.cols[0]!));
-    const encoded = this.tokenizer.encode(expanded, { addSpecialTokens: true });
-    const ids = encoded.inputIds[0]!;
+    if (images.length && images.every((item) => Array.isArray(item))) return (images as readonly (readonly Tensor[])[]).map((item) => [...item]);
+    const flat = images as readonly Tensor[];
+    if (flat.length && !(flat[0] instanceof Tensor)) {
+      throw new ValueError('Invalid input type. Must be a single image, a list of images, or a list of batches of images.');
+    }
+    if (text === null) return [[...flat]];
+    const counts = text.map((sample) => this.count(sample));
+    const groups: Tensor[][] = [];
+    let offset = 0;
+    for (const count of counts) {
+      groups.push(flat.slice(offset, offset + count));
+      offset += count;
+    }
+    if (flat.length > offset) groups.push(flat.slice(offset));
+    return groups;
+  }
+
+  /**
+   * ``processor(text=..., images=..., return_tensors='pt')``: prompts (one or a
+   * batch) whose ``<image>`` placeholders are expanded, in order, for the
+   * images of each prompt (any number per prompt), and the padded image batch.
+   */
+  call(text: string | readonly string[] | null, images: Idefics3Images | null = null, options: Idefics3CallOptions = {}): Idefics3ProcessorOutput {
+    const prompts = text === null ? null : typeof text === 'string' ? [text] : [...text];
+    const nested = this.layout(images, prompts);
+    if (prompts === null && nested === null) throw new ValueError('You must provide either `text` or `images`.');
+    if (prompts !== null) {
+      const inText = prompts.map((sample) => this.count(sample));
+      if (nested !== null) {
+        const inImages = nested.map((sample) => sample.length);
+        if (inText.length !== inImages.length || inText.some((count, index) => count !== inImages[index])) {
+          throw new ValueError(`The total number of ${this.imageToken} tokens in the prompts should be the same as the number of images passed. Found ${pyList(inText)} ${this.imageToken} tokens and ${pyList(inImages)} images per sample.`);
+        }
+      } else if (inText.some(Boolean)) {
+        throw new ValueError(`Found ${inText.reduce((a, b) => a + b, 0)} ${this.imageToken} tokens in the text but no images were passed.`);
+      }
+    }
+    const batch = nested === null ? null : this.imageProcessor.preprocessBatch(nested);
+    if (prompts === null) {
+      return { inputIds: tensor([], { shape: [0, 0], dtype: 'int64' }), attentionMask: tensor([], { shape: [0, 0], dtype: 'int64' }), pixelValues: batch!.pixelValues, pixelAttentionMask: batch!.pixelAttentionMask };
+    }
+    let expanded = prompts;
+    if (batch !== null) {
+      const rows = batch.rows.flat();
+      const cols = batch.cols.flat();
+      let next = 0;
+      expanded = prompts.map((sample) => sample.split(this.imageToken).map((part, index) => {
+        if (index === 0) return part;
+        const replacement = this.imagePromptString(rows[next]!, cols[next]!, options.imageSeqLen ?? this.imageSeqLen);
+        next += 1;
+        return replacement + part;
+      }).join(''));
+    }
+    const encoded = this.tokenizer.encode(expanded, {
+      addSpecialTokens: options.addSpecialTokens ?? true, padding: options.padding ?? false,
+      truncation: options.truncation ?? false, maxLength: options.maxLength ?? null,
+    });
+    const width = encoded.inputIds[0]?.length ?? 0;
+    const ragged = encoded.inputIds.find((row) => row.length !== width);
+    if (ragged) {
+      throw new ValueError(`Unable to convert output 'input_ids' (type: list) to tensor: expected sequence of length ${width} at dim 1 (got ${ragged.length})\nYou can try:\n  1. Use padding=True to ensure all outputs have the same shape\n  2. Set return_tensors=None to return Python objects instead of tensors`);
+    }
+    if (batch !== null) {
+      const id = this.imageTokenId;
+      const idsCount = encoded.inputIds.map((row) => row.filter((token) => token === id).length);
+      const textCount = expanded.map((sample) => this.count(sample));
+      if (idsCount.some((count, index) => count !== textCount[index])) {
+        throw new ValueError(`Mismatch in \`image\` token count between text and \`input_ids\`. Got ids=${pyList(idsCount)} and text=${pyList(textCount)}. Likely due to \`truncation='max_length'\`. Please disable truncation or increase \`max_length\`.`);
+      }
+    }
     return {
-      inputIds: tensor(ids, { shape: [1, ids.length], dtype: 'int64' }),
-      attentionMask: tensor(encoded.attentionMask[0]!, { shape: [1, ids.length], dtype: 'int64' }),
-      pixelValues: batch.pixelValues,
-      pixelAttentionMask: batch.pixelAttentionMask,
+      inputIds: tensor(encoded.inputIds.flat(), { shape: [encoded.inputIds.length, width], dtype: 'int64' }),
+      attentionMask: tensor(encoded.attentionMask.flat(), { shape: [encoded.inputIds.length, width], dtype: 'int64' }),
+      pixelValues: batch?.pixelValues ?? null,
+      pixelAttentionMask: batch?.pixelAttentionMask ?? null,
     };
   }
+}
+
+function pyList(values: readonly number[]): string {
+  return `[${values.join(', ')}]`;
 }

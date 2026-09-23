@@ -1,7 +1,7 @@
 /** Idefics3 (SmolVLM) matches transformers (``scripts/fixtures/idefics3_fixtures.py``). */
 import { describe, expect, it } from 'vitest';
 import { nativeConfig } from '../../src/_internal/native/config.js';
-import { Idefics3ForConditionalGeneration, greedySettings } from '../../src/_internal/native/idefics3.js';
+import { Idefics3ForConditionalGeneration } from '../../src/_internal/native/idefics3.js';
 import { createNativeModel } from '../../src/_internal/native/registry.js';
 import { loadModelFromBytes, noGrad, tensor } from '../../src/nn/index.js';
 import { expectClose } from '../helpers/gradcheck.js';
@@ -48,10 +48,12 @@ describe('Idefics3ForConditionalGeneration', () => {
       const pixels = fromJson(record.pixel_values);
       const pixelMask = tensor(record.pixel_attention_mask.flat(3), { shape: [1, 3, 8, 8], dtype: 'int64' });
       const inputIds = ints(record.input_ids);
-      const generated = model.generateGreedy({ inputIds, pixelValues: pixels, pixelAttentionMask: pixelMask }, greedySettings(record.generation_config, 6));
+      const generated = model.generate({ inputIds, pixelValues: pixels, pixelAttentionMask: pixelMask },
+        { generationConfig: record.generation_config, settings: { max_new_tokens: 6, do_sample: false } }).sequences[0];
       expect(generated).toEqual(record.generated);
       const features = noGrad(() => model.getImageFeatures(pixels, pixelMask));
-      const plain = model.generateGreedy({ inputIds, imageHiddenStates: features }, greedySettings({ bos_token_id: 1, eos_token_id: 2, pad_token_id: 0 }, 5));
+      const plain = model.generate({ inputIds, imageHiddenStates: features },
+        { generationConfig: { bos_token_id: 1, eos_token_id: 2, pad_token_id: 0 }, settings: { max_new_tokens: 5, do_sample: false } }).sequences[0];
       expect(plain).toEqual(record.plain_generated);
     });
   }

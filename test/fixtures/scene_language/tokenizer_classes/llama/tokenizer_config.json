@@ -1,0 +1,1 @@
+{"tokenizer_class": "LlamaTokenizer", "bos_token": "<s>", "eos_token": "</s>", "unk_token": "<unk>", "add_bos_token": true, "legacy": false, "model_max_length": 64, "padding_side": "left"}

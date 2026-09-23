@@ -297,8 +297,12 @@ const CLASS_SPECIAL_TOKENS: Record<string, Record<string, string>> = {
   DebertaV2Tokenizer: { bos_token: '[CLS]', eos_token: '[SEP]', unk_token: '[UNK]', sep_token: '[SEP]', pad_token: '[PAD]', cls_token: '[CLS]', mask_token: '[MASK]' },
   AlbertTokenizer: { bos_token: '[CLS]', eos_token: '[SEP]', unk_token: '<unk>', sep_token: '[SEP]', pad_token: '<pad>', cls_token: '[CLS]', mask_token: '[MASK]' },
   GPT2Tokenizer: { bos_token: '<|endoftext|>', eos_token: '<|endoftext|>', unk_token: '<|endoftext|>' },
+  LlamaTokenizer: { bos_token: '<s>', eos_token: '</s>', unk_token: '<unk>' },
   CLIPTokenizer: { bos_token: '<|startoftext|>', eos_token: '<|endoftext|>', unk_token: '<|endoftext|>', pad_token: '<|endoftext|>' },
 };
+
+/** transformers 5 tokenizer classes whose class attribute ``padding_side`` is ``"left"``. */
+const LEFT_PADDING_CLASSES = new Set(['LlamaTokenizer', 'CodeLlamaTokenizer', 'GemmaTokenizer', 'CohereTokenizer', 'Siglip2Tokenizer', 'XLNetTokenizer']);
 
 function baseTokenizerClass(name: string | null): string | null {
   return name === null ? null : name.replace(/Fast$/, '');
@@ -464,7 +468,8 @@ export class FastTokenizer {
     }
     if (typeof config.split_special_tokens === 'boolean') options.split_special_tokens = config.split_special_tokens;
     const side = (value: unknown): 'left' | 'right' | undefined => (value === 'left' || value === 'right' ? value : undefined);
-    const paddingSide = side(config.padding_side);
+    // Class-level ``padding_side = "left"`` (LlamaTokenizer and relatives) applies when the file sets none.
+    const paddingSide = side(config.padding_side) ?? (tokenizerClass && LEFT_PADDING_CLASSES.has(tokenizerClass) ? 'left' : undefined);
     const truncationSide = side(config.truncation_side);
     return new FastTokenizer(json, {
       specialTokens, options, tokenizerClass, rustParsed: loadsThroughRust(tokenizerClass), flags: config,

@@ -1,0 +1,1 @@
+{"tokenizer_class": "LlamaTokenizerFast", "add_prefix_space": false, "add_eos_token": true, "legacy": true, "clean_up_tokenization_spaces": true}

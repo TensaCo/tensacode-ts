@@ -2,7 +2,7 @@
  * ``Idefics3ForConditionalGeneration`` (SmolVLM; transformers 5.17 names): a
  * SigLIP-style vision transformer over variable-resolution patches, the
  * pixel-shuffle connector, a Llama text model and a language-model head, with
- * greedy generation.
+ * transformers' ``generate`` (``causalGeneration.ts``).
  */
 import { activationModule, type ActivationModule } from './activations.js';
 import { Module } from '../../nn/module.js';
@@ -10,11 +10,13 @@ import { Tensor, tensor } from '../../nn/tensor.js';
 import { Conv2d, Embedding, LayerNorm, Linear, ModuleList } from '../../nn/layers.js';
 import { crossEntropy } from '../../nn/ops/nn.js';
 import { cat } from '../../nn/ops/shape.js';
-import { noGrad } from '../../nn/autograd.js';
-import { NotImplementedError, ValueError } from '../../errors.js';
+import { ValueError } from '../../errors.js';
+import type { JsonObject } from '../json.js';
 import type { NativeConfig } from './config.js';
+import { baseInitWeights, initializerStd, postInit } from './hfInit.js';
 import { NativeModel, attention, keyPaddingBias, mergeHeads, splitHeads } from './modules.js';
 import { LlamaModel, type LlamaLayerCache } from './llama.js';
+import { generateCausal, type CausalForwardInputs, type CausalGenerateOptions, type CausalGenerateOutput, type CausalLanguageModel } from './causalGeneration.js';
 
 class Idefics3VisionEmbeddings extends Module {
   static override readonly qualifiedName: string = 'transformers.models.idefics3.modeling_idefics3.Idefics3VisionEmbeddings';
@@ -177,6 +179,9 @@ export class Idefics3VisionTransformer extends Module {
     this.encoder = this.registerModule('encoder', new Idefics3Encoder(config));
     this.patchSize = config.number('patch_size');
     this.post_layernorm = this.registerModule('post_layernorm', new LayerNorm(config.number('hidden_size'), { eps: config.number('layer_norm_eps') }));
+    // A pretrained model in Python (``_from_config``): its ``post_init`` runs as it is constructed.
+    const std = initializerStd(config);
+    postInit(this, (module) => baseInitWeights(module, std));
   }
 
   /** ``last_hidden_state`` for ``[images, channels, height, width]`` and a boolean patch mask. */
@@ -246,6 +251,8 @@ export interface Idefics3Inputs {
   /** Connector outputs (``image_hidden_states``) used instead of ``pixelValues``. */
   imageHiddenStates?: Tensor | null;
   labels?: Tensor | null;
+  /** ``position_ids`` ``[batch, length]`` (default: counted from the cache). */
+  positionIds?: Tensor | null;
   cache?: LlamaLayerCache[] | null;
 }
 
@@ -271,6 +278,8 @@ export class Idefics3Model extends Module {
     this.connector = this.registerModule('connector', new Idefics3Connector(config));
     this.text_model = this.registerModule('text_model', new LlamaModel(config.sub('text_config')));
     this.imageTokenId = config.number('image_token_id');
+    const std = initializerStd(config, config.sub('text_config'));
+    postInit(this, (module) => baseInitWeights(module, std));
   }
 
   getInputEmbeddings(): Embedding {
@@ -344,7 +353,9 @@ export class Idefics3Model extends Module {
     if (inputs.pixelValues) image = this.getImageFeatures(inputs.pixelValues, inputs.pixelAttentionMask ?? null);
     else if (inputs.imageHiddenStates) image = inputs.imageHiddenStates.to(embeds.dtype);
     if (image) embeds = this.inputsMerger(inputs.inputIds, embeds, image);
-    const lastHiddenState = this.text_model.forward({ inputsEmbeds: embeds, attentionMask: inputs.attentionMask ?? null, cache: inputs.cache ?? null });
+    const lastHiddenState = this.text_model.forward({
+      inputsEmbeds: embeds, attentionMask: inputs.attentionMask ?? null, positionIds: inputs.positionIds ?? null, cache: inputs.cache ?? null,
+    });
     return { lastHiddenState, imageHiddenStates: image };
   }
 }
@@ -362,7 +373,7 @@ export function causalLmLoss(logits: Tensor, labels: Tensor): Tensor {
 }
 
 /** ``Idefics3ForConditionalGeneration``. */
-export class Idefics3ForConditionalGeneration extends NativeModel {
+export class Idefics3ForConditionalGeneration extends NativeModel implements CausalLanguageModel {
   static override readonly qualifiedName: string = 'transformers.models.idefics3.modeling_idefics3.Idefics3ForConditionalGeneration';
   readonly model: Idefics3Model;
   readonly lm_head: Linear;
@@ -372,6 +383,9 @@ export class Idefics3ForConditionalGeneration extends NativeModel {
     const text = config.sub('text_config');
     this.model = this.registerModule('model', new Idefics3Model(config));
     this.lm_head = this.registerModule('lm_head', new Linear(text.number('hidden_size'), text.number('vocab_size'), { bias: false }));
+    // ``init_weights`` initializes, then ties.
+    const std = initializerStd(config, text);
+    postInit(this, (module) => baseInitWeights(module, std));
     if (config.get('tie_word_embeddings') === true) this.lm_head.setParameterAt('weight', this.model.text_model.embed_tokens.weight);
   }
 
@@ -390,162 +404,69 @@ export class Idefics3ForConditionalGeneration extends NativeModel {
     return { logits, loss, imageHiddenStates: output.imageHiddenStates };
   }
 
-  /** Last-position logits of a cached incremental forward. */
-  private step(inputIds: Tensor, attentionMask: Tensor, cache: LlamaLayerCache[], image: Tensor | null): Float32Array {
-    const output = this.model.forward({ inputIds, attentionMask, imageHiddenStates: image, cache });
-    const last = output.lastHiddenState.select(1, output.lastHiddenState.shape[1]! - 1);
-    return Float32Array.from(this.lm_head.forward(last).data);
+  /** ``model.generation_config.to_dict()`` used when a call supplies none. */
+  generationConfig: JsonObject | null = null;
+
+  readonly generationConfigClass = 'Idefics3Config';
+  readonly prefillOnlyInputs: readonly string[] = ['pixelValues'];
+  readonly acceptedInputs: readonly string[] = ['pixelValues', 'pixelAttentionMask', 'imageHiddenStates'];
+
+  get generationVocabSize(): number {
+    return this.config.sub('text_config').number('vocab_size');
+  }
+
+  /** ``Idefics3Config`` has no top-level ``max_position_embeddings``. */
+  get generationMaxPositions(): number | null {
+    return this.config.optionalNumber('max_position_embeddings');
+  }
+
+  newCache(): LlamaLayerCache[] {
+    return this.model.text_model.newCache();
+  }
+
+  /** One generation forward pass: float32 logits of the last ``keep`` positions per row. */
+  forwardLogits(inputs: CausalForwardInputs): Float32Array[][] {
+    const batch = inputs.inputIds.length;
+    const length = inputs.inputIds[0]!.length;
+    const grid = (values: number[][]): Tensor => tensor(values.flat(), { shape: [values.length, values[0]!.length], dtype: 'int64' });
+    // A mask longer than the keys (``token_healing`` re-tokenizes the prompt) is cut to them.
+    const keys = (inputs.cache?.[0]?.key?.shape[2] ?? 0) + length;
+    const mask = inputs.attentionMask ? inputs.attentionMask.map((row) => row.slice(0, keys)) : null;
+    const output = this.model.forward({
+      inputIds: grid(inputs.inputIds),
+      attentionMask: mask ? grid(mask) : null,
+      positionIds: inputs.positionIds ? grid(inputs.positionIds) : null,
+      cache: inputs.cache,
+      pixelValues: inputs.extras.pixelValues ?? null,
+      pixelAttentionMask: inputs.extras.pixelAttentionMask ?? null,
+      imageHiddenStates: inputs.extras.imageHiddenStates ?? null,
+    });
+    const keep = Math.min(inputs.keep, length);
+    const hidden = output.lastHiddenState.slice(1, length - keep, length);
+    const logits = this.lm_head.forward(hidden).to('float32');
+    const vocab = logits.shape[2]!;
+    const data = logits.data;
+    return Array.from({ length: batch }, (_, b) => Array.from({ length: keep }, (_, k) => {
+      const offset = (b * keep + k) * vocab;
+      return Float32Array.from(data.subarray(offset, offset + vocab));
+    }));
   }
 
   /**
-   * ``generate(..., do_sample=False)`` for one sequence: greedy decoding with a
-   * key/value cache. ``image_hidden_states`` are forwarded at every step, as
-   * transformers does. Returns the prompt followed by the generated ids.
+   * ``generate(input_ids, attention_mask=..., pixel_values=... | image_hidden_states=..., **settings)``
+   * with transformers' decoding strategies, logits processors and stopping
+   * criteria. ``image_hidden_states`` are forwarded at every step and
+   * ``pixel_values`` only during prefill, as transformers does; both are
+   * expanded with ``repeat_interleave`` for beams and returned sequences.
    */
-  generateGreedy(inputs: Idefics3Inputs, settings: GreedySettings): number[] {
-    if (inputs.inputIds.shape[0] !== 1) throw new ValueError('generation supports a single sequence');
-    return noGrad(() => {
-      let image = inputs.imageHiddenStates ?? null;
-      if (inputs.pixelValues) {
-        if (image) throw new ValueError('You cannot specify both pixel_values and image_hidden_states at the same time.');
-        image = this.getImageFeatures(inputs.pixelValues, inputs.pixelAttentionMask ?? null);
-      }
-      const sequence = Array.from(inputs.inputIds.data, Number);
-      const promptLength = sequence.length;
-      const mask = Array.from(inputs.attentionMask?.data ?? new Array<number>(promptLength).fill(1), Number);
-      const cache = this.model.text_model.newCache();
-      const processor = new LogitsProcessor(settings, promptLength);
-      let current = inputs.inputIds;
-      const maxLength = promptLength + settings.maxNewTokens;
-      while (sequence.length < maxLength) {
-        const scores = this.step(current, tensor(mask, { shape: [1, mask.length], dtype: 'int64' }), cache, image);
-        processor.apply(scores, sequence);
-        let best = 0;
-        for (let index = 1; index < scores.length; index += 1) if (scores[index]! > scores[best]!) best = index;
-        sequence.push(best);
-        mask.push(1);
-        if (settings.eos.includes(best)) break;
-        current = tensor([best], { shape: [1, 1], dtype: 'int64' });
-      }
-      return sequence;
-    });
-  }
-}
-
-/** Greedy-decoding settings resolved from a ``GenerationConfig`` dictionary. */
-export interface GreedySettings {
-  maxNewTokens: number;
-  eos: number[];
-  repetitionPenalty: number | null;
-  noRepeatNgramSize: number | null;
-  badWordsIds: number[][] | null;
-  minLength: number | null;
-  minNewTokens: number | null;
-  forcedBosTokenId: number | null;
-  forcedEosTokenId: number[] | null;
-  maxLength: number | null;
-  removeInvalidValues: boolean;
-  suppressTokens: number[] | null;
-  beginSuppressTokens: number[] | null;
-}
-
-const UNSUPPORTED_GENERATION: readonly string[] = [
-  'guidance_scale', 'sequence_bias', 'encoder_repetition_penalty', 'encoder_no_repeat_ngram_size', 'exponential_decay_length_penalty',
-  'watermarking_config', 'stop_strings', 'force_words_ids', 'constraints', 'prompt_lookup_num_tokens', 'assistant_early_exit',
-];
-
-/**
- * Resolve ``generate(**batch, max_new_tokens=n, do_sample=False)`` settings
- * from a serialized ``GenerationConfig`` (``to_dict()``) for greedy decoding.
- */
-export function greedySettings(generation: Record<string, unknown>, maxNewTokens: number): GreedySettings {
-  const numbers = (value: unknown): number[] | null => {
-    if (value === null || value === undefined) return null;
-    return Array.isArray(value) ? value.map(Number) : [Number(value)];
-  };
-  const beams = generation.num_beams;
-  if (typeof beams === 'number' && beams > 1) throw new NotImplementedError('beam search generation is not implemented for Idefics3');
-  for (const key of UNSUPPORTED_GENERATION) {
-    const value = generation[key];
-    if (value === null || value === undefined) continue;
-    if ((key === 'guidance_scale' || key === 'encoder_repetition_penalty') && value === 1) continue;
-    if ((key === 'encoder_no_repeat_ngram_size' || key === 'prompt_lookup_num_tokens') && value === 0) continue;
-    throw new NotImplementedError(`generation setting ${key} is not implemented natively`);
-  }
-  const number = (key: string): number | null => (typeof generation[key] === 'number' ? generation[key] as number : null);
-  return {
-    maxNewTokens,
-    eos: numbers(generation.eos_token_id) ?? [],
-    repetitionPenalty: number('repetition_penalty'),
-    noRepeatNgramSize: number('no_repeat_ngram_size'),
-    badWordsIds: Array.isArray(generation.bad_words_ids) ? (generation.bad_words_ids as number[][]).map((item) => item.map(Number)) : null,
-    minLength: number('min_length'),
-    minNewTokens: number('min_new_tokens'),
-    forcedBosTokenId: number('forced_bos_token_id'),
-    forcedEosTokenId: numbers(generation.forced_eos_token_id),
-    maxLength: null,
-    removeInvalidValues: generation.remove_invalid_values === true,
-    suppressTokens: numbers(generation.suppress_tokens),
-    beginSuppressTokens: numbers(generation.begin_suppress_tokens),
-  };
-}
-
-/** transformers' logits processors for greedy decoding, in ``_get_logits_processor`` order. */
-class LogitsProcessor {
-  constructor(private readonly settings: GreedySettings, private readonly promptLength: number) {}
-
-  apply(scores: Float32Array, sequence: readonly number[]): void {
-    const s = this.settings;
-    const length = sequence.length;
-    const maxLength = this.promptLength + s.maxNewTokens;
-    if (s.repetitionPenalty !== null && s.repetitionPenalty !== 1) {
-      for (const id of new Set(sequence)) {
-        if (id < 0 || id >= scores.length) continue;
-        const score = scores[id]!;
-        scores[id] = score < 0 ? Math.fround(score * s.repetitionPenalty) : Math.fround(score / s.repetitionPenalty);
-      }
+  generate(inputs: Idefics3Inputs, options: CausalGenerateOptions = {}): CausalGenerateOutput {
+    if (inputs.pixelValues && inputs.imageHiddenStates) {
+      throw new ValueError('You cannot specify both pixel_values and image_hidden_states at the same time.');
     }
-    if (s.noRepeatNgramSize !== null && s.noRepeatNgramSize > 0 && length + 1 >= s.noRepeatNgramSize) {
-      const n = s.noRepeatNgramSize;
-      const prefix = sequence.slice(length - n + 1).join(',');
-      for (let start = 0; start + n <= length; start += 1) {
-        if (sequence.slice(start, start + n - 1).join(',') === prefix) scores[sequence[start + n - 1]!] = -Infinity;
-      }
-    }
-    if (s.badWordsIds) {
-      for (const word of s.badWordsIds) {
-        if (!word.length || (word.length === 1 && s.eos.includes(word[0]!))) continue;
-        const prefix = word.slice(0, -1);
-        const matches = prefix.length === 0 || (length >= prefix.length && prefix.every((id, index) => sequence[length - prefix.length + index] === id));
-        if (matches) scores[word[word.length - 1]!] = -Infinity;
-      }
-    }
-    if (s.minLength !== null && s.minLength > 0 && s.eos.length && length < s.minLength) for (const id of s.eos) scores[id] = -Infinity;
-    if (s.minNewTokens !== null && s.minNewTokens > 0 && s.eos.length && length - this.promptLength < s.minNewTokens) {
-      for (const id of s.eos) scores[id] = -Infinity;
-    }
-    if (s.forcedBosTokenId !== null && length === 1) {
-      scores.fill(-Infinity);
-      scores[s.forcedBosTokenId] = 0;
-    }
-    if (s.forcedEosTokenId !== null && length === maxLength - 1) {
-      scores.fill(-Infinity);
-      for (const id of s.forcedEosTokenId) scores[id] = 0;
-    }
-    if (s.removeInvalidValues) {
-      const max = 3.4028234663852886e38;
-      for (let index = 0; index < scores.length; index += 1) {
-        const value = scores[index]!;
-        if (Number.isNaN(value)) scores[index] = 0;
-        else if (value === Infinity) scores[index] = max;
-        else if (value === -Infinity) scores[index] = -max;
-      }
-    }
-    if (s.suppressTokens) for (const id of s.suppressTokens) if (id >= 0 && id < scores.length) scores[id] = -Infinity;
-    // ``begin_index`` moves past a forced BOS token for one-token prompts.
-    const beginIndex = this.promptLength > 1 || s.forcedBosTokenId === null ? this.promptLength : this.promptLength + 1;
-    if (s.beginSuppressTokens && length === beginIndex) {
-      for (const id of s.beginSuppressTokens) if (id >= 0 && id < scores.length) scores[id] = -Infinity;
-    }
+    return generateCausal(this, {
+      inputIds: inputs.inputIds,
+      attentionMask: inputs.attentionMask ?? null,
+      extras: { pixelValues: inputs.pixelValues, pixelAttentionMask: inputs.pixelAttentionMask, imageHiddenStates: inputs.imageHiddenStates },
+    }, { ...options, generationConfig: options.generationConfig ?? this.generationConfig });
   }
 }

@@ -1,0 +1,1 @@
+{"tokenizer_class": "T5TokenizerFast", "extra_ids": 4, "model_max_length": 512, "sp_model_kwargs": {}}
