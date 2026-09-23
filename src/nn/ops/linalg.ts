@@ -41,7 +41,36 @@ function batchedMatmul(a: Tensor, b: Tensor, dtype: DType): Tensor {
     for (let i = 0; i < n; i += 1) {
       row.fill(0);
       const aRow = aBase + i * k;
-      for (let p = 0; p < k; p += 1) {
+      let p = 0;
+      // Four products per pass when all are nonzero (same accumulation order).
+      for (; p + 3 < k; p += 4) {
+        const v0 = ad[aRow + p]!;
+        const v1 = ad[aRow + p + 1]!;
+        const v2 = ad[aRow + p + 2]!;
+        const v3 = ad[aRow + p + 3]!;
+        const b0 = bBase + p * m;
+        if (v0 !== 0 && v1 !== 0 && v2 !== 0 && v3 !== 0) {
+          const b1 = b0 + m;
+          const b2 = b1 + m;
+          const b3 = b2 + m;
+          for (let j = 0; j < m; j += 1) {
+            let value = row[j]!;
+            value += v0 * bd[b0 + j]!;
+            value += v1 * bd[b1 + j]!;
+            value += v2 * bd[b2 + j]!;
+            value += v3 * bd[b3 + j]!;
+            row[j] = value;
+          }
+        } else {
+          for (let q = 0; q < 4; q += 1) {
+            const value = ad[aRow + p + q]!;
+            if (value === 0) continue;
+            const bRow = b0 + q * m;
+            for (let j = 0; j < m; j += 1) row[j]! += value * bd[bRow + j]!;
+          }
+        }
+      }
+      for (; p < k; p += 1) {
         const value = ad[aRow + p]!;
         if (value === 0) continue;
         const bRow = bBase + p * m;
@@ -117,7 +146,55 @@ export function linear(x: Tensor, weight: Tensor, bias: Tensor | null = null): T
   const xd = input.data;
   const wd = weight.data;
   const bd = bias ? bias.data : null;
-  for (let r = 0; r < rows; r += 1) {
+  // Register-blocked over two rows and four outputs; every output still
+  // accumulates in float64 in ascending input order (results are unchanged).
+  let r = 0;
+  for (; r + 1 < rows; r += 2) {
+    const x0 = r * inFeatures;
+    const x1 = x0 + inFeatures;
+    const out0 = r * outFeatures;
+    const out1 = out0 + outFeatures;
+    let o = 0;
+    for (; o + 3 < outFeatures; o += 4) {
+      const w0 = o * inFeatures;
+      const w1 = w0 + inFeatures;
+      const w2 = w1 + inFeatures;
+      const w3 = w2 + inFeatures;
+      let a0 = bd ? bd[o]! : 0;
+      let a1 = bd ? bd[o + 1]! : 0;
+      let a2 = bd ? bd[o + 2]! : 0;
+      let a3 = bd ? bd[o + 3]! : 0;
+      let b0 = a0;
+      let b1 = a1;
+      let b2 = a2;
+      let b3 = a3;
+      for (let i = 0; i < inFeatures; i += 1) {
+        const u = xd[x0 + i]!;
+        const v = xd[x1 + i]!;
+        const p0 = wd[w0 + i]!;
+        const p1 = wd[w1 + i]!;
+        const p2 = wd[w2 + i]!;
+        const p3 = wd[w3 + i]!;
+        a0 += u * p0; a1 += u * p1; a2 += u * p2; a3 += u * p3;
+        b0 += v * p0; b1 += v * p1; b2 += v * p2; b3 += v * p3;
+      }
+      out[out0 + o] = a0; out[out0 + o + 1] = a1; out[out0 + o + 2] = a2; out[out0 + o + 3] = a3;
+      out[out1 + o] = b0; out[out1 + o + 1] = b1; out[out1 + o + 2] = b2; out[out1 + o + 3] = b3;
+    }
+    for (; o < outFeatures; o += 1) {
+      const wBase = o * inFeatures;
+      let a = bd ? bd[o]! : 0;
+      let b = a;
+      for (let i = 0; i < inFeatures; i += 1) {
+        const w = wd[wBase + i]!;
+        a += xd[x0 + i]! * w;
+        b += xd[x1 + i]! * w;
+      }
+      out[out0 + o] = a;
+      out[out1 + o] = b;
+    }
+  }
+  for (; r < rows; r += 1) {
     const xBase = r * inFeatures;
     const outBase = r * outFeatures;
     for (let o = 0; o < outFeatures; o += 1) {
