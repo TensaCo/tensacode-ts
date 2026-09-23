@@ -1,0 +1,10 @@
+{
+  "config": {
+    "dimensions": 4,
+    "label": "fixture",
+    "rate": 1.5
+  },
+  "format": "tensorcode.pretrained",
+  "tool": "artifact_fixtures.FixtureTool",
+  "version": 1
+}

@@ -1,19 +1,98 @@
 {
-  "name": "tensacode",
-  "version": "0.0.1",
-  "description": "None",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
+  "name": "tensorcode",
+  "version": "0.4.0-alpha.3",
+  "description": "Composable cognitive operations and traceable, trainable TypeScript programs",
+  "keywords": [
+    "tensorcode",
+    "cognitive operations",
+    "tracing",
+    "autograd",
+    "transformers",
+    "safetensors",
+    "hugging face"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "author": "Jacob Valdez <jacob.valdez@tensaco.ai>",
+  "homepage": "https://tensorcode.dev",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tensaco/tensacode-ts.git"
   },
-  "author": "Jacob Valdez",
-  "license": "MIT",
   "bugs": {
     "url": "https://github.com/tensaco/tensacode-ts/issues"
   },
-  "homepage": "https://github.com/tensaco/tensacode-ts#readme"
+  "engines": {
+    "node": ">=20.16"
+  },
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./nn": {
+      "types": "./dist/nn/index.d.ts",
+      "import": "./dist/nn/index.js"
+    },
+    "./ops": {
+      "types": "./dist/ops/index.d.ts",
+      "import": "./dist/ops/index.js"
+    },
+    "./ops/*": {
+      "types": "./dist/ops/*.d.ts",
+      "import": "./dist/ops/*.js"
+    },
+    "./tools": {
+      "types": "./dist/tools/index.d.ts",
+      "import": "./dist/tools/index.js"
+    },
+    "./tools/*": {
+      "types": "./dist/tools/*.d.ts",
+      "import": "./dist/tools/*.js"
+    },
+    "./training": {
+      "types": "./dist/training/index.d.ts",
+      "import": "./dist/training/index.js"
+    },
+    "./training/*": {
+      "types": "./dist/training/*.d.ts",
+      "import": "./dist/training/*.js"
+    },
+    "./integrations": {
+      "types": "./dist/integrations/index.d.ts",
+      "import": "./dist/integrations/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "DESIGN.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "fixtures": "../python/.venv/bin/python scripts/fixtures/generate.py",
+    "clean": "rm -rf dist",
+    "codegen": "../python/.venv/bin/python scripts/codegen/native_defaults.py"
+  },
+  "peerDependencies": {
+    "@huggingface/transformers": ">=3"
+  },
+  "peerDependenciesMeta": {
+    "@huggingface/transformers": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.11"
+  }
 }
