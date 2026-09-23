@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NativeConfig } from '../../src/_internal/native/config.js';
+import { NativeConfig, generationConfigFromFile, generationConfigFromModel } from '../../src/_internal/native/config.js';
 import { T5ForConditionalGeneration } from '../../src/_internal/native/t5.js';
 import { generateSeq2Seq } from '../../src/_internal/native/generation.js';
 import { loadModelFromBytes, noGrad } from '../../src/nn/index.js';
@@ -28,6 +28,12 @@ describe('T5 matches transformers', () => {
         const embedded = model.forward({ inputsEmbeds: fromJson(record.inputs_embeds), attentionMask: ints(record.inputs_embeds_mask), labels: ints(record.labels) });
         expect(embedded.loss!.item()).toBeCloseTo(record.embeds_loss, 4);
       });
+    });
+
+    it(`${name}: generation config (from_model_config / from_dict round trip)`, () => {
+      const config = NativeConfig.fromDict(record.config);
+      expect(generationConfigFromModel(config)).toEqual(record.generation_config);
+      expect(generationConfigFromFile(record.generation_config)).toEqual(record.generation_config);
     });
 
     it(`${name}: generation`, () => {
