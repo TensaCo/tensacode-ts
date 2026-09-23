@@ -46,10 +46,50 @@ core so that owned models train, save and load with zero native dependencies:
   PyTorch's `vars(module)` (so fingerprints match Python).
 - **Optimizers**: `SGD` (momentum, dampening, nesterov, weight decay), `Adam`
   (amsgrad), `AdamW`, with PyTorch-compatible `stateDict()` layouts.
+- **Compute backend** (`src/nn/backend`): float32 matrix products (`linear`,
+  batched/broadcast `matmul` and their gradients, `conv2d` as im2col products),
+  attention, last-dimension softmax, layer normalization, the GELU / SiLU /
+  sigmoid / tanh / exp activations, and large adjacent-axis permutes and
+  same-shape arithmetic run on WebAssembly SIMD kernels (`scripts/wasm/kernels.rs`,
+  built by `node scripts/wasm/build.mjs` into the checked-in
+  `kernels.generated.ts`; relaxed-SIMD fused multiply-add where the runtime
+  supports it; no toolchain is needed to install or build the package). On Node
+  the kernels share one memory with a `worker_threads` pool sized to the
+  available parallelism; the calling thread takes part and blocks until a job
+  is done, so the API stays synchronous. Large results are returned in
+  `SharedArrayBuffer`-backed `Float32Array`s that every thread fills in
+  parallel. `TENSORCODE_THREADS` / `setNumThreads(n)` set the thread count
+  (`1`: no workers); `TENSORCODE_BACKEND=js` / `setBackend('js')` use only the
+  JavaScript kernels, which remain the fallback for float64 and for runtimes
+  without WebAssembly SIMD or workers. Products reduce in float32 (four lanes,
+  like PyTorch's vectorized CPU kernels), and every output element is computed
+  identically whatever the batch size, tile or thread count, so results are
+  deterministic and batch invariant. Activations, layer norm, permutes,
+  arithmetic and the fused Adam(W) update are bit-identical to the JavaScript
+  formulas. Without gradients, float32 attention is one fused kernel that never
+  materializes the attention matrix (`enableGqa` shares key/value heads like
+  PyTorch's `enable_gqa`). float16/bfloat16 results of products, convolution,
+  softmax and layer norm are computed in float32 and rounded to the dtype, as
+  PyTorch's CPU kernels do. Weights of small-row products (token-by-token
+  decoding) stay resident in kernel memory (`TENSORCODE_WASM_CACHE_MB`, default
+  1536; `clearWeightCache()`), keyed by storage and version.
 - **Safetensors**: byte-identical serialization (Rust ordering, header padding,
   tied-tensor metadata of `safetensors.torch.save_model`), all common dtypes.
-- **RNG**: seedable xoshiro128** `Generator` with JSON-safe state (checkpointable).
-  Streams are deterministic but **do not** reproduce PyTorch random sequences.
+- **RNG**: `Generator` is PyTorch's CPU generator (`at::CPUGeneratorImpl`:
+  mt19937, `torch.manual_seed` seeding, cached normal samples, the 5056-byte
+  `torch.get_rng_state()` layout). `uniform_`, `normal_` (the 16-wide Box-Muller
+  fill and the scalar path, float32/float64/float16/bfloat16), `bernoulli_`,
+  `random_`/`randint`, `randperm`, `exponential_` and `multinomial` follow
+  ATen's CPU kernels, with the C library functions they call (`logf`, `sinf`,
+  `cosf`, `log`, `log1p`, `sin`, `cos`, `fma`) ported from glibc 2.39 AArch64
+  (`nn/randomMath.ts`). `PythonRandom` (`nn/randomPython.ts`) is CPython's
+  `random.Random`. `init` mirrors `torch.nn.init`, and native models reproduce
+  transformers' `post_init` order (`native/hfInit.ts`), so `manualSeed(n)` plus
+  the same construction gives bitwise-identical weights and dropout masks, and
+  sampling makes the same draws (`test/nn/random.test.ts`,
+  `test/nn/initParity.test.ts`).
+  `withoutRandomInit` builds modules without drawing (`torch.device('meta')`),
+  as `from_pretrained` does.
 
 PyTorch parity (layers, optimizers, safetensors) is verified against fixtures
 generated from the Python stack (`scripts/fixtures`).
@@ -83,6 +123,12 @@ them natively with transformers **5.17** parameter names and numerics:
   untied), missing/mismatched weight rejection, tokenizer and generation config.
 - `generateSeq2Seq(model, inputs, settings, {generationConfig})` takes
   `GenerationConfig`-style snake_case settings (`max_new_tokens`, `num_beams`, ...).
+- `generateCausal(model, inputs, {generationConfig, settings, tokenizer, ...})`
+  (`causalGeneration.ts`) is decoder-only `GenerationMixin.generate` for
+  `CausalLanguageModel` adapters (the Idefics3 text model): configuration
+  merging and validation, all logits processors, warpers and stopping criteria
+  (`logitsProcessors.ts`), greedy/sampling/beam/assisted decoding, and
+  transformers' errors for rejected settings.
 - `parameterAliases()` / `restoreParameterAliases()` mirror Python's
   `native_parameter_aliases` handling.
 
@@ -194,8 +240,9 @@ or `rejectUnknownFields`; unknown **and obsolete** fields raise `ValueError`
 
 **Async and I/O.** Anything touching the filesystem or network returns a
 `Promise` (`savePretrained`, `fromPretrained`, `fromFoundation`, `trace.save`,
-`loadExperience`, checkpoints, sessions). Pure computation is synchronous. HTTP
-providers are asynchronous (`acomplete`); operations wrapping them are used with
+`loadExperience`, checkpoints, sessions). Pure computation is synchronous.
+Model providers are blocking like Python's (`complete`, run on a worker thread)
+and asynchronous (`acomplete`); operations wrapping them work with `call` and
 `acall`.
 
 **Values.** Python tuples are frozen arrays (`Object.freeze([...])`, see
@@ -211,12 +258,27 @@ families subclass these (`InvalidModelOutput extends ValueError`,
 `ProviderError`, `HubError`, `FileNotFoundError`). Error messages should follow the
 Python wording where tests match on them.
 
-**Floats.** JavaScript numbers do not distinguish `1` from `1.0`. Python-compatible
-JSON writers spell integral numbers under `PYTHON_FLOAT_KEYS` as floats (see
-`src/_internal/json.ts`). If a module persists a new float-typed field whose value
-can be integral, list it in the module brief handoff for the integrator to add
-statically — never call `registerPythonFloatKeys` at import time (fingerprints
-must not depend on import order).
+**Python numbers and dicts.** JavaScript numbers do not distinguish `1` from
+`1.0`, and plain objects enumerate integer-like keys first. `src/_internal/json.ts`
+keeps Python's view losslessly: its parsers (`parseJsonStrict`, `pythonJsonLoads`,
+`rawToValue`) record the int/float kind of integral numbers (and exact big ints)
+and the insertion order of keys beside the parsed containers, and `validatedJson`/
+`deepCopy`/`mergeJson`/`shallowCopy`, fingerprints, `pythonJsonDumps`, raw
+re-serialization and the experience codec preserve and honour both. Programs mark
+numbers with `float()`/`int()` (exported from `tensorcode`) and ordered dicts with
+`Map` or `orderedObject`; decoded Python dicts with non-string keys are `Map`s.
+Integral numbers without a kind follow the schema: configuration keys in
+`PYTHON_FLOAT_KEYS` (the generated transformers defaults carry their own float
+kinds) and record classes' `recordFloatFields`/`recordIntKeyFields`. Caller data
+that Python writes as given has no float schema: containers marked with
+`markPlainData` (`Retrieve` items) and the JSON memory, trajectory and
+structured-target writers. Code that
+copies JSON data uses these helpers (or `transferPythonNumberKind`/
+`orderedEntries`) rather than spreads or `Object.entries` rebuilds, which fall
+back to the schema default. If a module persists a new float-typed field whose
+value can be integral, add it to the schema statically — never call
+`registerPythonFloatKeys` at import time (fingerprints must not depend on import
+order).
 
 **Devices.** CPU only. `device` options accept `'cpu'` (or omission) and reject
 others with `ValueError`.
@@ -238,51 +300,73 @@ others with `ValueError`.
 
 ## Deliberate differences
 
-- **Numerics.** Pure JavaScript CPU compute; no GPU, no mixed precision kernels.
-  Real foundations run (flan-T5-small generates in seconds) but large models are
-  slow. Random streams differ from PyTorch (initializations, dropout, sampling),
-  so freshly initialized models are not numerically identical to Python ones;
-  loaded weights are.
+- **Numerics.** CPU compute with no native dependencies (WebAssembly SIMD
+  kernels on worker threads, see the compute backend above); no GPU and no
+  mixed-precision kernels (float16/bfloat16 are computed in float32). Random streams equal PyTorch's on the reference platform (AArch64,
+  glibc 2.39). PyTorch on x86-64 with AVX2 fills `normal_` with a different
+  vectorized kernel, so Python's own float32 normal samples differ there.
 - **Weights.** Only safetensors checkpoints (no `pytorch_model.bin`/pickle). A
   Hub repository whose `main` has only PyTorch weights loads `model.safetensors`
   from its open SFconvertbot conversion PR based on `main`, as transformers
-  does; unlike Python, TypeScript never asks the Hub to create that PR (set
-  `DISABLE_SAFETENSORS_CONVERSION` to skip the lookup).
+  does; when there is none, TypeScript asks the safetensors conversion Space to
+  open it (transformers' `spawn_conversion`) and looks again, raising
+  transformers' error if it still does not exist. Offline mode, a pinned
+  revision and `DISABLE_SAFETENSORS_CONVERSION` skip the lookup. Where Python
+  can still load the `.bin` weights (it converts in a background thread),
+  TypeScript needs the converted file.
 - **Latent diffusion.** `ops.vec.ImageDecoder` ports diffusers 0.40
-  `UNet2DConditionModel` (cross-attention down/up blocks, `UNetMidBlock2DCrossAttn`),
-  `AutoencoderKL` (`DownEncoderBlock2D`/`UpDecoderBlock2D`) and `DDIMScheduler`
-  (float32 schedules bit-identical to PyTorch) in `src/_internal/native/diffusers.ts`.
-  Other diffusers blocks raise `NotImplementedError`. `context.seed` draws noise
-  from the TensorCode generator, so seeded samples differ from Python; supply
-  `context.noise` for identical samples.
+  `UNet2DConditionModel`, `AutoencoderKL` and `DDIMScheduler` (float32
+  schedules bit-identical to PyTorch) in `src/_internal/native/diffusers.ts`:
+  every block family those models can run (plain, ResNet-resampling,
+  attention, cross-attention, simple added-KV cross-attention and K-diffusion
+  UNet blocks; all three UNet mid blocks; attention and plain VAE blocks),
+  positional and Gaussian Fourier time embeddings, `default`/`scale_shift`
+  conditioning and `AdaGroupNorm`/`SpatialNorm` conditional norms, and the
+  `silu`/`swish`/`mish`/`gelu`/`relu` activations, with diffusers' module
+  trees and parameter names. Blocks diffusers constructs but cannot run inside
+  these models (skip blocks, encoder blocks in a UNet, UNet blocks in a VAE)
+  raise `ValueError`. `context.seed` draws noise
+  from `new Generator(seed)` exactly like `torch.Generator().manual_seed(seed)`.
 - **Scene language mode.** `Scene.fromLanguageFoundation`/`interpret` port
   `SceneLanguage` over an owned `Idefics3ForConditionalGeneration`
   (`src/_internal/native/idefics3.ts`: SigLIP-style vision tower with
   fractional patch positions, pixel-shuffle connector, Llama text model with
-  grouped-query attention and `default`/`linear`/`llama3` RoPE) and the
+  grouped-query attention and every transformers RoPE type — `default`,
+  `linear`, `dynamic`, `yarn`, `longrope`, `llama3`, `proportional`) and the
   `Idefics3Processor` (`idefics3Processing.ts`: longest-edge LANCZOS resizing,
-  image splitting, fused normalization, `<image>` prompt expansion, Jinja chat
-  templates). `fromLanguageFoundation` reproduces the processor assets
+  image splitting, fused normalization, batches of prompts with any number of
+  images, `<image>` prompt expansion, the image tokens it adds to tokenizers
+  that lack them, Jinja chat templates). Generation is transformers 5.17
+  `generate` (`causalGeneration.ts`, `logitsProcessors.ts`): greedy, sampling,
+  beam search and beam sampling, classifier-free guidance, prompt lookup,
+  chunked prefill, token healing, every logits processor and warper,
+  watermarking with PyTorch's `randperm`, and the stopping criteria including
+  `StopStringCriteria`; `interpret` passes `do_sample=False` as Python does.
+  `fromLanguageFoundation` reproduces the processor assets
   `Idefics3Processor.save_pretrained` writes (so `processor_hashes` equal
-  Python's) for `GPT2Tokenizer` (SmolVLM) and `PreTrainedTokenizerFast`
-  tokenizers; other tokenizer classes raise `NotImplementedError`. Generation
-  is greedy (`interpret` always is) with transformers' logits processors
-  (repetition penalty, n-gram blocking, bad words, minimum lengths, forced
-  BOS/EOS, suppression); beam search, guidance, sequence bias and stop strings
-  raise `NotImplementedError`. One image per prompt. Compute is pure
-  JavaScript: a SmolVLM-256M interpretation of a small image (13 vision tiles)
-  takes minutes.
-- **Out of scope (explicit `NotImplementedError` with a clear message):** image
-  file decoding (callers supply decoded CHW float tensors; resize/normalize
-  helpers are provided). Graph operations stay symbolic stubs exactly as in
-  Python.
+  Python's) for `TokenizersBackend` (including unknown class names),
+  `LlamaTokenizer`, `GPT2Tokenizer`, `T5Tokenizer`, `AlbertTokenizer` and
+  `DebertaV2Tokenizer` (with or without `Fast`); other tokenizer classes raise
+  `NotImplementedError`. A SmolVLM-256M interpretation of a small image (13
+  vision tiles) runs on the WebAssembly kernels in seconds, not minutes.
+- **Images.** `src/_internal/image/` decodes PNG, JPEG (Huffman and arithmetic,
+  sequential/progressive/lossless, libjpeg-turbo's ISLOW IDCT, fancy upsampling
+  and colour tables), GIF, WebP (VP8, VP8L, ALPH, ANMF) and BMP in pure
+  TypeScript (inflate via `node:zlib` when present, a bundled inflater
+  otherwise). `torchvision.ts` reproduces `decode_image` read modes and EXIF
+  orientation; `raster.ts` and `resample.ts` reproduce `PIL.Image.open`,
+  `convert`, `resize` and `exif_transpose`; `fpmath.ts` holds a correctly
+  rounded FMA and glibc's `sin`/`cos`/`sinf` so float filters match
+  bit for bit. `vec/imageProcessing.ts` is the `ViTImageProcessor` over all of
+  them, with center-crop padding, `do_pad` and PyTorch's `NotImplementedError`
+  for BOX/HAMMING. Graph operations stay symbolic stubs exactly as in Python.
 - **External local models.** `integrations.LocalModel` wraps an explicitly
   supplied `@huggingface/transformers` model/processor (optional peer, dynamic
-  import) and is asynchronous.
+  import). Its blocking `complete` runs the same generation in a worker thread
+  with a model loaded there (`fromPretrained` arguments, or an explicit
+  `worker: { module, exportName }` loader for supplied models).
 - **Callbacks.** JavaScript cannot distinguish closures from module functions, so
   persisted callbacks (e.g. `combine`) always need explicit `configuration()`.
-- **Checkpoint RNG.** TypeScript checkpoints store the TensorCode generator state;
-  PyTorch/Python RNG states cannot be restored in TypeScript (and vice versa).
 - **Tokenizer JSON.** Tokenizer configurations embed the canonical backend JSON
   (sorted keys), as Python does. Tools built from foundations persist
   `backend_tokenizer.to_str()` in `tokenizer_json`, `verifier_tokenizer_json`
@@ -294,27 +378,31 @@ others with `ValueError`.
   `serde_json` float parsing, which can move Unigram scores by one ULP
   (`rustJsonF64`). Class-specific transformers tokenizers (T5, DeBERTa-v2,
   ALBERT, ...) rebuild their vocabulary exactly and are loaded exactly; for
-  `T5Tokenizer`, `DebertaV2Tokenizer`, `AlbertTokenizer` and `GPT2Tokenizer` the pipeline that
+  `T5Tokenizer`, `DebertaV2Tokenizer`, `AlbertTokenizer`, `GPT2Tokenizer` and `LlamaTokenizer` the pipeline that
   transformers 5 rebuilds from `tokenizer_config.json` flags is reproduced as
   well (`src/_internal/tokenizers/serialization.ts`). Embedded
   tokenizer JSON, configurations and fingerprints of real foundations (for
   example `google/flan-t5-small`) therefore equal Python's.
-- **Python examples/research scripts** are not ported beyond the quickstart,
-  lifecycle and triage examples in `examples/`.
-- **Integral floats.** JavaScript cannot tell `1` from `1.0`. Configuration keys in
-  `PYTHON_FLOAT_KEYS` (and session float fields) are written as floats; other
-  integral numbers (for example JSON-dumped structured training targets) are
-  written as ints. A Python user who passes an int for a float field
-  (`hidden_dropout_prob=0`) gets a different fingerprint than TypeScript's `0.0`.
-- **Object key order.** Integer-like keys of plain objects are reordered by
-  JavaScript (affects `Retrieve` items keyed by integers and non-string Python dict
-  keys, which decode as decimal strings).
-- **Async providers.** HTTP (`OpenAICompatibleModel`, `JevModel`) and local
-  providers are asynchronous only; use `acall`/`aask`. A redirect raises
+- **Python examples.** `examples/` ports every Python example that does not
+  require the CUDA training host (see `examples/README.md`); the optional
+  ViT/Stable Diffusion image path of `pretrained_latent_lifecycle.py` is not
+  ported.
+- **Blocking providers.** HTTP (`OpenAICompatibleModel`, `JevModel`) and local
+  providers have Python's blocking `complete` (and `completeQuestions` /
+  `completeBatch`), so `op.call` and `ask` work with them: the request runs on
+  a worker thread while the caller blocks on `Atomics.wait`
+  (`src/integrations/blocking.ts`). Environments that cannot block a thread on
+  I/O (browsers, edge runtimes) raise `NotImplementedError` there and keep
+  `acall`/`aask`. An injected `fetch` function cannot cross threads, so a
+  provider built with one is asynchronous only. A redirect raises
   `ProviderHTTPError` with its 3xx `.status`, as in Python.
-- **Plan actions** receive `(state, args)`; plan validation cannot bind keyword
-  arguments against a JavaScript signature. Error observations record JavaScript
-  error names (`Error` where Python records `RuntimeError`).
+- **Plan actions** receive `(state, args)`. Plan validation binds step
+  arguments like `inspect.signature(action).bind(None, **arguments)`, with
+  Python's `TypeError` messages, against the properties the action destructures
+  from `args` (or an explicit `withSignature`/`signatures` declaration). Error
+  observations and policy errors record Python exception names (`Error` →
+  `RuntimeError`, `RangeError` → `ValueError`, system errors by `code`;
+  `src/_internal/pythonErrors.ts`).
 - **Threads.** Python's `RLock`s become single-threaded execution plus a promise
   queue that serializes session persistence.
 
@@ -331,9 +419,18 @@ others with `ValueError`.
 - Operation fingerprints (`src/_internal/fingerprint.ts`) equal Python's for the
   same configuration (`test/internal/ranking.test.ts`), so experience files are
   portable once the training module implements the codec.
-- Experience files and standalone `tensorcode.checkpoint` files are interchangeable.
-  Python directory checkpoints load in TypeScript (their PyTorch/CPython RNG states
-  are validated and ignored); TypeScript directory checkpoints do not load in Python.
+- Python number kinds, dict order and dict key types survive loading and saving:
+  a Python artifact with an int in a float field (`hidden_dropout_prob=0`) or an
+  integral float under another key re-saves and fingerprints identically, and
+  experience and JSON memory files with integer-like keys, `int`/`None`/tuple
+  dict keys and integral floats round-trip byte for byte
+  (`test/internal/jsonValues.test.ts`).
+- Experience files, standalone `tensorcode.checkpoint` files and directory
+  checkpoints are interchangeable. Directory checkpoints store `python_rng`
+  (CPython `random.getstate()`), `torch_rng` (`torch.get_rng_state()`) and
+  `cuda_rng` in Python's layout, and loading restores both generators in
+  either language. Like a CPU-only Python process, TypeScript rejects a
+  checkpoint that carries CUDA generator states.
 - Tool session files (chat, ranking, cognitive session/state, trajectories, JSON
   memory) written by Python load in TypeScript and re-save byte-identically.
 - The Hugging Face cache layout is shared with `huggingface_hub`.

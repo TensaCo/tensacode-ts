@@ -116,17 +116,17 @@ network returns a `Promise`. Pure computation is synchronous.
 | Experience files (`tensorcode.experience`) | Interchangeable | Operation fingerprints equal Python's for the same configuration |
 | Model artifacts (`savePretrained` / `fromPretrained`, Hub) | Interchangeable | Python artifacts load in TS and re-save with a byte-identical manifest. Weights re-save byte-identically except that tied-alias metadata order varies, because Python itself writes that order nondeterministically. The Hub cache layout is shared |
 | Vector operations (`ops.vec`) | Yes | Linear, MLP and native BERT/RoBERTa/DistilBERT transformer variants; T5 text and ViT image encoders |
-| `ImageDecoder` (latent diffusion) | Yes | diffusers cross-attention UNet, AutoencoderKL and DDIM. Pass `context.noise` for samples identical to Python's (seeded noise uses the TensorCode generator) |
-| Text operations (`ops.text`) | Yes | Owned T5 models (generation and likelihood decoding) and external providers. HTTP providers are async-only |
+| `ImageDecoder` (latent diffusion) | Yes | Every diffusers UNet2DConditionModel/AutoencoderKL block family it can run (cross-attention, attention, simple cross-attention, K-diffusion), and DDIM. `context.seed` and `context.noise` both give samples identical to Python's |
+| Text operations (`ops.text`) | Yes | Owned T5 models (generation and likelihood decoding) and external providers. Providers block in `complete` like Python's (worker thread) and have async `acomplete` |
 | Graph operations | Symbolic stubs | Same as Python |
 | `Chatbot`, `Investigator`, `Decision`, `Planner` | Yes | Including cognitive sessions, episodic memory, verifiers and plan execution |
 | `Scene` ranking mode | Yes | CLIP bootstrap via `Scene.fromFoundation` |
-| `Scene` language mode (Idefics3/SmolVLM) | Yes | `Scene.fromLanguageFoundation` and `interpret` with greedy decoding; the processor (image splitting, LANCZOS, prompt expansion) and saved processor assets match Python byte for byte. Pure-JavaScript compute makes a full SmolVLM interpretation slow (minutes on a CPU) |
-| `Trainer`, checkpoints | Yes | SGD, Adam, AdamW. Python directory checkpoints load in TS, but their PyTorch/CPython RNG states are ignored. TS directory checkpoints store the TensorCode RNG and do not load in Python. Standalone checkpoint files are interchangeable |
+| `Scene` language mode (Idefics3/SmolVLM) | Yes | `Scene.fromLanguageFoundation` and `interpret` with greedy decoding; the processor (image splitting, LANCZOS, prompt expansion) and saved processor assets match Python byte for byte. A SmolVLM-256M interpretation takes seconds on a multi-core CPU |
+| `Trainer`, checkpoints | Yes | SGD, Adam, AdamW. Directory and standalone checkpoints are interchangeable, including PyTorch and CPython random states |
 | Native architectures | ALBERT, BERT, RoBERTa, Electra, DistilBERT, DeBERTa-v2, T5, ViT, CLIP, Llama, Idefics3 | transformers 5.17 parameter names; safetensors weights only. Python loads any transformers `AutoModel` for text foundations; TypeScript implements these |
 | Tokenizers | `tokenizer.json` runtime | WordPiece, BPE, Unigram, WordLevel |
 | Integrations | OpenAI-compatible, Jev, Transformers.js `LocalModel` | No implicit retries or redirects |
-| Compute | CPU, pure JavaScript | Random streams differ from PyTorch, so fresh initializations differ; loaded weights are identical |
+| Compute | CPU: WebAssembly SIMD kernels on worker threads, no native dependencies | Random streams equal PyTorch's: `manualSeed(n)` gives Python's fresh weights and dropout masks bit for bit |
 
 [Parity with Python](docs/parity.md) explains how parity is checked, which files
 move between the two languages and every deliberate difference.

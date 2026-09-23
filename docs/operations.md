@@ -50,9 +50,9 @@ shape.
 | Operation | Contract |
 |---|---|
 | `TextEncoder(config)` | Owned T5/BERT-family text transformer: raw text → `output_space`. `readout` is `'sequence'`, `'pooled'` (masked mean) or output encoding |
-| `ImageEncoder(config)` | Owned ViT plus a tensor-only image processor: CHW image → `output_space` |
+| `ImageEncoder(config)` | Owned ViT plus its `ViTImageProcessor`: CHW image → `output_space`. `preprocess` takes tensors, decoded images, file paths, base64 text or data URIs (`apreprocess` also fetches URLs) |
 | `TextDecoder(config)` | `input_space` → generated text through an explicit linear or identity bridge |
-| `ImageDecoder(config)` | Owned latent diffusion (diffusers cross-attention UNet, AutoencoderKL, DDIM): `input_space` → RGB pixels. Sampling needs `context.noise` or `context.seed`; `fromFoundation` imports a diffusers-format repository |
+| `ImageDecoder(config)` | Owned latent diffusion (diffusers UNet2DConditionModel with every block family it can run, AutoencoderKL, DDIM): `input_space` → RGB pixels. Sampling needs `context.noise` or `context.seed`; `fromFoundation` imports a diffusers-format repository |
 | `VocabularyEncoder(config)` | A `vocabulary` list, `dimensions`, optional `output_space`; lowercase regex tokens, mean-pooled trainable embeddings |
 | `Transform(config)` | Owned `linear`, `mlp` or native `transformer`; declared `input_space` and `output_space`; returns a `Latent` |
 | `Classify(config)` | Owned head with `input_space` and `labels`; returns a `Prediction` with `logits`, softmax `probabilities` and `value`/`values` |
@@ -64,6 +64,18 @@ shape.
 Encoders and decoders also live in `tensorcode/ops/vec/encode` and
 `tensorcode/ops/vec/decode`. Their class identities
 (`tensorcode.ops.vec.encode.TextEncoder`, ...) match Python's.
+
+Image files decode without dependencies and give the pixels Python's libraries
+give: `decodeImage(bytesOrPath, { mode, applyExifOrientation })` is
+`torchvision.io.decode_image`, `loadImage(source)` is transformers'
+`load_image_as_tensor`, and `openImage(bytesOrPath)` is `PIL.Image.open`,
+returning a `RasterImage` with `convert`, `resize(size, Resampling.BOX, ...)`,
+`exifTranspose()` and `toTensor()`. PNG, JPEG, GIF, WebP and BMP are supported.
+
+```ts
+const pixels = encoder.preprocess(['photo.jpg', vec.openImage(bytes).convert('RGB')]);
+const thumbnail = vec.openImage('photo.png').resize([64, 64], vec.Resampling.LANCZOS);
+```
 
 Candidate scoring takes
 `new CandidateSet(query, candidates, identities, metadata)`. Candidate tensors
@@ -176,7 +188,14 @@ exchange.
 | `await LocalModel.fromPretrained(modelId, { revision })` or `new LocalModel(model, processor, { modelId })` | An explicitly supplied Transformers.js model and processor (optional peer `@huggingface/transformers`) |
 
 HTTP adapters use `fetch` with one buffered request and no retries or fallback.
-They are **asynchronous only**, so use `acall`/`aask` with them. Redirects,
+Like Python's, their `complete` blocks until the response arrives (the request
+runs on a worker thread), so `op.call` and `text.ask` work with them;
+`acall`/`aask` are the asynchronous forms. `LocalModel.complete` runs the model
+in that worker thread (loaded from the `fromPretrained` arguments, or from an
+explicit `worker: { module, exportName }` loader for a supplied model). In a
+browser main thread, which cannot block, the blocking methods raise
+`NotImplementedError`, and a provider built with an injected `fetch` function
+is asynchronous only. Redirects,
 refusals and truncated responses raise `ProviderError` subclasses:
 `ProviderHTTPError` (with `.status`), `ProviderTimeout` and
 `ProviderProtocolError`. Credentials never appear in configuration or error

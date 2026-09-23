@@ -170,7 +170,8 @@ scene.loss({ pixels, source_id: 'photo:17', question: 'What is on the table?' },
 
 Interpretations are unverified. They are not extracted facts or scene graphs,
 and the receipt carries no boxes or claims. Decoding is greedy. Inference runs
-in pure JavaScript on the CPU, so a SmolVLM interpretation takes minutes.
+on the CPU (WebAssembly SIMD kernels on worker threads), so a SmolVLM-256M
+interpretation takes seconds.
 
 ## Sessions and explicit actions
 
@@ -202,7 +203,17 @@ console.log(result.stopReason, result.experiences);
 ```
 
 Actions receive `(state, args)` and return
-`ActionOutcome(state, receipt, done)`. Execution returns a `PlanExecutionResult`
+`ActionOutcome(state, receipt, done)`. Before any effect, every step's
+arguments are bound like Python's `inspect.signature(action).bind(None,
+**arguments)`: the keyword parameters are the properties the action
+destructures from `args` (`(state, { amount, note = 'none' })` requires
+`amount`, `note` is optional, `...rest` or a plain `args` parameter accepts any
+keyword), and a mismatch raises Python's `TypeError` message (for example
+`missing a required argument: 'amount'`). Declare parameters explicitly with
+`withSignature(fn, { parameters: ['amount', 'note?'] })` or the executor's
+`signatures` option when the source does not show them (bound or native
+functions). A failing action is recorded as an error observation with Python's
+exception name (`RuntimeError` for a JavaScript `Error`). Execution returns a `PlanExecutionResult`
 with a stop reason of `completed`, `abstained`, `policy_error` or
 `budget_exhausted`. Each `OutcomeExperience` converts to training feedback with
 `toTarget(outcome)` or to sourced evidence with `asEvidence()`. The lower-level

@@ -73,10 +73,12 @@ only the model; experiences and chat sessions are saved separately.
 | Checkpoint | Python → TypeScript | TypeScript → Python |
 |---|---|---|
 | Standalone `tensorcode.checkpoint` files (model and optimizer only) | Yes | Yes |
-| Directory checkpoints | Model, optimizer, modes, steps and progress restore. The PyTorch/CPython RNG states are validated but ignored, because TypeScript cannot reproduce those streams | Not supported: TypeScript writes its own generator state |
+| Directory checkpoints | Yes: model, optimizer, modes, steps, progress and the PyTorch and CPython random states | Yes, in the same layout |
 
-To share work across languages, use `savePretrained` artifacts and experience
-files.
+A resumed run draws the same random numbers in either language, so dropout
+masks and sampling continue exactly where the saved run stopped. As in a
+CPU-only Python process, a checkpoint that carries CUDA generator states
+cannot be restored.
 
 ## Compose and trace individual operations
 
