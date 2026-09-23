@@ -1,0 +1,90 @@
+{
+  "schema_version": 2,
+  "state": {
+    "schema_version": 1,
+    "max_records": 64,
+    "revision": 7,
+    "selection": [
+      "h"
+    ],
+    "selection_revision": 7,
+    "evidence": [
+      {
+        "id": "a",
+        "text": "alpha",
+        "source_id": "doc-a"
+      },
+      {
+        "id": "b",
+        "text": "beta beta",
+        "source_id": "doc-b"
+      },
+      {
+        "id": "a@4",
+        "text": "alpha beta",
+        "source_id": "doc-a2"
+      }
+    ],
+    "hypotheses": [
+      {
+        "id": "h",
+        "text": "alpha",
+        "origin": "supplied",
+        "model_provenance": "caller-supplied"
+      }
+    ],
+    "assessments": [
+      {
+        "evidence_id": "a@4",
+        "hypothesis_id": "h",
+        "scores": {
+          "contradiction": 0.0003352377098053694,
+          "support": 0.9993295669555664,
+          "unknown": 0.0003352377098053694
+        },
+        "model_provenance": "a1c6ee28b47071dd4478ea149bf47def5f7b834d52cf089f7c9747cde7673725",
+        "revision": 7
+      }
+    ],
+    "goals": [],
+    "plans": [],
+    "observations": []
+  },
+  "evidence_lineage": {
+    "a": [
+      "a",
+      "a@4"
+    ],
+    "b": [
+      "b"
+    ]
+  },
+  "active_evidence": {},
+  "policy": {
+    "min_support": 0.7,
+    "max_contradiction": 0.2,
+    "max_unknown": 0.3
+  },
+  "inactive_evidence": [
+    "a"
+  ],
+  "retrieval_k": 2,
+  "memory": {
+    "schema_version": 1,
+    "capacity": 4,
+    "records": [
+      {
+        "evidence": {
+          "id": "a@4",
+          "text": "alpha beta",
+          "source_id": "doc-a2"
+        },
+        "episode_id": "episode-0",
+        "question": "alpha?",
+        "outcome": ""
+      }
+    ]
+  },
+  "model_provenance": "a1c6ee28b47071dd4478ea149bf47def5f7b834d52cf089f7c9747cde7673725",
+  "episode": 1
+}

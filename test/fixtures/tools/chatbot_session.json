@@ -1,0 +1,1 @@
+{"format": 1, "model": "e841d75ace9089ebd6c431298741615b0c4552d4c432f9186f68db3eaf50f6d2", "history": [{"source_id": "turn-0", "role": "user", "text": "hello"}, {"source_id": "turn-1", "role": "assistant", "text": ""}, {"source_id": "turn-2", "role": "user", "text": "world answer"}, {"source_id": "turn-3", "role": "assistant", "text": ""}]}

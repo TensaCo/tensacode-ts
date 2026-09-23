@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "max_records": 16,
+  "revision": 6,
+  "selection": [
+    "h"
+  ],
+  "selection_revision": 3,
+  "evidence": [
+    {
+      "id": "e",
+      "text": "source words",
+      "source_id": "document"
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "h",
+      "text": "interpretation",
+      "origin": "generated",
+      "model_provenance": "weights-a"
+    }
+  ],
+  "assessments": [
+    {
+      "evidence_id": "e",
+      "hypothesis_id": "h",
+      "scores": {
+        "support": 0.25,
+        "contradiction": 0.5,
+        "unknown": 0.25
+      },
+      "model_provenance": "judge-a",
+      "revision": 3
+    }
+  ],
+  "goals": [
+    {
+      "id": "g",
+      "text": "investigate",
+      "source_id": "user"
+    }
+  ],
+  "plans": [
+    {
+      "id": "p",
+      "steps": [
+        "inspect",
+        "revise"
+      ],
+      "predicted_outcomes": [
+        "new evidence"
+      ]
+    }
+  ],
+  "observations": [
+    {
+      "id": "o",
+      "text": "actual response \u2615",
+      "source_id": "receipt-1"
+    }
+  ]
+}

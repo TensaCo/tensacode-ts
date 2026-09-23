@@ -1,0 +1,1 @@
+{"format":"tensorcode-memory","version":1,"next_id":2,"records":[{"source_id":"memory-00000001","kind":"observation","value":"Customer asked about a card fee \u2615","metadata":{"turn":1}},{"source_id":"explicit","kind":"response","value":{"nested":[1,2.5,null]},"metadata":{"turn":2}}]}
