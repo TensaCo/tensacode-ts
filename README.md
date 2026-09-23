@@ -129,8 +129,9 @@ network returns a `Promise`. Pure computation is synchronous.
 | Integrations | OpenAI-compatible, Jev, Transformers.js `LocalModel` | No implicit retries or redirects |
 | Compute | CPU, pure JavaScript | Random streams differ from PyTorch, so fresh initializations differ; loaded weights are identical |
 
-[DESIGN.md](DESIGN.md) has the full Python-to-TypeScript mapping, the
-conventions and the deliberate differences.
+[Parity with Python](docs/parity.md) explains how parity is checked, which files
+move between the two languages and every deliberate difference.
+[DESIGN.md](DESIGN.md) maps each Python module to its TypeScript file.
 
 ## Guides
 
@@ -142,6 +143,8 @@ conventions and the deliberate differences.
 - [Training](docs/training.md): tracing, experience, replay, checkpoints and
   calibration.
 - [Examples](examples/README.md): runnable programs.
+- [Parity with Python](docs/parity.md): what matches, what is interchangeable
+  and what differs on purpose.
 - Full documentation, validation results and the Python guides:
   [tensorcode.dev/docs](https://tensorcode.dev/docs/).
 
