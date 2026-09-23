@@ -240,14 +240,17 @@ def generate_flan():
     transform = text.Transform.from_foundation(FLAN, revision=FLAN_SNAPSHOT, local_files_only=True, config={
         'instructions': 'Answer the question.', 'generation': {'max_new_tokens': 8}})
     question = (text.Message('user', 'What color is the sky?'),)
+    from tensorcode._internal.training.persistence import bindings
     configured = classify.configuration()
-    # TypeScript embeds the canonical backend tokenizer JSON (floats re-serialized
-    # by JavaScript), a documented difference; compare everything else exactly.
-    tokenizer_json = configured['tokenizer'].pop('json')
+    # The embedded tokenizer JSON went through Rust ``Tokenizer.from_str``,
+    # whose float parsing moves some Unigram scores by one ULP; TypeScript
+    # reproduces it, so configurations and fingerprints match exactly.
+    tokenizer_json = configured['tokenizer']['json']
     write_json('text/flan.json', {
         'snapshot': FLAN_SNAPSHOT,
         'classify': {
-            'configuration_without_tokenizer_json_sha256': hashlib.sha256(json.dumps(configured, sort_keys=True).encode()).hexdigest(),
+            'configuration_sha256': hashlib.sha256(json.dumps(configured, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+            'fingerprints': {name: record['fingerprint'] for name, record in bindings(classify.operation_bindings()).items()},
             'tokenizer_vocab_size': len(json.loads(tokenizer_json)['model']['vocab']),
             'foundation': configured['foundation'],
             'scores': classify.model.score_alternatives(classify._scoring_request(value, None), classify._alternatives()),

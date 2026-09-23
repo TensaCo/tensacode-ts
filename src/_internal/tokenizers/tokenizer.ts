@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { Tensor, tensor } from '../../nn/tensor.js';
 import { ValueError } from '../../errors.js';
 import { parseJsonStrict, type JsonObject } from '../json.js';
-import { canonicalBackendJson } from './serialization.js';
+import { canonicalBackendJson, loadsThroughRust } from './serialization.js';
 import { buildModel, type TokenModel } from './models.js';
 import {
   buildDecoder, buildNormalizer, buildPostProcessor, buildPreTokenizer,
@@ -301,8 +301,8 @@ function cleanUpTokenization(text: string): string {
 }
 
 /** Canonical backend JSON (``json.dumps(json.loads(to_str()), sort_keys, compact)`` with padding/truncation reset). */
-export function canonicalTokenizerJson(text: string, tokenizerClass: string | null = null): string {
-  return canonicalBackendJson(text, { tokenizerClass });
+export function canonicalTokenizerJson(text: string, tokenizerClass: string | null = null, rustParsed = false): string {
+  return canonicalBackendJson(text, { tokenizerClass, rustParsed });
 }
 
 export class FastTokenizer {
@@ -324,11 +324,20 @@ export class FastTokenizer {
       truncationSide?: 'left' | 'right';
       /** ``jsonText`` is already the canonical backend JSON (from a saved configuration). */
       canonical?: boolean;
+      /**
+       * The backend is built with Rust ``Tokenizer.from_str``/``from_file`` in
+       * Python, whose float parsing can move Unigram scores by one ULP.
+       */
+      rustParsed?: boolean;
       /** transformers tokenizer class whose pipeline construction is emulated. */
       tokenizerClass?: string | null;
     } = {},
   ) {
-    this.jsonText = settings.canonical ? jsonText : canonicalTokenizerJson(jsonText, settings.tokenizerClass ?? null);
+    if (settings.canonical) {
+      this.jsonText = settings.rustParsed ? canonicalBackendJson(jsonText, { rustParsed: true }) : jsonText;
+    } else {
+      this.jsonText = canonicalTokenizerJson(jsonText, settings.tokenizerClass ?? null, settings.rustParsed ?? false);
+    }
     this.backend = Tokenizer.fromString(this.jsonText);
     const options = settings.options ?? {};
     this.options = {
@@ -363,6 +372,8 @@ export class FastTokenizer {
     return new FastTokenizer(value.json, {
       specialTokens: value.special_tokens ?? {}, options: value.options ?? {},
       paddingSide: value.padding_side ?? 'right', truncationSide: value.truncation_side ?? 'right', canonical: true,
+      // Python ``_tokenizer(config)`` uses ``Tokenizer.from_str(config['json'])``.
+      rustParsed: true,
     });
   }
 
@@ -371,7 +382,7 @@ export class FastTokenizer {
    * as used by ranking/retrieval tools (``tokenizer_json`` + ``tokenizer_special_tokens``).
    */
   static fromJsonString(json: string, specialTokens: Record<string, string> = {}): FastTokenizer {
-    return new FastTokenizer(json, { specialTokens, canonical: false });
+    return new FastTokenizer(json, { specialTokens, canonical: false, rustParsed: true });
   }
 
   /** ``AutoTokenizer.from_pretrained(directory, use_fast=True)`` for a downloaded snapshot. */
@@ -414,7 +425,7 @@ export class FastTokenizer {
     const paddingSide = side(config.padding_side);
     const truncationSide = side(config.truncation_side);
     return new FastTokenizer(json, {
-      specialTokens, options, tokenizerClass,
+      specialTokens, options, tokenizerClass, rustParsed: loadsThroughRust(tokenizerClass),
       ...(paddingSide ? { paddingSide } : {}),
       ...(truncationSide ? { truncationSide } : {}),
     });

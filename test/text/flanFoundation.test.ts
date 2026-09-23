@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import * as text from '../../src/ops/text/index.js';
 import { PYTHON_FLOAT_KEYS, pythonJsonDumps, sha256Hex } from '../../src/_internal/json.js';
+import { bindingRecords } from '../../src/_internal/fingerprint.js';
 import { cachedSnapshot } from '../helpers/hub.js';
 import { fixtureJson } from '../helpers/fixtures.js';
 
@@ -20,15 +21,15 @@ describe('flan-t5-small owned text operations', () => {
     });
     const configuration = classify.configuration();
     expect(configuration.foundation).toEqual(expected.classify.foundation);
-    // TypeScript embeds the canonical backend tokenizer JSON (a documented difference: its vocabulary
-    // scores are re-serialized by JavaScript), so operation fingerprints of real foundations differ.
-    // Everything else matches once ``length_penalty`` (flan ``task_specific_params``) is a float key.
-    const tokenizer = { ...(configuration.tokenizer as Record<string, unknown>) };
+    // Including the embedded tokenizer JSON: its Unigram scores follow Rust
+    // ``Tokenizer.from_str`` float parsing, as in Python.
+    const tokenizer = configuration.tokenizer as Record<string, unknown>;
     expect(JSON.parse(tokenizer.json as string).model.vocab.length).toBe(expected.classify.tokenizer_vocab_size);
-    delete tokenizer.json;
     const floatKeys = new Set([...PYTHON_FLOAT_KEYS, 'length_penalty']);
-    const withoutJson = pythonJsonDumps({ ...configuration, tokenizer }, { sortKeys: true, floatKeys });
-    expect(sha256Hex(withoutJson)).toBe(expected.classify.configuration_without_tokenizer_json_sha256);
+    const serialized = pythonJsonDumps(configuration, { sortKeys: true, floatKeys, separators: [',', ':'] });
+    expect(sha256Hex(serialized)).toBe(expected.classify.configuration_sha256);
+    const fingerprints = Object.fromEntries(Object.entries(bindingRecords(classify.operationBindings())).map(([name, record]) => [name, record.fingerprint]));
+    expect(fingerprints).toEqual(expected.classify.fingerprints);
     const value = [new text.Message('user', 'I was charged twice for my subscription.')];
     const scores = classify.nativeModel.scoreAlternatives(classify._scoringRequest(value, null), classify._alternatives());
     scores.forEach((score, index) => expect(score).toBeCloseTo(expected.classify.scores[index], 3));

@@ -258,9 +258,15 @@ others with `ValueError`.
   persisted callbacks (e.g. `combine`) always need explicit `configuration()`.
 - **Checkpoint RNG.** TypeScript checkpoints store the TensorCode generator state;
   PyTorch/Python RNG states cannot be restored in TypeScript (and vice versa).
-- **Tokenizer JSON.** Artifacts created by TypeScript `fromFoundation` embed the
-  canonical backend JSON (sorted keys); Python-created artifacts are reused
-  verbatim, so Python → TypeScript loading is exact.
+- **Tokenizer JSON.** Artifacts embed the canonical backend JSON (sorted keys),
+  as Python does. Wherever Python builds the backend with Rust
+  `Tokenizer.from_str`/`from_file` (tokenizer configurations, tool
+  `tokenizer_json`, generic fast tokenizers), TypeScript reproduces the Rust
+  `serde_json` float parsing, which can move Unigram scores by one ULP
+  (`rustJsonF64`). Class-specific transformers tokenizers (T5, DeBERTa-v2,
+  ALBERT, ...) rebuild their vocabulary exactly and are loaded exactly. Embedded
+  tokenizer JSON, configurations and fingerprints of real foundations (for
+  example `google/flan-t5-small`) therefore equal Python's.
 - **Python examples/research scripts** are not ported beyond the quickstart,
   lifecycle and triage examples in `examples/`.
 - **Integral floats.** JavaScript cannot tell `1` from `1.0`. Configuration keys in

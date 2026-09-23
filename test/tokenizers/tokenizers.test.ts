@@ -1,7 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FastTokenizer } from '../../src/_internal/tokenizers/index.js';
-import { sha256Hex } from '../../src/_internal/json.js';
+import { pythonFloatRepr, sha256Hex } from '../../src/_internal/json.js';
+import { rustJsonF64 } from '../../src/_internal/tokenizers/serialization.js';
 import { cachedSnapshot } from '../helpers/hub.js';
 
 interface Encoding { text: string; ids: number[]; tokens: string[]; no_special: number[]; decoded: string; decoded_skip: string }
@@ -70,4 +73,42 @@ describe('cached Hugging Face tokenizers', () => {
       check(tokenizer, record);
     });
   }
+});
+
+describe('Rust tokenizers float parsing (serde_json without float_roundtrip)', () => {
+  // [JSON number, the value Rust Tokenizer.from_str parses, as Python repr]
+  const pairs: [string, string][] = [
+    ['-2.0122928619384766', '-2.012292861938477'], ['-11.573076248168945', '-11.573076248168944'],
+    ['-27.346018365555402', '-27.3460183655554'], ['-10.887551307678223', '-10.887551307678224'],
+    ['-12.243208885192871', '-12.243208885192873'], ['-9.678209132777223', '-9.678209132777225'],
+    ['-11.254974365234375', '-11.254974365234377'], ['-11.850688807410034', '-11.850688807410034'],
+    ['-2.5162914485619368', '-2.5162914485619368'], ['-1.6489629317261454e-05', '-1.6489629317261454e-05'],
+    ['-9.23635192279068e-05', '-9.23635192279068e-05'], ['0.0', '0.0'], ['-3', '-3.0'],
+  ];
+  it('matches the values Rust produced', () => {
+    for (const [input, output] of pairs) expect(pythonFloatRepr(rustJsonF64(input)), input).toBe(output);
+  });
+
+  it('applies to configurations and generic tokenizer files, not class-specific rebuilds', async () => {
+    const json = JSON.stringify({
+      version: '1.0', truncation: null, padding: null, added_tokens: [], normalizer: null,
+      pre_tokenizer: { type: 'Metaspace', replacement: '▁', prepend_scheme: 'always', split: true }, post_processor: null,
+      decoder: { type: 'Metaspace', replacement: '▁', prepend_scheme: 'always', split: true },
+      model: { type: 'Unigram', unk_id: 0, vocab: [['<unk>', 0.0], ['▁', -2.0122928619384766], ['▁hello', -3.5]], byte_fallback: false },
+    });
+    const score = (tokenizer: FastTokenizer) => JSON.parse(tokenizer.configuration().json).model.vocab[1][1];
+    const configured = FastTokenizer.fromConfiguration({ json, options: {}, special_tokens: { unk_token: '<unk>' }, padding_side: 'right', truncation_side: 'right' } as never);
+    expect(configured.configuration().json).toContain('-2.012292861938477');
+    expect(score(FastTokenizer.fromJsonString(json, { unk_token: '<unk>' }))).toBe(-2.012292861938477);
+    const directory = mkdtempSync(join(tmpdir(), 'tensorcode-unigram-'));
+    try {
+      writeFileSync(join(directory, 'tokenizer.json'), json);
+      writeFileSync(join(directory, 'tokenizer_config.json'), JSON.stringify({ unk_token: '<unk>' }));
+      expect(score(await FastTokenizer.fromDirectory(directory))).toBe(-2.012292861938477);
+      writeFileSync(join(directory, 'tokenizer_config.json'), JSON.stringify({ unk_token: '<unk>', tokenizer_class: 'DebertaV2Tokenizer' }));
+      expect(score(await FastTokenizer.fromDirectory(directory))).toBe(-2.0122928619384766);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });
