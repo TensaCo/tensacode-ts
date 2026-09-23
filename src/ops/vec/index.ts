@@ -18,3 +18,9 @@ export type { FromModuleOptions, OwnedFoundationOptions, Readout } from '../../_
 export type { TextReadout, TextEncoderFoundationOptions, TextDecoderFoundationOptions, Bridge } from '../../_internal/vec/text.js';
 export type { ImageReadout, ImageFoundationOptions, ProcessedImages } from '../../_internal/vec/vision.js';
 export type { PatchFromModuleOptions, PatchModule } from '../../_internal/vec/patch.js';
+/** Image decoding (``torchvision.io.decode_image``, transformers ``load_image_as_tensor``, ``PIL.Image.open``). */
+export {
+  decodeImage, loadImage, loadImageAsync, openImage, RasterImage, Resampling,
+  type EncodedImage, type ImageReadMode, type RasterMode, type RasterInfo,
+} from '../../_internal/image/index.js';
+export type { ImageInputs, ImageSource } from '../../_internal/vec/imageProcessing.js';

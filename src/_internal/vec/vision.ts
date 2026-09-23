@@ -4,7 +4,8 @@
  */
 import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Parameter, Tensor, arange, ones, randn, tensor } from '../../nn/tensor.js';
+import { Parameter, Tensor, arange, ones, tensor, zeros } from '../../nn/tensor.js';
+import { normal_ } from '../../nn/init.js';
 import { noGrad } from '../../nn/autograd.js';
 import { cat, meshgrid, stack } from '../../nn/ops/shape.js';
 import { ValueError } from '../../errors.js';
@@ -19,7 +20,8 @@ import { NativeConfig } from '../native/config.js';
 import { keyPaddingBias } from '../native/modules.js';
 import { ViTModel } from '../native/vit.js';
 import { loadNativeFoundation } from '../native/foundation.js';
-import { ImageProcessor } from './imageProcessing.js';
+import { ImageProcessor, type ImageInputs } from './imageProcessing.js';
+import type { RasterImage } from '../image/raster.js';
 import { pythonList, spaceJson, unknownKeys } from './owned.js';
 
 export type ImageReadout = 'sequence' | 'pooled' | 'output_encoding';
@@ -97,7 +99,7 @@ export class ImageEncoder extends LatentOperation<Tensor | ProcessedImages, Late
     this.readout = readout;
     const hidden = native.hiddenSize;
     if (readout === 'output_encoding') {
-      const initial = noGrad(() => randn([1, 1, hidden]).mul(0.02));
+      const initial = normal_(zeros([1, 1, hidden]), 0, 0.02); // nn.init.normal_(std=0.02)
       this.outputEncoding = this.registerParameter('output_encoding', new Parameter(initial));
     }
     this.outputSpace = Space.fromConfig(cfg.output_space);
@@ -122,9 +124,19 @@ export class ImageEncoder extends LatentOperation<Tensor | ProcessedImages, Late
     }
   }
 
-  /** Run the owned processor over decoded tensors; output uses processed-image coordinates. */
-  preprocess(images: Tensor | readonly Tensor[]): ProcessedImages {
+  /**
+   * Run the owned processor assets (``ViTImageProcessor(images=...)``) over
+   * tensors, decoded {@link RasterImage}s or string sources (file paths,
+   * base64 text, data URIs); output uses processed-image coordinates. Use
+   * {@link apreprocess} for ``http(s)://`` URLs.
+   */
+  preprocess(images: ImageInputs): ProcessedImages {
     return this.processor.preprocess(images);
+  }
+
+  /** {@link preprocess} that also fetches ``http(s)://`` image URLs. */
+  apreprocess(images: ImageInputs): Promise<ProcessedImages> {
+    return this.processor.apreprocess(images);
   }
 
   private pixels(value: unknown): { pixels: Tensor; single: boolean } {
@@ -264,6 +276,9 @@ export class ImageEncoder extends LatentOperation<Tensor | ProcessedImages, Late
       context_space: spaceJson(contextSpace),
       foundation: { repo: String(repo), revision, resolved_revision: loaded.commitHash },
     };
-    return new this(config, { [VISION_INTERNAL]: true, model: loaded.model as ViTModel }).eval();
+    // Python constructs the encoder (drawing its random initialization), then loads the foundation weights.
+    const result = new this(config);
+    (result as unknown as { model: ViTModel }).model.loadStateDict(loaded.model.stateDict(), { strict: true });
+    return result.eval();
   }
 }
