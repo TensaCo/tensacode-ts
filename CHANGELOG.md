@@ -61,6 +61,10 @@ deliberate. See [Parity with Python](docs/parity.md) for what remains.
   its conversion pull request, and TypeScript asks the conversion Space to
   open one when none exists.
 - **`uint16` tensors**, so 16-bit PNGs decode to `uint16` as in torchvision.
+- Optimizer options accept `float()`/`int()` markers
+  (`new AdamW(params, { weightDecay: float(0) })` is saved as `0.0`, like
+  Python's `weight_decay=0.0`), and hyperparameters loaded from a Python
+  checkpoint keep their kinds when saved again.
 - 17 more ported examples. Every Python example that does not need the CUDA
   training host has a TypeScript port, except the optional Stable Diffusion
   image path of `pretrained_latent_lifecycle.py`.

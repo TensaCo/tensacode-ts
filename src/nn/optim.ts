@@ -8,6 +8,16 @@
 import { noGrad } from './autograd.js';
 import { Tensor, zerosLike, scalar } from './tensor.js';
 import { shapesEqual } from './shape.js';
+import {
+  isPythonNumber, pythonKindOf, setPythonNumberKind, transferPythonNumberKind, unboxNumber, type PythonFloat, type PythonInt,
+} from '../_internal/json.js';
+
+/**
+ * A hyperparameter: a number, or a ``float()``/``int()`` marker from
+ * ``tensorcode`` that fixes how a whole number is saved (``float(0)`` is
+ * written ``0.0``, as Python writes ``weight_decay=0.0``).
+ */
+export type Hyperparameter = number | PythonFloat | PythonInt;
 
 export type ParamGroupOptions = Record<string, number | boolean | readonly number[]>;
 
@@ -50,7 +60,10 @@ export abstract class Optimizer {
         if (!(value instanceof Tensor)) throw new TypeError('optimizer parameters must be tensors');
         if (!value.requiresGrad) throw new Error('optimizer parameters must require gradients');
       }
-      return { ...structuredCloneOptions(defaults), ...options, params: values };
+      const merged: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(defaults)) assignOption(merged, key, value);
+      for (const [key, value] of Object.entries(options)) assignOption(merged, key, value);
+      return Object.assign(merged, { params: values }) as ParamGroup;
     });
     const all = this.paramGroups.flatMap((group) => group.params);
     if (new Set(all).size !== all.length) throw new Error('some parameters appear in more than one parameter group');
@@ -79,7 +92,7 @@ export abstract class Optimizer {
         if (!index.has(param)) index.set(param, next++);
         return index.get(param)!;
       });
-      return { ...structuredCloneOptions(options), params: ids };
+      return Object.assign(copyOptions(group, options), { params: ids });
     });
     const state: Record<string, Record<string, Tensor>> = {};
     for (const [param, slots] of this.state) {
@@ -118,7 +131,9 @@ export abstract class Optimizer {
     groups.forEach((saved, groupIndex) => {
       const current = this.paramGroups[groupIndex]!;
       for (const [key, value] of Object.entries(saved)) {
-        if (key !== 'params') current[key] = structuredCloneValue(value);
+        if (key === 'params') continue;
+        current[key] = structuredCloneValue(value);
+        transferKinds(current, key, saved, key);
       }
     });
     this.state.clear();
@@ -139,8 +154,39 @@ function structuredCloneValue(value: unknown): unknown {
   return Array.isArray(value) ? [...value] : value;
 }
 
-function structuredCloneOptions(options: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(options).map(([key, value]) => [key, structuredCloneValue(value)]));
+/** ``target[key] = value`` with float()/int() markers (also inside arrays) unboxed and their kinds recorded. */
+function assignOption(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (Array.isArray(value)) {
+    const copy = value.map((item) => unboxNumber(item));
+    value.forEach((item, index) => {
+      if (isPythonNumber(item)) setPythonNumberKind(copy, index, pythonKindOf(item));
+    });
+    target[key] = copy;
+    return;
+  }
+  target[key] = unboxNumber(value);
+  if (isPythonNumber(value)) setPythonNumberKind(target, key, pythonKindOf(value));
+}
+
+/** Copy ``source[key]`` kinds (per element for arrays) onto ``target[key]``. */
+function transferKinds(target: Record<string, unknown>, key: string, source: Record<string, unknown>, sourceKey: string): void {
+  const from = source[sourceKey];
+  const to = target[key];
+  if (Array.isArray(from) && Array.isArray(to)) {
+    from.forEach((_, index) => transferPythonNumberKind(to, index, from, index));
+    return;
+  }
+  transferPythonNumberKind(target, key, source, sourceKey);
+}
+
+/** Copies of ``options`` (arrays copied) keeping the Python number kinds recorded on ``source``. */
+function copyOptions(source: Record<string, unknown>, options: Record<string, unknown>): Record<string, unknown> {
+  const copy: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(options)) {
+    copy[key] = structuredCloneValue(value);
+    transferKinds(copy, key, source, key);
+  }
+  return copy;
 }
 
 function number(group: ParamGroup, key: string): number {
@@ -150,10 +196,10 @@ function number(group: ParamGroup, key: string): number {
 }
 
 export interface SGDOptions {
-  lr?: number;
-  momentum?: number;
-  dampening?: number;
-  weightDecay?: number;
+  lr?: Hyperparameter;
+  momentum?: Hyperparameter;
+  dampening?: Hyperparameter;
+  weightDecay?: Hyperparameter;
   nesterov?: boolean;
   maximize?: boolean;
 }
@@ -163,7 +209,7 @@ export class SGD extends Optimizer {
 
   constructor(params: Iterable<Tensor> | Iterable<ParamGroupInput>, options: SGDOptions = {}) {
     const lr = options.lr ?? 1e-3;
-    if (!(lr >= 0)) throw new RangeError('invalid learning rate');
+    if (!(unboxNumber(lr) >= 0)) throw new RangeError('invalid learning rate');
     super(params, {
       lr, momentum: options.momentum ?? 0, dampening: options.dampening ?? 0,
       weight_decay: options.weightDecay ?? 0, nesterov: options.nesterov ?? false, maximize: options.maximize ?? false,
@@ -211,10 +257,10 @@ export class SGD extends Optimizer {
 }
 
 export interface AdamOptions {
-  lr?: number;
-  betas?: readonly [number, number];
-  eps?: number;
-  weightDecay?: number;
+  lr?: Hyperparameter;
+  betas?: readonly [Hyperparameter, Hyperparameter];
+  eps?: Hyperparameter;
+  weightDecay?: Hyperparameter;
   amsgrad?: boolean;
   maximize?: boolean;
 }
@@ -225,7 +271,8 @@ export class Adam extends Optimizer {
   constructor(params: Iterable<Tensor> | Iterable<ParamGroupInput>, options: AdamOptions = {}, decoupledDefaultDecay = 0) {
     const betas = options.betas ?? [0.9, 0.999];
     const lr = options.lr ?? 1e-3;
-    if (!(lr >= 0) || !(betas[0] >= 0 && betas[0] < 1) || !(betas[1] >= 0 && betas[1] < 1)) {
+    const [beta1, beta2] = [unboxNumber(betas[0]), unboxNumber(betas[1])];
+    if (!(unboxNumber(lr) >= 0) || !(beta1 >= 0 && beta1 < 1) || !(beta2 >= 0 && beta2 < 1)) {
       throw new RangeError('invalid Adam hyperparameters');
     }
     super(params, {

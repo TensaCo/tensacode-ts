@@ -226,9 +226,9 @@ repositories, so it never loads weights a third party proposed.
 - JavaScript cannot tell a closure from a module function, so a saved callback
   (for example `combine`) always needs an explicit `configuration()`.
 - Unmarked whole numbers in your own code follow the field's Python type (see
-  [numbers and dictionaries](#numbers-and-dictionaries)). Optimizer options do
-  not take `float()`/`int()` markers, so a whole-number learning rate is saved
-  as an int.
+  [numbers and dictionaries](#numbers-and-dictionaries)); write `float(1)` where
+  Python code writes `1.0`, including optimizer options
+  (`new AdamW(params, { weightDecay: float(0) })`).
 - Decoded dictionaries with tuple keys are `Map`s whose tuple keys compare by
   identity.
 

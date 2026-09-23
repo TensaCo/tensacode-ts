@@ -12,7 +12,7 @@ import { noGrad } from '../../nn/autograd.js';
 import { Adam, AdamW, Optimizer, SGD, type OptimizerStateDict } from '../../nn/optim.js';
 import { ValueError } from '../../errors.js';
 import { validateBindings } from '../fingerprint.js';
-import { isPlainObject } from '../json.js';
+import { isPlainObject, transferPythonNumberKind } from '../json.js';
 import {
   Codec, bindingsJson, parseArtifact, pythonCompare, readArtifact, writeArtifact,
 } from './persistence.js';
@@ -157,7 +157,14 @@ export function pythonOptimizerState(optimizer: Optimizer): Map<string, unknown>
   const groups = state.param_groups.map((group) => {
     const copy: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(group)) {
-      copy[key] = key === 'betas' && Array.isArray(value) ? Object.freeze([...value]) : value;
+      if (key === 'betas' && Array.isArray(value)) {
+        const betas = [...value];
+        value.forEach((_, index) => transferPythonNumberKind(betas, index, value, index));
+        copy[key] = Object.freeze(betas);
+      } else {
+        copy[key] = value;
+        transferPythonNumberKind(copy, key, group, key);
+      }
     }
     return copy;
   });
