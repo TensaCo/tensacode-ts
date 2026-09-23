@@ -11,8 +11,8 @@
  * `target` ('0'/'1'). VSR labels evaluate explicit yes/no judgments. Free
  * descriptions are preserved for review, not automatically scored as factual.
  * No training occurs. Images are decoded and thumbnailed exactly as Pillow's
- * `Image.open(...).convert('RGB').thumbnail((1024, 1024))`. Pure JavaScript
- * compute makes each SmolVLM interpretation take minutes.
+ * `Image.open(...).convert('RGB').thumbnail((1024, 1024))`. A SmolVLM-256M
+ * interpretation takes several seconds on a multi-core CPU.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';

@@ -66,9 +66,13 @@ core so that owned models train, save and load with zero native dependencies:
   without WebAssembly SIMD or workers. Products reduce in float32 (four lanes,
   like PyTorch's vectorized CPU kernels), and every output element is computed
   identically whatever the batch size, tile or thread count, so results are
-  deterministic and batch invariant. Activations, layer norm, permutes,
-  arithmetic and the fused Adam(W) update are bit-identical to the JavaScript
-  formulas. Without gradients, float32 attention is one fused kernel that never
+  deterministic and batch invariant. Without gradients, the vision MLP
+  (`fc1`, GELU, `fc2`) and self-attention blocks of Idefics3, CLIP and ViT run
+  as one kernel call each (`feedForward`, `selfAttention` in
+  `src/_internal/native/modules.ts`), keeping intermediates in kernel memory;
+  their results are bit-identical to the separate calls. Activations, layer
+  norm, permutes, arithmetic and the fused Adam(W) update are bit-identical to
+  the JavaScript formulas. Without gradients, float32 attention is one fused kernel that never
   materializes the attention matrix (`enableGqa` shares key/value heads like
   PyTorch's `enable_gqa`). float16/bfloat16 results of products, convolution,
   softmax and layer norm are computed in float32 and rounded to the dtype, as

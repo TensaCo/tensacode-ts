@@ -57,7 +57,7 @@ Python examples do; selected file contents are sent to that endpoint.
 | [`evaluateCognition.ts`](evaluateCognition.ts) (`evaluate_cognition.py`) | Cognitive Chatbot + evidence cases → answers, abstentions, omission/replacement controls, episodic retrieval; optional component assembly |
 | [`evaluateTypedDecisions.ts`](evaluateTypedDecisions.ts) (`evaluate_typed_decisions.py`) | Foundation + Banking77 rows / reviewed candidates → generated-JSON vs likelihood decoding validity, accuracy and calibration |
 | [`trainScene.ts`](trainScene.ts) (`train_scene.py`) | Images + candidate descriptions → trained scene ranker with image/workspace ablations |
-| [`evaluateSceneLanguage.ts`](evaluateSceneLanguage.ts) (`evaluate_scene_language.py`) | Images + spatial yes/no captions → judgments under real, blank and shuffled images (SmolVLM; minutes per interpretation on a CPU) |
+| [`evaluateSceneLanguage.ts`](evaluateSceneLanguage.ts) (`evaluate_scene_language.py`) | Images + spatial yes/no captions → judgments under real, blank and shuffled images (SmolVLM-256M: several seconds per interpretation on a multi-core CPU) |
 | [`documentSearch.ts`](documentSearch.ts) (`document_search.py`) | Text/Markdown directory + question → answer with validated citations of retrieved excerpts |
 | [`researchAssistant.ts`](researchAssistant.ts) (`research_assistant.py`) | Local documents + question → bounded `actionLoop` of search/read/finish actions with receipts |
 | [`imageInspection.ts`](imageInspection.ts) (`image_inspection.py`) | One image + question → answer from a Transformers.js `LocalModel` or an OpenAI-compatible endpoint |

@@ -157,6 +157,16 @@ are computed in float32 and rounded once, where PyTorch's float16 CPU
 convolution accumulates in float16, so they agree to a few units in the last
 place.
 
+Speed and memory, measured against PyTorch 2 on the same 20-core AArch64 CPU:
+an electra-base forward pass (8 x 128 tokens) takes as long as in PyTorch,
+and a training step about 1.5 times as long. A SmolVLM-256M interpretation of
+one 640 x 480 image takes about 7 s for one token (PyTorch: 5 s) and 9 s for
+32 tokens (PyTorch: 12 s), with a similar peak memory (3.6 GB, PyTorch
+3.2 GB). On Linux, part of the remaining time goes to page faults on fresh
+result buffers; starting Node with `GLIBC_TUNABLES=glibc.malloc.hugetlb=1`
+(glibc 2.35 or newer) backs large buffers with transparent huge pages, which
+made the SmolVLM vision encoder about 10% faster.
+
 PyTorch initializes CUDA during a training step on a machine with a GPU, even
 when every tensor is on the CPU, so a directory checkpoint that Python saves
 there carries CUDA generator states and TypeScript rejects it. To move such a

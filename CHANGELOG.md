@@ -141,6 +141,12 @@ deliberate. See [Parity with Python](docs/parity.md) for what remains.
   Too few image features raise torch's `RuntimeError`.
 - Generated model cards import tools from `tensorcode/tools` (and operations
   from their entry points) instead of `tensorcode`, which does not export them.
+- Worker threads no longer keep every large kernel result alive. One
+  SmolVLM-256M interpretation peaked at 13-16 GB of memory; it now peaks at
+  3.6 GB (Python: 3.2 GB).
+- Without gradients, the Idefics3, CLIP and ViT vision MLP and self-attention
+  blocks run as one kernel call each, with bit-identical results. The
+  SmolVLM-256M vision encoder is about 20% faster.
 
 ## 0.4.0-alpha.3
 
