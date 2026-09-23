@@ -356,9 +356,9 @@ export class RasterImage {
 
   /**
    * ``torchvision.transforms.functional.pil_to_tensor``: a ``[bands, H, W]``
-   * tensor. Mode ``1`` gives ``bool``, ``I``/``I;16`` give ``int32`` (TypeScript
-   * has no ``uint16`` tensors; values are exact), ``F`` gives ``float32`` and
-   * the other modes ``uint8`` (``P`` gives palette indices).
+   * tensor. Mode ``1`` gives ``bool``, ``I`` gives ``int32``, ``I;16`` gives
+   * ``uint16``, ``F`` gives ``float32`` and the other modes ``uint8`` (``P``
+   * gives palette indices).
    */
   toTensor(): Tensor {
     const bands = this.bands;
@@ -370,7 +370,7 @@ export class RasterImage {
         values[c * plane + i] = this.mode === '1' ? (v ? 1 : 0) : v;
       }
     }
-    const dtype = this.mode === '1' ? 'bool' : this.mode === 'I' || this.mode === 'I;16' ? 'int32' : this.mode === 'F' ? 'float32' : 'uint8';
+    const dtype = this.mode === '1' ? 'bool' : this.mode === 'I' ? 'int32' : this.mode === 'I;16' ? 'uint16' : this.mode === 'F' ? 'float32' : 'uint8';
     if (dtype === 'float32') return new Tensor(Float32Array.from(values), [bands, this.height, this.width], 'float32');
     return new Tensor(values, [bands, this.height, this.width], dtype);
   }

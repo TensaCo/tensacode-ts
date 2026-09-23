@@ -238,8 +238,8 @@ function unsupportedMode(mode: 'box' | 'hamming'): NotImplementedError {
 // Dtype-tagged image arrays (tensors, including torch.uint16).
 // ---------------------------------------------------------------------------
 
-/** Tensor dtypes plus ``uint16`` (16-bit PNGs decode to ``torch.uint16``). */
-type ArrayDType = DType | 'uint16';
+/** Tensor dtypes (16-bit PNGs decode to ``uint16``, as ``torch.uint16``). */
+type ArrayDType = DType;
 
 interface ImageArray {
   dtype: ArrayDType;
@@ -312,7 +312,7 @@ function resizeArray(image: ImageArray, size: readonly [number, number], mode: I
 }
 
 function tensorDType(dtype: ArrayDType): DType {
-  return dtype === 'uint16' ? 'int32' : dtype;
+  return dtype;
 }
 
 function arrayToTensor(array: ImageArray): Tensor {

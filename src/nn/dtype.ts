@@ -5,7 +5,8 @@
  * Floating types that JavaScript cannot represent natively (float16, bfloat16)
  * are computed in float32 and only rounded when serialized. Integer and boolean
  * types are stored in a Float64Array, which represents every int32 exactly and
- * every int64 up to 2**53.
+ * every int64 up to 2**53. ``uint16`` is, as in PyTorch, mostly a storage type
+ * (decoded 16-bit images): it promotes only to floating types.
  */
 export type DType =
   | 'float32'
@@ -17,12 +18,13 @@ export type DType =
   | 'int16'
   | 'int8'
   | 'uint8'
+  | 'uint16'
   | 'bool';
 
 export type Storage = Float32Array | Float64Array;
 
 export const DTYPES: readonly DType[] = [
-  'float32', 'float64', 'float16', 'bfloat16', 'int64', 'int32', 'int16', 'int8', 'uint8', 'bool',
+  'float32', 'float64', 'float16', 'bfloat16', 'int64', 'int32', 'int16', 'int8', 'uint8', 'uint16', 'bool',
 ];
 
 export function isDType(value: unknown): value is DType {
@@ -51,14 +53,25 @@ export function itemSize(dtype: DType): number {
   switch (dtype) {
     case 'float64': case 'int64': return 8;
     case 'float32': case 'int32': return 4;
-    case 'float16': case 'bfloat16': case 'int16': return 2;
+    case 'float16': case 'bfloat16': case 'int16': case 'uint16': return 2;
     case 'int8': case 'uint8': case 'bool': return 1;
   }
 }
 
+const TORCH_SCALAR_NAMES: Readonly<Record<DType, string>> = {
+  float32: 'Float', float64: 'Double', float16: 'Half', bfloat16: 'BFloat16', int64: 'Long', int32: 'Int', int16: 'Short',
+  int8: 'Char', uint8: 'Byte', uint16: 'UInt16', bool: 'Bool',
+};
+
 /** Result type of combining two tensors in arithmetic. */
 export function promoteTypes(a: DType, b: DType): DType {
   if (a === b) return a === 'bool' ? 'bool' : a;
+  if (a === 'uint16' || b === 'uint16') {
+    // PyTorch promotes its limited unsigned types only to floating types.
+    const other = a === 'uint16' ? b : a;
+    if (isFloatingDType(other)) return other;
+    throw new RangeError(`Promotion for uint16, uint32, uint64 types is not supported, attempted to promote ${TORCH_SCALAR_NAMES[a]} and ${TORCH_SCALAR_NAMES[b]}`);
+  }
   if (a === 'float64' || b === 'float64') return 'float64';
   const af = isFloatingDType(a);
   const bf = isFloatingDType(b);
@@ -86,6 +99,8 @@ export function castValue(dtype: DType, value: number): number {
       return value !== 0 && !Number.isNaN(value) ? 1 : 0;
     case 'uint8':
       return (Math.trunc(value) & 0xff) >>> 0;
+    case 'uint16':
+      return (Math.trunc(value) & 0xffff) >>> 0;
     case 'int8':
       return (Math.trunc(value) << 24) >> 24;
     case 'int16':

@@ -15,10 +15,10 @@ import { numelOf } from './shape.js';
 import { Tensor, fromStorage } from './tensor.js';
 import type { Module, StateDict } from './module.js';
 
-type SafeDType = 'BOOL' | 'U8' | 'I8' | 'I16' | 'F16' | 'BF16' | 'I32' | 'F32' | 'F64' | 'I64';
+type SafeDType = 'BOOL' | 'U8' | 'I8' | 'I16' | 'U16' | 'F16' | 'BF16' | 'I32' | 'F32' | 'F64' | 'I64';
 
 const TO_SAFE: Record<DType, SafeDType> = {
-  bool: 'BOOL', uint8: 'U8', int8: 'I8', int16: 'I16', float16: 'F16', bfloat16: 'BF16',
+  bool: 'BOOL', uint8: 'U8', int8: 'I8', int16: 'I16', uint16: 'U16', float16: 'F16', bfloat16: 'BF16',
   int32: 'I32', float32: 'F32', float64: 'F64', int64: 'I64',
 };
 
@@ -27,7 +27,7 @@ const FROM_SAFE: Record<string, DType> = Object.fromEntries(
 );
 
 /** Declaration order of the Rust ``Dtype`` enum (sorting key). */
-const RUST_ORDER: SafeDType[] = ['BOOL', 'U8', 'I8', 'I16', 'F16', 'BF16', 'I32', 'F32', 'F64', 'I64'];
+const RUST_ORDER: SafeDType[] = ['BOOL', 'U8', 'I8', 'I16', 'U16', 'F16', 'BF16', 'I32', 'F32', 'F64', 'I64'];
 
 export interface SafetensorsContents {
   tensors: Map<string, Tensor>;
@@ -55,6 +55,7 @@ export function tensorBytes(tensor: Tensor): Uint8Array {
       case 'int64': view.setBigInt64(offset, BigInt(Math.trunc(value)), true); break;
       case 'int32': view.setInt32(offset, value, true); break;
       case 'int16': view.setInt16(offset, value, true); break;
+      case 'uint16': view.setUint16(offset, value, true); break;
       case 'int8': view.setInt8(offset, value); break;
       case 'uint8': view.setUint8(offset, value); break;
       case 'bool': view.setUint8(offset, value ? 1 : 0); break;
@@ -85,6 +86,7 @@ export function decodeTensorBytes(dtype: DType, bytes: Uint8Array, shape: number
       case 'int64': value = Number(view.getBigInt64(offset, true)); break;
       case 'int32': value = view.getInt32(offset, true); break;
       case 'int16': value = view.getInt16(offset, true); break;
+      case 'uint16': value = view.getUint16(offset, true); break;
       case 'int8': value = view.getInt8(offset); break;
       case 'uint8': value = view.getUint8(offset); break;
       case 'bool': value = view.getUint8(offset) ? 1 : 0; break;

@@ -37,7 +37,7 @@ function toBytes(input: EncodedImage): Uint8Array {
 }
 
 function toTensor(decoded: DecodedArray): Tensor {
-  return new Tensor(Float64Array.from(decoded.data), decoded.shape, decoded.dtype === 'uint16' ? 'int32' : 'uint8');
+  return new Tensor(Float64Array.from(decoded.data), decoded.shape, decoded.dtype);
 }
 
 /**

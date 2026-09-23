@@ -78,7 +78,7 @@ describe('torchvision.io.decode_image parity', () => {
     expect(() => decodeImage(fixtureBytes('image/jpg_gray.jpg'), { mode: 'RGB_ALPHA' })).toThrow(/not supported for JPEG/);
     expect(() => decodeImage(fixtureBytes('image/webp_anim.webp'), { mode: 'RGB' })).toThrow(/Animated webp/);
     const sixteen = decodeImage(fixtureBytes('image/png_13x9_ct2_d16.png'), { mode: 'RGB' });
-    expect(sixteen.dtype).toBe('int32');
+    expect(sixteen.dtype).toBe('uint16'); // torch.uint16
     expect(Math.max(...sixteen.data)).toBeGreaterThan(255);
   });
 });
