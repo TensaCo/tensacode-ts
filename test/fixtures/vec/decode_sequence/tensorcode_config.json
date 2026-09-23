@@ -1,0 +1,19 @@
+{
+  "config": {
+    "architecture": "linear",
+    "input_space": {
+      "device": null,
+      "dimensions": 3,
+      "dtype": null,
+      "name": "decode-source",
+      "organization": "sequence",
+      "version": "1"
+    },
+    "output": "regression values",
+    "output_dimensions": 2,
+    "readout": "sequence"
+  },
+  "format": "tensorcode.pretrained",
+  "tool": "tensorcode.ops.vec.decode.Decode",
+  "version": 1
+}

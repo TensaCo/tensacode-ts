@@ -1,0 +1,24 @@
+{
+  "config": {
+    "architecture": "mlp",
+    "hidden_dimensions": [
+      4
+    ],
+    "input_space": {
+      "device": null,
+      "dimensions": 3,
+      "dtype": null,
+      "name": "owned-input",
+      "organization": "feature",
+      "version": "1"
+    },
+    "labels": [
+      "a",
+      "b"
+    ],
+    "readout": "pooled"
+  },
+  "format": "tensorcode.pretrained",
+  "tool": "tensorcode.ops.vec.classify.Classify",
+  "version": 1
+}

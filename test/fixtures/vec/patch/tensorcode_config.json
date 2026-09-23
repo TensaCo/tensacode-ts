@@ -1,0 +1,29 @@
+{
+  "config": {
+    "coordinate_offset": [
+      -1.0,
+      2.0
+    ],
+    "coordinate_stride": [
+      3.0,
+      4.0
+    ],
+    "dimensions": 2,
+    "in_channels": 1,
+    "output_space": {
+      "device": null,
+      "dimensions": 2,
+      "dtype": null,
+      "name": "owned-patches",
+      "organization": "spatial",
+      "version": "1"
+    },
+    "patch_size": [
+      2,
+      3
+    ]
+  },
+  "format": "tensorcode.pretrained",
+  "tool": "tensorcode.ops.vec.encode.PatchEncoder",
+  "version": 1
+}

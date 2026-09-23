@@ -1,0 +1,25 @@
+{
+  "config": {
+    "architecture": "linear",
+    "input_space": {
+      "device": null,
+      "dimensions": 3,
+      "dtype": null,
+      "name": "owned-input",
+      "organization": "feature",
+      "version": "1"
+    },
+    "output_space": {
+      "device": null,
+      "dimensions": 2,
+      "dtype": null,
+      "name": "owned-output",
+      "organization": "feature",
+      "version": "1"
+    },
+    "readout": "sequence"
+  },
+  "format": "tensorcode.pretrained",
+  "tool": "tensorcode.ops.vec.transform.Transform",
+  "version": 1
+}

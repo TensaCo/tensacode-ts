@@ -1,0 +1,20 @@
+{
+  "config": {
+    "dimensions": 4,
+    "output_space": {
+      "device": null,
+      "dimensions": 4,
+      "dtype": null,
+      "name": "words",
+      "organization": "feature",
+      "version": "1"
+    },
+    "vocabulary": [
+      "hello",
+      "world"
+    ]
+  },
+  "format": "tensorcode.pretrained",
+  "tool": "tensorcode.ops.vec.encode.VocabularyEncoder",
+  "version": 1
+}

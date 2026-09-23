@@ -1,0 +1,29 @@
+{
+  "config": {
+    "architecture": "mlp",
+    "candidate_space": {
+      "device": null,
+      "dimensions": 3,
+      "dtype": null,
+      "name": "owned-input",
+      "organization": "feature",
+      "version": "1"
+    },
+    "hidden_dimensions": [
+      5
+    ],
+    "meaning": "authored relevance logits",
+    "pair_dimensions": 3,
+    "query_space": {
+      "device": null,
+      "dimensions": 3,
+      "dtype": null,
+      "name": "owned-input",
+      "organization": "feature",
+      "version": "1"
+    }
+  },
+  "format": "tensorcode.pretrained",
+  "tool": "tensorcode.ops.vec.score.Score",
+  "version": 1
+}
