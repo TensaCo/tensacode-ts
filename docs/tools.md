@@ -153,9 +153,24 @@ const receipt = scene.call({
 
 Callers decode and preprocess images themselves; TensorCode does not read image
 files. Coordinates in the receipt refer to the input tensor.
-**Scene language mode** (`fromLanguageFoundation`, `interpret`, Idefics3/SmolVLM)
-is not available in the TypeScript port. It throws `NotImplementedError`, so use
-the Python package for it.
+In language mode, `Scene` interprets a full image with an owned Idefics3
+(SmolVLM) foundation. `await Scene.fromLanguageFoundation(repoId, { revision })`
+imports the pinned weights and processor assets. The workspace residual starts
+inactive (its gate is zero), so the imported model behaves exactly like the
+foundation until you supervise it with reviewer-written descriptions.
+
+```ts
+const scene = await Scene.fromLanguageFoundation('HuggingFaceTB/SmolVLM-256M-Instruct', { revision: 'a-commit-sha' });
+const result = scene.interpret({ pixels, source_id: 'photo:17', question: 'What is on the table?' }, { maxNewTokens: 32 });
+result.interpretation;        // generated text
+result.verification;          // always 'unverified'
+result.completion_status;     // 'complete' or 'token_limit'
+scene.loss({ pixels, source_id: 'photo:17', question: 'What is on the table?' }, 'A cup and a plate.');
+```
+
+Interpretations are unverified. They are not extracted facts or scene graphs,
+and the receipt carries no boxes or claims. Decoding is greedy. Inference runs
+in pure JavaScript on the CPU, so a SmolVLM interpretation takes minutes.
 
 ## Sessions and explicit actions
 

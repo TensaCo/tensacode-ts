@@ -1,0 +1,1 @@
+{% for message in messages %}{{ message['role'] }}: {% for part in message['content'] %}{% if part['type'] == 'image' %}<image>{% else %}{{ part['text'] }}{% endif %}{% endfor %}{% endfor %}{% if add_generation_prompt %} assistant:{% endif %} alternative

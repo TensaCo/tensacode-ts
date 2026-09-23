@@ -122,9 +122,9 @@ network returns a `Promise`. Pure computation is synchronous.
 | Graph operations | Symbolic stubs | Same as Python |
 | `Chatbot`, `Investigator`, `Decision`, `Planner` | Yes | Including cognitive sessions, episodic memory, verifiers and plan execution |
 | `Scene` ranking mode | Yes | CLIP bootstrap via `Scene.fromFoundation` |
-| `Scene` language mode (Idefics3) | No | Throws `NotImplementedError` |
+| `Scene` language mode (Idefics3/SmolVLM) | Yes | `Scene.fromLanguageFoundation` and `interpret` with greedy decoding; the processor (image splitting, LANCZOS, prompt expansion) and saved processor assets match Python byte for byte. Pure-JavaScript compute makes a full SmolVLM interpretation slow (minutes on a CPU) |
 | `Trainer`, checkpoints | Yes | SGD, Adam, AdamW. Python directory checkpoints load in TS, but their PyTorch/CPython RNG states are ignored. TS directory checkpoints store the TensorCode RNG and do not load in Python. Standalone checkpoint files are interchangeable |
-| Native architectures | ALBERT, BERT, RoBERTa, Electra, DistilBERT, DeBERTa-v2, T5, ViT, CLIP | transformers 5.17 parameter names; safetensors weights only. Python loads any transformers `AutoModel` for text foundations; TypeScript implements these |
+| Native architectures | ALBERT, BERT, RoBERTa, Electra, DistilBERT, DeBERTa-v2, T5, ViT, CLIP, Llama, Idefics3 | transformers 5.17 parameter names; safetensors weights only. Python loads any transformers `AutoModel` for text foundations; TypeScript implements these |
 | Tokenizers | `tokenizer.json` runtime | WordPiece, BPE, Unigram, WordLevel |
 | Integrations | OpenAI-compatible, Jev, Transformers.js `LocalModel` | No implicit retries or redirects |
 | Compute | CPU, pure JavaScript | Random streams differ from PyTorch, so fresh initializations differ; loaded weights are identical |

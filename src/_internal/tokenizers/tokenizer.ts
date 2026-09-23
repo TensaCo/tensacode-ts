@@ -111,6 +111,11 @@ export class Tokenizer {
     return size;
   }
 
+  /** Model vocabulary size without added tokens (Rust ``get_vocab_size(with_added_tokens=False)``). */
+  baseVocabSize(): number {
+    return this.model.vocabSize;
+  }
+
   tokenToId(token: string): number | undefined {
     const added = this.addedByContent.get(token);
     if (added) return added.id;
@@ -399,16 +404,42 @@ export class FastTokenizer {
   /** ``AutoTokenizer.from_pretrained(directory, use_fast=True)`` for a downloaded snapshot. */
   static async fromDirectory(directory: string): Promise<FastTokenizer> {
     const json = await readFile(join(directory, 'tokenizer.json'), 'utf8');
-    const readOptional = async (name: string): Promise<Record<string, unknown>> => {
+    const readOptional = async (name: string): Promise<string | null> => {
       try {
-        return parseJsonStrict(await readFile(join(directory, name), 'utf8')) as Record<string, unknown>;
+        return await readFile(join(directory, name), 'utf8');
+      } catch {
+        return null;
+      }
+    };
+    return FastTokenizer.fromFiles({
+      'tokenizer.json': json,
+      'tokenizer_config.json': await readOptional('tokenizer_config.json'),
+      'special_tokens_map.json': await readOptional('special_tokens_map.json'),
+      'config.json': await readOptional('config.json'),
+    });
+  }
+
+  /**
+   * ``AutoTokenizer.from_pretrained`` over in-memory files (``tokenizer.json``
+   * plus optional ``tokenizer_config.json``, ``special_tokens_map.json`` and
+   * the model ``config.json``); see {@link FastTokenizer.fromDirectory}.
+   */
+  static fromFiles(files: Record<string, string | null | undefined>): FastTokenizer {
+    const json = files['tokenizer.json'];
+    if (typeof json !== 'string') throw new ValueError('tokenizer files require tokenizer.json');
+    const readOptional = (name: string): Record<string, unknown> => {
+      const text = files[name];
+      if (typeof text !== 'string') return {};
+      try {
+        const value = parseJsonStrict(text);
+        return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
       } catch {
         return {};
       }
     };
-    const config = await readOptional('tokenizer_config.json');
-    const map = await readOptional('special_tokens_map.json');
-    const modelConfig = await readOptional('config.json');
+    const config = readOptional('tokenizer_config.json');
+    const map = readOptional('special_tokens_map.json');
+    const modelConfig = readOptional('config.json');
     const declared = typeof config.tokenizer_class === 'string' ? config.tokenizer_class : null;
     const tokenizerClass = baseTokenizerClass(declared ?? (typeof modelConfig.model_type === 'string' ? MODEL_TYPE_TOKENIZERS[modelConfig.model_type] ?? null : null));
     const text = (value: unknown): string | null => {

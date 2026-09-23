@@ -522,31 +522,31 @@ function rustOrdered(node: RawNode, order: readonly string[]): [string, RawNode]
   return [...node.entries].sort(([a], [b]) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
 }
 
-function emitRust(node: RawNode, context: string | null): string {
+/** Reorder a canonical backend tree into Rust serialization order (floats in ``serde_json`` form). */
+function rustOrder(node: RawNode, context: string | null): RawNode {
   switch (node.t) {
-    case 'l': return node.v === null ? 'null' : node.v ? 'true' : 'false';
-    case 's': return rustJsonString(node.v);
-    case 'n': return node.raw;
-    case 'a': return `[${node.items.map((item) => emitRust(item, null)).join(',')}]`;
+    case 'l': case 's': case 'n': return node;
+    case 'a': return { t: 'a', items: node.items.map((item) => rustOrder(item, null)) };
     default: break;
   }
-  const object = (entries: [string, RawNode][], child: (key: string, value: RawNode) => string): string =>
-    `{${entries.map(([key, value]) => `${rustJsonString(key)}:${child(key, value)}`).join(',')}}`;
+  const object = (entries: [string, RawNode][], child: (key: string, value: RawNode) => RawNode): RawNode =>
+    ({ t: 'o', entries: entries.map(([key, value]) => [key, child(key, value)] as [string, RawNode]) });
+  const plain = (_: string, value: RawNode): RawNode => rustOrder(value, null);
   if (context === 'root') {
     return object(rustOrdered(node, RUST_ROOT), (key, value) => {
-      if (value.t === 'l') return emitRust(value, null);
+      if (value.t === 'l') return value;
       if (key === 'added_tokens' && value.t === 'a') {
         const id = (token: RawNode): number => {
-          const value = rawGet(token, 'id');
-          return value?.t === 'n' ? Number(value.raw) : 0;
+          const item = rawGet(token, 'id');
+          return item?.t === 'n' ? Number(item.raw) : 0;
         };
         const tokens = [...value.items].sort((a, b) => id(a) - id(b));
-        return `[${tokens.map((token) => object(rustOrdered(token, RUST_ADDED_TOKEN), (_, item) => emitRust(item, null))).join(',')}]`;
+        return { t: 'a', items: tokens.map((token) => object(rustOrdered(token, RUST_ADDED_TOKEN), plain)) };
       }
-      if (key === 'truncation') return object(rustOrdered(value, RUST_TRUNCATION), (_, item) => emitRust(item, null));
-      if (key === 'padding') return object(rustOrdered(value, RUST_PADDING), (_, item) => emitRust(item, null));
-      if (key in SEQUENCE_CHILDREN || key === 'model') return emitRust(value, key);
-      return emitRust(value, null);
+      if (key === 'truncation') return object(rustOrdered(value, RUST_TRUNCATION), plain);
+      if (key === 'padding') return object(rustOrdered(value, RUST_PADDING), plain);
+      if (key in SEQUENCE_CHILDREN || key === 'model') return rustOrder(value, key);
+      return rustOrder(value, null);
     });
   }
   if (context === 'model') {
@@ -556,38 +556,61 @@ function emitRust(node: RawNode, context: string | null): string {
         // Rust writes vocabularies in id order.
         const entries = value.entries.map((entry, index) => ({ entry, index, id: entry[1].t === 'n' ? Number(entry[1].raw) : Infinity }))
           .sort((a, b) => a.id - b.id || a.index - b.index).map(({ entry }) => entry);
-        return object(entries, (_, item) => emitRust(item, null));
+        return object(entries, plain);
       }
       if (key === 'vocab' && value.t === 'a' && type === 'Unigram') {
-        return `[${value.items.map((entry) => {
-          if (entry.t !== 'a' || entry.items.length !== 2 || entry.items[1]!.t !== 'n') return emitRust(entry, null);
-          const [piece, score] = entry.items as [RawNode, Extract<RawNode, { t: 'n' }>];
-          return `[${emitRust(piece, null)},${rustFloatRepr(Number(score.raw))}]`;
-        }).join(',')}]`;
+        return {
+          t: 'a',
+          items: value.items.map((entry) => {
+            if (entry.t !== 'a' || entry.items.length !== 2 || entry.items[1]!.t !== 'n') return rustOrder(entry, null);
+            const [piece, score] = entry.items as [RawNode, Extract<RawNode, { t: 'n' }>];
+            return { t: 'a', items: [piece, { t: 'n', raw: rustFloatRepr(Number(score.raw)) }] };
+          }),
+        };
       }
-      if (key === 'dropout' && value.t === 'n') return rustFloatRepr(Number(value.raw), true);
-      return emitRust(value, null);
+      if (key === 'dropout' && value.t === 'n') return { t: 'n', raw: rustFloatRepr(Number(value.raw), true) };
+      return rustOrder(value, null);
     });
   }
   if (context !== null && context in SEQUENCE_CHILDREN) {
     const type = rawString(rawGet(node, 'type')) ?? '';
     const children = SEQUENCE_CHILDREN[context]!;
     return object(rustOrdered(node, RUST_FIELDS[context]![type] ?? ['type']), (key, value) => {
-      if (type === 'Sequence' && key === children && value.t === 'a') return `[${value.items.map((item) => emitRust(item, context)).join(',')}]`;
-      return emitRust(value, null);
+      if (type === 'Sequence' && key === children && value.t === 'a') return { t: 'a', items: value.items.map((item) => rustOrder(item, context)) };
+      return rustOrder(value, null);
     });
   }
-  return object(node.entries, (_, value) => emitRust(value, null));
+  return object(node.entries, plain);
+}
+
+/** ``serde_json::to_string`` (compact) or ``to_string_pretty`` (two-space indent). */
+function emitSerde(node: RawNode, pretty: boolean, depth = 0): string {
+  switch (node.t) {
+    case 'l': return node.v === null ? 'null' : node.v ? 'true' : 'false';
+    case 's': return rustJsonString(node.v);
+    case 'n': return node.raw;
+    default: break;
+  }
+  const inner = pretty ? `\n${'  '.repeat(depth + 1)}` : '';
+  const outer = pretty ? `\n${'  '.repeat(depth)}` : '';
+  if (node.t === 'a') {
+    if (!node.items.length) return '[]';
+    return `[${inner}${node.items.map((item) => emitSerde(item, pretty, depth + 1)).join(`,${inner}`)}${outer}]`;
+  }
+  if (!node.entries.length) return '{}';
+  const colon = pretty ? ': ' : ':';
+  return `{${inner}${node.entries.map(([key, value]) => `${rustJsonString(key)}${colon}${emitSerde(value, pretty, depth + 1)}`).join(`,${inner}`)}${outer}}`;
 }
 
 /**
  * Python ``tokenizer.backend_tokenizer.to_str()`` for a canonical backend JSON
  * (as persisted by tools in ``tokenizer_json`` and hashed into fingerprints):
  * Rust struct field order, vocabularies in id order, ``serde_json`` floats and
- * unescaped non-ASCII text.
+ * unescaped non-ASCII text. ``pretty`` matches ``Tokenizer.save`` (the
+ * ``tokenizer.json`` written by ``save_pretrained``).
  */
-export function rustTokenizerString(canonicalJson: string): string {
+export function rustTokenizerString(canonicalJson: string, options: { pretty?: boolean } = {}): string {
   const root = parseJsonRaw(canonicalJson);
   if (root.t !== 'o') throw new TypeError('tokenizer JSON must contain an object');
-  return emitRust(root, 'root');
+  return emitSerde(rustOrder(root, 'root'), options.pretty ?? false);
 }

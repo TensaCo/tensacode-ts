@@ -6,20 +6,19 @@
  * routing, not factual support. It does not construct scene graphs. Fresh
  * models have random visual weights.
  *
- * Language mode (Python ``Scene.from_language_foundation`` / ``interpret`` over
- * an Idefics3/SmolVLM foundation) is not available in the TypeScript port:
- * those methods, and loading a language-mode artifact, throw
- * ``NotImplementedError``.
+ * Language mode (``Scene.fromLanguageFoundation`` / ``interpret`` over an
+ * owned Idefics3/SmolVLM foundation, ``./sceneLanguage.ts``) produces
+ * explicitly unverified full-image interpretations, not extracted facts.
  */
-import { readFile, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { Parameter, Tensor, arange, onesLike, randn, tensor, zerosLike } from '../nn/tensor.js';
 import { noGrad } from '../nn/autograd.js';
 import { Embedding, GELU, GRU, Linear, Sequential } from '../nn/layers.js';
 import { cat, meshgrid, stack } from '../nn/ops/shape.js';
 import { cosineSimilarity, crossEntropy } from '../nn/ops/nn.js';
-import { NotImplementedError, ValueError } from '../errors.js';
-import { ModuleOperation, type Context, type OperationLike } from '../ops/base.js';
+import { ValueError } from '../errors.js';
+import { ModuleOperation, type CallOptions, type Context, type OperationLike } from '../ops/base.js';
 import { Space } from '../ops/vec/latent.js';
 import { PatchEncoder } from '../ops/vec/encode.js';
 import { PretrainedModule } from '../_internal/pretrained.js';
@@ -36,8 +35,11 @@ import { createNativeModel } from '../_internal/native/registry.js';
 import { loadNativeFoundation } from '../_internal/native/foundation.js';
 import { Tokenizer } from '../_internal/tokenizers/index.js';
 import { canonicalBackendJson, rustTokenizerString } from '../_internal/tokenizers/serialization.js';
+import { safeAssetName } from '../_internal/native/idefics3Processing.js';
+import { LANGUAGE_DEFAULTS, SceneLanguage, SceneLanguageObjective, type SceneInterpretation, type SceneLanguageInputs } from './sceneLanguage.js';
+import { languageFoundationConfig } from './sceneLanguageFoundation.js';
 
-export const SCENE_LANGUAGE_UNAVAILABLE = 'Scene language mode (Idefics3/SmolVLM interpretation) is not available in the TypeScript port; use the Python package';
+export type { SceneInterpretation, SceneLanguageInputs } from './sceneLanguage.js';
 
 /** One ranking candidate. */
 export interface SceneCandidate {
@@ -374,13 +376,23 @@ function positiveInteger(value: unknown): boolean {
   return typeof value === 'number' && Number.isInteger(value) && value >= 1;
 }
 
-/** Validate and default a ranking-mode Scene configuration (private keys removed). */
+/** Validate and default a Scene configuration (private keys removed). */
 function normalizeSceneConfig(input: unknown): JsonObject {
   if (!isPlainObject(input)) throw new ValueError('model config must be a JSON object');
   const config: Record<string, unknown> = { ...input };
   delete config._tokenizer_json;
   delete config._language_assets;
-  if (config.mode === 'language') throw new NotImplementedError(SCENE_LANGUAGE_UNAVAILABLE);
+  if (config.mode === 'language') {
+    if ((config.architecture_version ?? 1) !== 1) throw new ValueError('unsupported scene language architecture_version');
+    config.architecture_version = 1;
+    for (const [key, fallback] of LANGUAGE_DEFAULTS) {
+      if (!(key in config)) config[key] = fallback;
+      if (!positiveInteger(config[key])) throw new ValueError(`${key} must be a positive integer`);
+    }
+    if (!('freeze_foundation' in config)) config.freeze_foundation = true;
+    if (typeof config.freeze_foundation !== 'boolean') throw new ValueError('freeze_foundation must be boolean');
+    return config as JsonObject;
+  }
   const vocabulary = config.vocabulary;
   if (!Array.isArray(vocabulary) || !vocabulary.length || vocabulary.some((word) => typeof word !== 'string' || !word)
     || new Set(vocabulary).size !== vocabulary.length) {
@@ -398,6 +410,16 @@ function normalizeSceneConfig(input: unknown): JsonObject {
   }
   if ((config.max_image_size as number) < (config.patch_size as number)) throw new ValueError('max_image_size must accommodate a patch');
   return config as JsonObject;
+}
+
+export interface SceneLanguageFoundationOptions {
+  /** Pinned revision (required, as in Python). */
+  revision: string | null;
+  localFilesOnly?: boolean;
+  cacheDir?: string | null;
+  token?: string | null;
+  endpoint?: string | null;
+  freezeFoundation?: boolean;
 }
 
 export interface SceneFoundationOptions {
@@ -423,18 +445,28 @@ export interface SceneReceipt extends JsonObject {
 }
 
 /**
- * Rank supplied descriptions for an image and question. Ranking uses a
- * learned image/text workspace; selected candidates remain fallible
- * interpretations. This interface supplies no object vocabulary or spatial
- * truth rules.
+ * Rank supplied descriptions for an image and question, or interpret an image
+ * in language mode. Ranking uses a learned image/text workspace; selected
+ * candidates remain fallible interpretations. A language-mode checkpoint's
+ * ``interpret`` returns unverified interpretations, not extracted facts or
+ * scene graphs. This interface supplies no object vocabulary or spatial truth
+ * rules.
  */
-export class Scene extends PretrainedModule<SceneInputs, SceneReceipt> {
+export class Scene extends PretrainedModule<SceneInputs | SceneLanguageInputs, SceneReceipt | SceneInterpretation> {
   static override readonly qualifiedName: string = 'tensorcode.tools.scene.Scene';
-  readonly rank: SceneRank;
-  readonly objective: RankingObjective;
+  /** Ranking model (ranking mode only). */
+  readonly rank!: SceneRank;
+  /** Idefics3 interpretation model (language mode only). */
+  readonly language: SceneLanguage | null = null;
+  readonly objective: RankingObjective | SceneLanguageObjective;
 
   constructor(config: unknown) {
     super(normalizeSceneConfig(config));
+    if (this.config.mode === 'language') {
+      this.language = this.registerModule('language', new SceneLanguage(this.config, (config as Record<string, unknown>)._language_assets));
+      this.objective = this.registerModule('objective', new SceneLanguageObjective(this));
+      return;
+    }
     const tokenizerJson = (config as Record<string, unknown>)._tokenizer_json;
     if ('foundation_config' in this.config) {
       if (typeof tokenizerJson !== 'string' || sha256Hex(tokenizerJson) !== this.config.tokenizer_sha256) {
@@ -447,9 +479,17 @@ export class Scene extends PretrainedModule<SceneInputs, SceneReceipt> {
     this.objective = this.registerModule('objective', new RankingObjective(this));
   }
 
-  /** Rank ``candidates`` for an image and question; returns an inspectable receipt. */
-  forward(inputs: SceneInputs, context: Context | null): SceneReceipt {
+  /**
+   * Rank ``candidates`` for an image and question (an inspectable receipt), or
+   * ``interpret`` in language mode. ``predict`` is an alias.
+   */
+  forward(inputs: SceneInputs | SceneLanguageInputs, context: Context | null): SceneReceipt | SceneInterpretation {
     if (context) throw new ValueError('Scene does not accept context');
+    if (this.language) return this.interpret(inputs as SceneLanguageInputs);
+    return this.rankReceipt(inputs as SceneInputs);
+  }
+
+  private rankReceipt(inputs: SceneInputs): SceneReceipt {
     const { logits, workspace, coordinates } = this.rank.compute(inputs);
     const scores = logits.detach().toArray();
     const probabilities = logits.detach().softmax(-1).toArray();
@@ -470,17 +510,28 @@ export class Scene extends PretrainedModule<SceneInputs, SceneReceipt> {
     };
   }
 
+  /** Ranking receipt for ranking inputs (with ``candidates``); an interpretation in language mode. */
+  override call(inputs: SceneInputs, options?: CallOptions): SceneReceipt;
+  override call(inputs: SceneLanguageInputs, options?: CallOptions): SceneInterpretation;
+  override call(inputs: SceneInputs | SceneLanguageInputs, options?: CallOptions): SceneReceipt | SceneInterpretation;
+  override call(inputs: SceneInputs | SceneLanguageInputs, options?: CallOptions): SceneReceipt | SceneInterpretation {
+    return super.call(inputs, options);
+  }
+
   /** Alias of {@link Scene.call}. */
-  predict(inputs: SceneInputs): SceneReceipt {
+  predict(inputs: SceneInputs): SceneReceipt;
+  predict(inputs: SceneLanguageInputs): SceneInterpretation;
+  predict(inputs: SceneInputs | SceneLanguageInputs): SceneReceipt | SceneInterpretation {
     return this.call(inputs);
   }
 
-  /** Candidate ranking loss against a candidate ID or index. */
-  loss(inputs: SceneInputs, targets: unknown): Tensor {
-    const logits = this.rank.call(inputs);
+  /** Candidate ranking loss against a candidate ID or index, or the language-mode teacher-forced loss. */
+  loss(inputs: SceneInputs | SceneLanguageInputs, targets: unknown): Tensor {
+    if (this.language) return this.language.loss(inputs as SceneLanguageInputs, targets);
+    const logits = this.rank.call(inputs as SceneInputs);
     let target = targets;
     if (typeof target === 'string') {
-      const ids = inputs.candidates.map((item) => item.id);
+      const ids = (inputs as SceneInputs).candidates.map((item) => item.id);
       if (!ids.includes(target)) throw new ValueError('target must identify a supplied candidate');
       target = ids.indexOf(target);
     }
@@ -491,7 +542,7 @@ export class Scene extends PretrainedModule<SceneInputs, SceneReceipt> {
   }
 
   /** Objective used by ``Trainer.fromTool``. */
-  get trainingOperation(): RankingObjective {
+  get trainingOperation(): RankingObjective | SceneLanguageObjective {
     return this.objective;
   }
 
@@ -504,17 +555,24 @@ export class Scene extends PretrainedModule<SceneInputs, SceneReceipt> {
     return replayableBindings(this);
   }
 
-  /** Unavailable: language-mode interpretation requires the Python package. */
-  interpret(inputs: unknown, options: { maxNewTokens?: number | null } = {}): never {
-    void inputs;
-    void options;
-    throw new NotImplementedError(SCENE_LANGUAGE_UNAVAILABLE);
+  /** Produce an unverified full-image interpretation, without fact extraction. */
+  interpret(inputs: SceneLanguageInputs, options: { maxNewTokens?: number | null } = {}): SceneInterpretation {
+    if (!this.language) throw new ValueError('interpret requires a Scene language model checkpoint');
+    return this.language.interpret(inputs, options);
   }
 
-  /** Unavailable: Idefics3/SmolVLM language foundations require the Python package. */
-  static async fromLanguageFoundation(...args: unknown[]): Promise<never> {
-    void args;
-    throw new NotImplementedError(SCENE_LANGUAGE_UNAVAILABLE);
+  /**
+   * Explicitly import an owned Idefics3 VLM and its processor assets. Initial
+   * competence belongs to the supplied pretrained foundation; the trainable
+   * workspace residual starts inactive and requires supervision.
+   */
+  static async fromLanguageFoundation(repoId = 'HuggingFaceTB/SmolVLM-500M-Instruct', options: SceneLanguageFoundationOptions): Promise<Scene> {
+    const { config, weights } = await languageFoundationConfig(repoId, options);
+    const result = new Scene(config);
+    result.language!.float();
+    result.language!.model.loadStateDict(weights);
+    result.eval();
+    return result;
   }
 
   /** Explicitly import pinned pretrained CLIP perception; ranking starts random. */
@@ -543,6 +601,19 @@ export class Scene extends PretrainedModule<SceneInputs, SceneReceipt> {
   }
 
   protected override async savePretrainedAssets(directory: string): Promise<void> {
+    if (this.language) {
+      const folder = join(directory, 'processor');
+      const existing = await lstat(folder).catch(() => null);
+      if (existing?.isSymbolicLink()) await unlink(folder);
+      else if (existing) await rm(folder, { recursive: true, force: true });
+      await mkdir(folder);
+      for (const [name, value] of Object.entries(this.language.assets)) {
+        const target = join(folder, name);
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, value, 'utf8');
+      }
+      return;
+    }
     if (this.rank instanceof FoundationSceneRank) {
       const path = join(directory, 'tokenizer.json');
       if (await isSymlink(path)) await unlink(path);
@@ -552,7 +623,13 @@ export class Scene extends PretrainedModule<SceneInputs, SceneReceipt> {
   }
 
   static override async loadPretrainedConfig(config: JsonObject, directory: string): Promise<JsonObject> {
-    if (config.mode === 'language') throw new NotImplementedError(SCENE_LANGUAGE_UNAVAILABLE);
+    if (config.mode === 'language') {
+      const names = config.processor_hashes;
+      if (!isPlainObject(names) || Object.keys(names).some((name) => !safeAssetName(name))) throw new ValueError('invalid processor asset names');
+      const assets: JsonObject = {};
+      for (const name of Object.keys(names)) assets[name] = await readFile(join(directory, 'processor', name), 'utf8');
+      return { ...config, _language_assets: assets };
+    }
     if ('foundation_config' in config) {
       return { ...config, _tokenizer_json: await readFile(join(directory, 'tokenizer.json'), 'utf8') };
     }

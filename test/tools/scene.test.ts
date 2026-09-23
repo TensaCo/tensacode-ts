@@ -1,10 +1,10 @@
-/** Port of ``tests/models/test_scene.py`` (+ language-mode unavailability) with Python parity fixtures. */
+/** Port of ``tests/models/test_scene.py`` with Python parity fixtures (language mode: ``sceneLanguage.test.ts``). */
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Adam, manualSeed, noGrad, onesLike, rand, zerosLike, type Tensor } from '../../src/nn/index.js';
-import { NotImplementedError, ValueError } from '../../src/errors.js';
+import { ValueError } from '../../src/errors.js';
 import { FoundationSceneRank, Scene, type SceneInputs } from '../../src/tools/scene.js';
 import { sha256Hex } from '../../src/_internal/json.js';
 import { expectClose } from '../helpers/gradcheck.js';
@@ -257,12 +257,11 @@ describe('Scene artifacts written by Python', () => {
   });
 });
 
-describe('Scene language mode is unavailable (tests/models/test_scene_language.py)', () => {
-  it('construction, foundation import, interpretation and artifacts raise NotImplementedError', async () => {
-    expect(() => new Scene({ mode: 'language', language_config: {} })).toThrow(NotImplementedError);
-    await expect(Scene.fromLanguageFoundation('HuggingFaceTB/SmolVLM-500M-Instruct', { revision: 'main' })).rejects.toThrow(NotImplementedError);
-    expect(() => model().interpret(sample())).toThrow(NotImplementedError);
-    await expect(Scene.loadPretrainedConfig({ mode: 'language' }, scratch)).rejects.toThrow(NotImplementedError);
+
+describe('Scene modes', () => {
+  it('interpret requires a language-mode checkpoint', () => {
+    expect(() => model().interpret({ ...sample() })).toThrow(/language model checkpoint/);
+    expect(() => new Scene({ mode: 'language', architecture_version: 2 })).toThrow(/architecture_version/);
+    expect(() => new Scene({ mode: 'language', freeze_foundation: 1 })).toThrow(/freeze_foundation/);
   });
 });
-

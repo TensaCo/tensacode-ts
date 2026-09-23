@@ -1,0 +1,121 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {
+      "id": 0,
+      "content": "[UNK]",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 1,
+      "content": "[BOS]",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 2,
+      "content": "[EOS]",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 10,
+      "content": "<image>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 11,
+      "content": "<fake_token_around_image>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 12,
+      "content": "<end_of_utterance>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 13,
+      "content": "<global-img>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    }
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Whitespace"
+  },
+  "post_processor": {
+    "type": "TemplateProcessing",
+    "single": [
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      }
+    ],
+    "pair": [
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "B",
+          "type_id": 1
+        }
+      }
+    ],
+    "special_tokens": {}
+  },
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "[UNK]": 0,
+      "[BOS]": 1,
+      "[EOS]": 2,
+      "describe": 3,
+      "left": 4,
+      "right": 5,
+      "object": 6,
+      "user": 7,
+      "assistant": 8,
+      ":": 9,
+      "<image>": 10,
+      "<fake_token_around_image>": 11,
+      "<end_of_utterance>": 12,
+      "<global-img>": 13
+    },
+    "unk_token": "[UNK]"
+  }
+}

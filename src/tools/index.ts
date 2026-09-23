@@ -15,7 +15,7 @@ export { Chatbot } from './chatbot.js';
 export { Investigator } from './investigator.js';
 export { Planner } from './planner.js';
 export { Decision } from './decision.js';
-export { Scene } from './scene.js';
+export { Scene, type SceneInputs, type SceneReceipt, type SceneInterpretation, type SceneLanguageInputs } from './scene.js';
 export {
   PretrainedModule, type FromPretrainedOptions, type PushToHubOptions,
 } from '../_internal/pretrained.js';

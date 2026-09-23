@@ -255,10 +255,27 @@ others with `ValueError`.
   Other diffusers blocks raise `NotImplementedError`. `context.seed` draws noise
   from the TensorCode generator, so seeded samples differ from Python; supply
   `context.noise` for identical samples.
-- **Out of scope (explicit `NotImplementedError` with a clear message):**
-  `Scene.fromLanguageFoundation`/`interpret` (Idefics3/SmolVLM); image file
-  decoding (callers supply decoded CHW float tensors; resize/normalize helpers are
-  provided). Graph operations stay symbolic stubs exactly as in Python.
+- **Scene language mode.** `Scene.fromLanguageFoundation`/`interpret` port
+  `SceneLanguage` over an owned `Idefics3ForConditionalGeneration`
+  (`src/_internal/native/idefics3.ts`: SigLIP-style vision tower with
+  fractional patch positions, pixel-shuffle connector, Llama text model with
+  grouped-query attention and `default`/`linear`/`llama3` RoPE) and the
+  `Idefics3Processor` (`idefics3Processing.ts`: longest-edge LANCZOS resizing,
+  image splitting, fused normalization, `<image>` prompt expansion, Jinja chat
+  templates). `fromLanguageFoundation` reproduces the processor assets
+  `Idefics3Processor.save_pretrained` writes (so `processor_hashes` equal
+  Python's) for `GPT2Tokenizer` (SmolVLM) and `PreTrainedTokenizerFast`
+  tokenizers; other tokenizer classes raise `NotImplementedError`. Generation
+  is greedy (`interpret` always is) with transformers' logits processors
+  (repetition penalty, n-gram blocking, bad words, minimum lengths, forced
+  BOS/EOS, suppression); beam search, guidance, sequence bias and stop strings
+  raise `NotImplementedError`. One image per prompt. Compute is pure
+  JavaScript: a SmolVLM-256M interpretation of a small image (13 vision tiles)
+  takes minutes.
+- **Out of scope (explicit `NotImplementedError` with a clear message):** image
+  file decoding (callers supply decoded CHW float tensors; resize/normalize
+  helpers are provided). Graph operations stay symbolic stubs exactly as in
+  Python.
 - **External local models.** `integrations.LocalModel` wraps an explicitly
   supplied `@huggingface/transformers` model/processor (optional peer, dynamic
   import) and is asynchronous.
