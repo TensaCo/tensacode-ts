@@ -111,5 +111,7 @@ export function compileRegex(pattern: string, flags = 'gu'): RegExp {
 }
 
 export function escapeRegex(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
+  // Unicode-mode patterns reject identity escapes of non-syntax characters
+  // such as ``-`` (used outside character classes only).
+  return text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 }

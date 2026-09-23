@@ -112,3 +112,19 @@ describe('Rust tokenizers float parsing (serde_json without float_roundtrip)', (
     }
   });
 });
+
+describe('added tokens', () => {
+  it('match tokens containing regex-special characters and hyphens', () => {
+    const json = JSON.stringify({
+      version: '1.0', truncation: null, padding: null, normalizer: null, pre_tokenizer: { type: 'Whitespace' }, post_processor: null, decoder: null,
+      added_tokens: [
+        { id: 3, content: '<global-img>', single_word: false, lstrip: false, rstrip: false, normalized: false, special: true },
+        { id: 4, content: '<|a.b*c|>', single_word: false, lstrip: false, rstrip: false, normalized: false, special: true },
+      ],
+      model: { type: 'WordLevel', vocab: { '[UNK]': 0, hello: 1, world: 2, '<global-img>': 3, '<|a.b*c|>': 4 }, unk_token: '[UNK]' },
+    });
+    const tokenizer = FastTokenizer.fromJsonString(json, { unk_token: '[UNK]' });
+    expect(tokenizer.encode('hello<global-img>world <|a.b*c|>').inputIds[0]).toEqual([1, 3, 2, 4]);
+  });
+});
+

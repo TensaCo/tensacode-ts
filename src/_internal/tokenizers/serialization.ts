@@ -181,6 +181,15 @@ function clsSepTemplate(cls: string, clsId: number, sep: string, sepId: number):
   };
 }
 
+function vocabularyId(root: RawNode, token: string): number | null {
+  const vocab = rawGet(rawGet(root, 'model'), 'vocab');
+  if (vocab?.t === 'o') {
+    const id = rawGet(vocab, token);
+    return id?.t === 'n' ? Number(id.raw) : null;
+  }
+  return null;
+}
+
 function unigramPieces(root: RawNode): string[] {
   const vocab = rawGet(rawGet(root, 'model'), 'vocab');
   if (vocab?.t !== 'a') return [];
@@ -190,6 +199,8 @@ function unigramPieces(root: RawNode): string[] {
 function tokenId(root: RawNode, token: string): number {
   const index = unigramPieces(root).indexOf(token);
   if (index >= 0) return index;
+  const byVocabulary = vocabularyId(root, token);
+  if (byVocabulary !== null) return byVocabulary;
   const added = rawGet(root, 'added_tokens');
   if (added?.t === 'a') {
     for (const entry of added.items) {
@@ -215,6 +226,47 @@ function text(flags: TokenizerFlags, key: string, fallback: string): string {
   if (typeof value === 'string') return value;
   if (value && typeof value === 'object' && typeof (value as { content?: unknown }).content === 'string') return (value as { content: string }).content;
   return fallback;
+}
+
+/**
+ * transformers 5 ``GPT2Tokenizer.__init__``: the BPE vocabulary and merges are
+ * kept; normalization is removed, pre-tokenization and decoding become plain
+ * ``ByteLevel`` (for example SmolVLM's ``Digits`` split is dropped), and a
+ * missing post-processor is built from ``add_bos_token``/``add_eos_token``.
+ */
+function rebuildGPT2(root: RawNode, flags: TokenizerFlags): void {
+  const model = rawGet(root, 'model');
+  if (model?.t === 'o') {
+    rawSet(model, 'type', rawFromValue('BPE'));
+    rawSet(model, 'dropout', rawFromValue(null));
+    rawSet(model, 'unk_token', rawFromValue(null));
+    rawSet(model, 'continuing_subword_prefix', rawFromValue(''));
+    rawSet(model, 'end_of_word_suffix', rawFromValue(''));
+    rawSet(model, 'fuse_unk', rawFromValue(false));
+    rawSet(model, 'byte_fallback', rawFromValue(false));
+    rawSet(model, 'ignore_merges', rawFromValue(false));
+  }
+  rawSet(root, 'normalizer', rawFromValue(null));
+  rawSet(root, 'pre_tokenizer', rawFromValue({
+    type: 'ByteLevel', add_prefix_space: flag(flags, 'add_prefix_space', false), trim_offsets: true, use_regex: true,
+  }));
+  rawSet(root, 'decoder', rawFromValue({ type: 'ByteLevel', add_prefix_space: true, trim_offsets: true, use_regex: true }));
+  const explicit = 'add_bos_token' in flags || 'add_eos_token' in flags;
+  const post = rawGet(root, 'post_processor');
+  if (explicit || !post || post.t === 'l') {
+    const addBos = flag(flags, 'add_bos_token', false);
+    const addEos = flag(flags, 'add_eos_token', false);
+    const bos = text(flags, 'bos_token', '<|endoftext|>');
+    const eos = text(flags, 'eos_token', '<|endoftext|>');
+    const token = (id: string, typeId: number): unknown => ({ SpecialToken: { id, type_id: typeId } });
+    const sequence = (id: string, typeId: number): unknown => ({ Sequence: { id, type_id: typeId } });
+    const single = [...(addBos ? [token(bos, 0)] : []), sequence('A', 0), ...(addEos ? [token(eos, 0)] : [])];
+    const pair = [...single, ...(addBos ? [token(bos, 1)] : []), sequence('B', 1), ...(addEos ? [token(eos, 1)] : [])];
+    const special: Record<string, unknown> = {};
+    if (addBos) special[bos] = { id: bos, ids: [tokenId(root, bos)], tokens: [bos] };
+    if (addEos) special[eos] = { id: eos, ids: [tokenId(root, eos)], tokens: [eos] };
+    rawSet(root, 'post_processor', rawFromValue({ type: 'TemplateProcessing', single, pair, special_tokens: special }));
+  }
 }
 
 /**
@@ -315,6 +367,7 @@ function rebuildT5(root: RawNode): void {
 /** Tokenizer classes whose transformers 5 construction is emulated. */
 export const REBUILT_TOKENIZER_CLASSES = new Set([
   'T5Tokenizer', 'T5TokenizerFast', 'DebertaV2Tokenizer', 'DebertaV2TokenizerFast', 'AlbertTokenizer', 'AlbertTokenizerFast',
+  'GPT2Tokenizer', 'GPT2TokenizerFast',
 ]);
 
 /**
@@ -342,6 +395,7 @@ export function canonicalBackendJson(
   if (base === 'T5Tokenizer') rebuildT5(root);
   else if (base === 'DebertaV2Tokenizer') rebuildDebertaV2(root, options.flags ?? {});
   else if (base === 'AlbertTokenizer') rebuildAlbert(root, options.flags ?? {});
+  else if (base === 'GPT2Tokenizer') rebuildGPT2(root, options.flags ?? {});
   for (const key of ['normalizer', 'pre_tokenizer', 'post_processor', 'decoder']) normalizeComponent(rawGet(root, key));
   return emitJsonRaw(root, { sortKeys: true, separators: [',', ':'] });
 }

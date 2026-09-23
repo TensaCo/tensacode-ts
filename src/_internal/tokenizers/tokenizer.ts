@@ -291,6 +291,7 @@ const CLASS_SPECIAL_TOKENS: Record<string, Record<string, string>> = {
   T5Tokenizer: { eos_token: '</s>', unk_token: '<unk>', pad_token: '<pad>' },
   DebertaV2Tokenizer: { bos_token: '[CLS]', eos_token: '[SEP]', unk_token: '[UNK]', sep_token: '[SEP]', pad_token: '[PAD]', cls_token: '[CLS]', mask_token: '[MASK]' },
   AlbertTokenizer: { bos_token: '[CLS]', eos_token: '[SEP]', unk_token: '<unk>', sep_token: '[SEP]', pad_token: '<pad>', cls_token: '[CLS]', mask_token: '[MASK]' },
+  GPT2Tokenizer: { bos_token: '<|endoftext|>', eos_token: '<|endoftext|>', unk_token: '<|endoftext|>' },
   CLIPTokenizer: { bos_token: '<|startoftext|>', eos_token: '<|endoftext|>', unk_token: '<|endoftext|>', pad_token: '<|endoftext|>' },
 };
 

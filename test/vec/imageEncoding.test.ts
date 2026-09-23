@@ -135,3 +135,21 @@ describe('patch encoding (tests/vec/test_image_encoding.py)', () => {
     expect(() => new PatchEncoder({ ...base, ...changes })).toThrow();
   });
 });
+
+describe('LANCZOS resizing (PyTorch interpolate(mode="lanczos", antialias=True))', () => {
+  it('matches float and uint8 outputs', async () => {
+    const { resizeImage } = await import('../../src/_internal/vec/imageProcessing.js');
+    const { fixtureJson, fromJson } = await import('../helpers/fixtures.js');
+    for (const record of fixtureJson('lanczos.json') as any[]) {
+      const floatOut = resizeImage(fromJson(record.float), record.size, 'lanczos');
+      const uint8Out = resizeImage(fromJson(record.uint8, 'uint8'), record.size, 'lanczos');
+      expectCloseTo(floatOut.data, record.float_out.data, 1e-6);
+      expect([...uint8Out.data]).toEqual(record.uint8_out.data);
+    }
+  });
+});
+
+function expectCloseTo(actual: ArrayLike<number>, expected: number[], atol: number): void {
+  expected.forEach((value, index) => expect(Math.abs(actual[index]! - value)).toBeLessThanOrEqual(atol));
+}
+

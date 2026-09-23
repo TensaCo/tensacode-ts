@@ -120,7 +120,9 @@ def cached():
              'openai/clip-vit-base-patch32': ('a photo of a <|endoftext|> cat', False),
              # transformers 5 rebuilds these pipelines from tokenizer_config.json flags.
              'cross-encoder/nli-deberta-v3-small': ('premise [SEP] hypothesis', True),
-             'albert/albert-base-v2': ('hello [SEP] world', True)}
+             'albert/albert-base-v2': ('hello [SEP] world', True),
+             # GPT2Tokenizer rebuild (drops the file's Digits split); added tokens with hyphens.
+             'HuggingFaceTB/SmolVLM-256M-Instruct': ('<|im_start|>User:<global-img><image>12 cats<end_of_utterance>', False)}
     from huggingface_hub.constants import HF_HUB_CACHE
     result = {}
     for repo, (inline, pairs) in repos.items():

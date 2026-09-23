@@ -17,11 +17,11 @@ import { Tensor, tensor } from '../../nn/tensor.js';
 import { NotImplementedError, ValueError } from '../../errors.js';
 import { deepCopy, isPlainObject, jsonEqual, type JsonObject, type JsonValue } from '../json.js';
 
-export type InterpolationMode = 'nearest-exact' | 'bilinear' | 'bicubic';
+export type InterpolationMode = 'nearest-exact' | 'bilinear' | 'bicubic' | 'lanczos';
 
 /** PIL resampling codes accepted by processor configurations. */
 export const PIL_RESAMPLING: Readonly<Record<number, InterpolationMode | null>> = Object.freeze({
-  0: 'nearest-exact', 1: null, 2: 'bilinear', 3: 'bicubic', 4: null, 5: null,
+  0: 'nearest-exact', 1: 'lanczos', 2: 'bilinear', 3: 'bicubic', 4: null, 5: null,
 });
 
 function filterLinear(x: number): number {
@@ -38,6 +38,16 @@ function filterCubic(x: number): number {
   return 0;
 }
 
+function filterLanczos(x: number): number {
+  // Lanczos with a = 3: ``sinc(x) * sinc(x / 3)`` on ``(-3, 3)``.
+  const sinc = (value: number): number => {
+    if (value === 0) return 1;
+    const scaled = value * Math.PI;
+    return Math.sin(scaled) / scaled;
+  };
+  return x > -3 && x < 3 ? sinc(x) * sinc(x / 3) : 0;
+}
+
 interface AxisWeights {
   starts: Int32Array;
   sizes: Int32Array;
@@ -48,9 +58,9 @@ interface AxisWeights {
 }
 
 /** PyTorch ``HelperInterpBase::_compute_index_ranges_weights`` (antialias, ``align_corners=False``). */
-function axisWeights(inputSize: number, outputSize: number, mode: 'bilinear' | 'bicubic'): AxisWeights {
-  const interpSize = mode === 'bilinear' ? 2 : 4;
-  const filter = mode === 'bilinear' ? filterLinear : filterCubic;
+function axisWeights(inputSize: number, outputSize: number, mode: 'bilinear' | 'bicubic' | 'lanczos'): AxisWeights {
+  const interpSize = mode === 'bilinear' ? 2 : mode === 'bicubic' ? 4 : 6;
+  const filter = mode === 'bilinear' ? filterLinear : mode === 'bicubic' ? filterCubic : filterLanczos;
   const scale = inputSize / outputSize;
   const support = scale >= 1 ? interpSize * 0.5 * scale : interpSize * 0.5;
   const maxInterp = Math.ceil(support) * 2 + 1;
@@ -277,7 +287,7 @@ export class ImageProcessor {
     const code = this.values.resample ?? 2;
     const mode = typeof code === 'number' ? PIL_RESAMPLING[code] : undefined;
     if (mode === undefined) throw new ValueError(`unsupported resample ${JSON.stringify(code)}`);
-    if (mode === null) throw new NotImplementedError(`resample ${code} (LANCZOS/BOX/HAMMING) is not available in the TypeScript port`);
+    if (mode === null) throw new NotImplementedError(`resample ${code} (BOX/HAMMING) is not available in the TypeScript port`);
     return mode;
   }
 
