@@ -41,6 +41,18 @@
       "types": "./dist/ops/index.d.ts",
       "import": "./dist/ops/index.js"
     },
+    "./ops/vec": {
+      "types": "./dist/ops/vec/index.d.ts",
+      "import": "./dist/ops/vec/index.js"
+    },
+    "./ops/text": {
+      "types": "./dist/ops/text/index.d.ts",
+      "import": "./dist/ops/text/index.js"
+    },
+    "./ops/graph": {
+      "types": "./dist/ops/graph/index.d.ts",
+      "import": "./dist/ops/graph/index.js"
+    },
     "./ops/*": {
       "types": "./dist/ops/*.d.ts",
       "import": "./dist/ops/*.js"
@@ -69,18 +81,21 @@
   },
   "files": [
     "dist",
+    "docs",
     "README.md",
     "DESIGN.md",
     "LICENSE"
   ],
   "scripts": {
+    "prebuild": "npm run clean",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "fixtures": "../python/.venv/bin/python scripts/fixtures/generate.py",
-    "clean": "rm -rf dist",
-    "codegen": "../python/.venv/bin/python scripts/codegen/native_defaults.py"
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "codegen": "../python/.venv/bin/python scripts/codegen/native_defaults.py",
+    "prepare": "npm run build"
   },
   "peerDependencies": {
     "@huggingface/transformers": ">=3"

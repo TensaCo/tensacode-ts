@@ -141,13 +141,14 @@ wired after the modules land.
 | `tools/{chatbot,investigator,planner,cognition,actions}.py`, `tools/decision/` | `src/tools/{chatbot,investigator,planner,cognition,actions,decision}.ts` | tools |
 | `_internal/{proposals,retrieval}.py`, `_internal/{cognition,memory,sessions,execution}/*` | `src/_internal/...` (camelCase file names) | tools |
 | `_internal/text/realization.py`, `_internal/vec/sequence.py` | `src/_internal/text/realization.ts`, `src/_internal/vec/sequence.ts` | tools |
-| `tools/__init__.py` | `src/tools/index.ts` | integrator |
+| `tools/__init__.py` | `src/tools/index.ts` (also exports `PretrainedModule`) | integrator |
 | `training/__init__.py` | `src/training/index.ts` | training |
 | `_internal/training/{persistence,trainer,tool,checkpoint,_tensor_store}.py` | `src/_internal/training/*.ts` | training |
 | `PretrainedTool.push_to_hub` transport | `src/_internal/hubUpload.ts` | training |
 | `_internal/response_quality.py` | `src/_internal/responseQuality.ts` | training |
 | DeBERTa-v2 (transformers) | `src/_internal/native/debertaV2.ts` | training |
-| `examples/`, package `README.md` | `examples/`, `README.md` | training |
+| `examples/`, package `README.md`, `docs/` | `examples/`, `README.md`, `docs/` | training, integrator |
+| float summation (`sum`, `math.fsum`) | `src/_internal/numeric.ts` | integrator |
 
 ## Conventions (every builder)
 
@@ -257,21 +258,46 @@ others with `ValueError`.
 - **Tokenizer JSON.** Artifacts created by TypeScript `fromFoundation` embed the
   canonical backend JSON (sorted keys); Python-created artifacts are reused
   verbatim, so Python → TypeScript loading is exact.
-- **Python examples/research scripts** are not ported beyond the quickstart and
-  lifecycle examples in `examples/`.
+- **Python examples/research scripts** are not ported beyond the quickstart,
+  lifecycle and triage examples in `examples/`.
+- **Integral floats.** JavaScript cannot tell `1` from `1.0`. Configuration keys in
+  `PYTHON_FLOAT_KEYS` (and session float fields) are written as floats; other
+  integral numbers (for example JSON-dumped structured training targets) are
+  written as ints. A Python user who passes an int for a float field
+  (`hidden_dropout_prob=0`) gets a different fingerprint than TypeScript's `0.0`.
+- **Object key order.** Integer-like keys of plain objects are reordered by
+  JavaScript (affects `Retrieve` items keyed by integers and non-string Python dict
+  keys, which decode as decimal strings).
+- **Async providers.** HTTP (`OpenAICompatibleModel`, `JevModel`) and local
+  providers are asynchronous only; use `acall`/`aask`. A redirect raises
+  `ProviderHTTPError` with its 3xx `.status`, as in Python.
+- **Plan actions** receive `(state, args)`; plan validation cannot bind keyword
+  arguments against a JavaScript signature. Error observations record JavaScript
+  error names (`Error` where Python records `RuntimeError`).
+- **Threads.** Python's `RLock`s become single-threaded execution plus a promise
+  queue that serializes session persistence.
 
 ## Interoperability guarantees
 
 - Model artifacts (`tensorcode_config.json` + `model.safetensors`) written by
   Python load in TypeScript and re-save byte-identically when the TypeScript class
-  reconstructs the same architecture (`test/internal/pretrained.test.ts`).
+  reconstructs the same architecture (`test/internal/pretrained.test.ts`). One
+  qualification: for models with two or more tied parameter aliases (T5), Python's
+  `safetensors` writes the `__metadata__` alias entries in nondeterministic (Rust
+  `HashMap`) order, so two Python saves already differ; such files match up to
+  metadata order with identical tensor bytes.
 - Configuration-only operation artifacts (`tensorcode.operation`) are identical.
 - Operation fingerprints (`src/_internal/fingerprint.ts`) equal Python's for the
   same configuration (`test/internal/ranking.test.ts`), so experience files are
   portable once the training module implements the codec.
+- Experience files and standalone `tensorcode.checkpoint` files are interchangeable.
+  Python directory checkpoints load in TypeScript (their PyTorch/CPython RNG states
+  are validated and ignored); TypeScript directory checkpoints do not load in Python.
+- Tool session files (chat, ranking, cognitive session/state, trajectories, JSON
+  memory) written by Python load in TypeScript and re-save byte-identically.
 - The Hugging Face cache layout is shared with `huggingface_hub`.
 
-## Extension points (stubs owned by modules)
+## Former extension points (now implemented)
 
 | File | Owner | Contract |
 |---|---|---|

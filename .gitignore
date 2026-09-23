@@ -5,3 +5,5 @@ coverage/
 .vitest/
 __pycache__/
 *.pyc
+*.tgz
+.readme-snippet-*

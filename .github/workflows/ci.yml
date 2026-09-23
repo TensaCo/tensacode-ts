@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20.x', '22.x', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Typecheck (library and tests)
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+      - name: Test
+        run: npm test
+      - name: Typecheck examples
+        run: npx tsc -p examples/tsconfig.json
+      - name: Run examples
+        # Node >= 22.18 runs TypeScript files directly (type stripping).
+        if: matrix.node == '24.x'
+        run: |
+          node examples/investigatorQuickstart.ts
+          node examples/ownedVectorLifecycle.ts
+          node examples/supportTriage.ts
+          node examples/traceAndTrain.ts
+          node examples/pretrainedLifecycle.ts
+      - name: Package contents
+        if: matrix.node == '24.x'
+        run: npm pack --dry-run
