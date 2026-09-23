@@ -24,6 +24,8 @@ export interface LocalProcessor {
   apply_chat_template(messages: unknown[], options: Record<string, unknown>): unknown;
   batch_decode(sequences: number[][], options: Record<string, unknown>): string[] | Promise<string[]>;
   (text: string, images?: unknown[] | null, options?: Record<string, unknown>): unknown;
+  /** The processor's text tokenizer; text-only requests are tokenized with it when present. */
+  tokenizer?: ((text: string, options?: Record<string, unknown>) => unknown) | null;
 }
 
 export interface LocalModelOptions {
@@ -171,7 +173,13 @@ export class LocalModel {
     }
     const prompt = await this.processor.apply_chat_template(messages, { add_generation_prompt: true, tokenize: false });
     if (typeof prompt !== 'string') throw new TypeError('processor.apply_chat_template must return the prompt text');
-    const inputs = await this.processor(prompt, images.length ? images : null) as Record<string, unknown>;
+    // Text-only prompts go through the processor's tokenizer, which is what a
+    // Python processor does without images. Transformers.js multimodal
+    // processors (for example Idefics3/SmolVLM) fail when called without images.
+    const tokenizer = this.processor.tokenizer;
+    const inputs = await (images.length || typeof tokenizer !== 'function'
+      ? this.processor(prompt, images.length ? images : null)
+      : tokenizer(prompt)) as Record<string, unknown>;
     if (inputs === null || typeof inputs !== 'object') throw new TypeError('processor must return model inputs');
     const length = promptLength(inputs);
     const output = await this.model.generate({ ...inputs, max_new_tokens: this.maxNewTokens, do_sample: false });

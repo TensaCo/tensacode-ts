@@ -62,6 +62,22 @@ function adapter(answer = 'A small cat.') {
 }
 
 describe('LocalModel', () => {
+  it('text-only prompts use the processor tokenizer (multimodal processors require images)', async () => {
+    const calls: string[] = [];
+    const multimodal = Object.assign(
+      async () => { throw new TypeError("Cannot read properties of undefined (reading 'rows')"); },
+      {
+        apply_chat_template: () => 'prompt',
+        batch_decode: () => ['Hello.'],
+        tokenizer: (text: string) => { calls.push(text); return { input_ids: new FakeTensor([[1n, 2n]]) }; },
+      },
+    ) as unknown as LocalProcessor;
+    const local = new LocalModel(model(), multimodal, { modelId: 'supplied-test-model' });
+    const output = await local.acomplete(new ModelRequest([new Message('user', 'Say hello')]));
+    expect(output.text).toBe('Hello.');
+    expect(calls).toEqual(['prompt']);
+  });
+
   it('text and image preserve order without prompt echo', async () => {
     const { local, state, loaded } = adapter();
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
