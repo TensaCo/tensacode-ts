@@ -9,15 +9,32 @@
 import { Module } from '../../nn/module.js';
 import { activation } from '../../nn/ops/nn.js';
 import type { Tensor } from '../../nn/tensor.js';
+import { UnaryOp } from '../../nn/backend/kernels.js';
+
+/** Activations whose ``ACT2FN`` function is exactly one fused kernel operation. */
+const KERNEL_OPS: Record<string, UnaryOp> = {
+  gelu: UnaryOp.GeluErf,
+  gelu_python: UnaryOp.GeluErf,
+  gelu_new: UnaryOp.GeluTanh,
+  gelu_pytorch_tanh: UnaryOp.GeluTanh,
+  gelu_fast: UnaryOp.GeluTanh,
+};
 
 /** A registered activation; ``forward`` applies the ``ACT2FN`` function. */
 export class ActivationModule extends Module {
   static override readonly qualifiedName: string = 'transformers.activations.GELUActivation';
   readonly #fn: (x: Tensor) => Tensor;
+  readonly #name: string;
 
   constructor(name: string) {
     super();
     this.#fn = activation(name);
+    this.#name = name;
+  }
+
+  /** The kernel operation computing this activation exactly, if there is one. */
+  kernelOp(): UnaryOp | null {
+    return Object.hasOwn(KERNEL_OPS, this.#name) ? KERNEL_OPS[this.#name]! : null;
   }
 
   override configurationAttributes(): Record<string, unknown> {

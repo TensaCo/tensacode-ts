@@ -10,7 +10,7 @@ import { ValueError } from '../../errors.js';
 import type { NativeConfig } from './config.js';
 import { baseInitWeights, initializerStd, postInit, type InitWeights } from './hfInit.js';
 import {
-  NativeModel, attention, causalBias, combineBias, keyPaddingBias, mergeHeads, newParameter, positionIds, registerPositionBuffers, splitHeads,
+  NativeModel, causalBias, combineBias, keyPaddingBias, newParameter, positionIds, registerPositionBuffers, feedForward, selfAttention,
 } from './modules.js';
 
 class CLIPAttention extends Module {
@@ -35,10 +35,10 @@ class CLIPAttention extends Module {
   }
 
   forward(hidden: Tensor, bias: Tensor | null): Tensor {
-    const q = splitHeads(this.q_proj.forward(hidden), this.heads);
-    const k = splitHeads(this.k_proj.forward(hidden), this.heads);
-    const v = splitHeads(this.v_proj.forward(hidden), this.heads);
-    return this.out_proj.forward(mergeHeads(attention(q, k, v, { scale: this.headDim ** -0.5, bias, dropout: this.dropoutRate, training: this.training })));
+    return selfAttention(
+      { query: this.q_proj, key: this.k_proj, value: this.v_proj, output: this.out_proj }, hidden, this.heads,
+      { scale: this.headDim ** -0.5, bias, dropout: this.dropoutRate, training: this.training },
+    );
   }
 }
 
@@ -55,7 +55,7 @@ class CLIPMLP extends Module {
   }
 
   forward(hidden: Tensor): Tensor {
-    return this.fc2.forward(this.activation_fn.forward(this.fc1.forward(hidden)));
+    return feedForward(this.fc1, this.activation_fn, this.fc2, hidden);
   }
 }
 

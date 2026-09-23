@@ -1,11 +1,13 @@
 /** Shared building blocks for native transformer architectures. */
 import { Module } from '../../nn/module.js';
-import { Parameter, Tensor, full, zeros, tensor } from '../../nn/tensor.js';
+import { Parameter, Tensor, fromStorage, full, zeros, tensor } from '../../nn/tensor.js';
 import { finfoMin, type DType } from '../../nn/dtype.js';
 import { Embedding, Linear, LayerNorm, Conv2d } from '../../nn/layers.js';
 import * as init from '../../nn/init.js';
-import { noGrad } from '../../nn/autograd.js';
+import { isGradEnabled, noGrad } from '../../nn/autograd.js';
 import { scaledDotProductAttention } from '../../nn/ops/nn.js';
+import { mlpForward, selfAttentionForward, type AttentionBias, type Projection } from '../../nn/backend/kernels.js';
+import type { ActivationModule } from './activations.js';
 import type { NativeConfig } from './config.js';
 import { ValueError } from '../../errors.js';
 
@@ -52,6 +54,97 @@ export function isNativeEncoder(value: unknown): value is NativeEncoder {
 export function splitHeads(x: Tensor, heads: number): Tensor {
   const [batch, length, width] = x.shape as [number, number, number];
   return x.reshape(batch, length, heads, width / heads).transpose(1, 2);
+}
+
+/**
+ * ``fc2(activation(fc1(x)))``. Without gradients, float32 inputs and a kernel
+ * activation run as one fused kernel call that keeps the (large) hidden
+ * activations in kernel memory; the result is bit-identical.
+ */
+export function feedForward(fc1: Linear, activation: ActivationModule, fc2: Linear, x: Tensor): Tensor {
+  const op = activation.kernelOp();
+  if (op !== null && fusable(x, [fc1, fc2]) && x.shape[x.ndim - 1] === fc1.inFeatures && fc1.outFeatures === fc2.inFeatures) {
+    const first = projection(fc1);
+    const second = projection(fc2);
+    const out = mlpForward(
+      x.data as Float32Array, x.numel / fc1.inFeatures, fc1.inFeatures, first.weight, fc1.outFeatures, first.bias, op,
+      second.weight, fc2.outFeatures, second.bias,
+    );
+    if (out) return fromStorage(out, [...x.shape.slice(0, -1), fc2.outFeatures], 'float32');
+  }
+  return fc2.forward(activation.forward(fc1.forward(x)));
+}
+
+/** Whether ``layers`` applied to ``x`` can run as one fused float32 kernel call (no autograd needed). */
+function fusable(x: Tensor, layers: readonly Linear[], extra: readonly (Tensor | null)[] = []): boolean {
+  if (x.ndim < 1 || !layers.every((layer) => layer instanceof Linear && layer.forward === Linear.prototype.forward && layer.weight.ndim === 2)) return false;
+  const operands = [x, ...extra, ...layers.flatMap((layer) => [layer.weight, layer.bias])];
+  if (!operands.every((t) => t === null || (t.dtype === 'float32' && t.data instanceof Float32Array))) return false;
+  return !(isGradEnabled() && operands.some((t) => t?.requiresGrad));
+}
+
+function projection(layer: Linear): Projection {
+  return {
+    weight: { data: layer.weight.data as Float32Array, key: layer.weight._storage, version: layer.weight._storage.version },
+    bias: (layer.bias?.data ?? null) as Float32Array | null,
+  };
+}
+
+/** The projections of a multi-head self-attention block. */
+export interface AttentionProjections {
+  query: Linear;
+  key: Linear;
+  value: Linear;
+  output: Linear;
+}
+
+/**
+ * ``output(mergeHeads(attention(splitHeads(query(x)), splitHeads(key(x)),
+ * splitHeads(value(x)))))`` for ``x [batch, length, width]``. Without gradients
+ * or dropout, float32 operands run as one fused kernel call that keeps the
+ * projections and heads in kernel memory; the result is bit-identical.
+ */
+export function selfAttention(
+  projections: AttentionProjections, x: Tensor, heads: number,
+  options: { scale: number; bias?: Tensor | null; dropout?: number; training?: boolean },
+): Tensor {
+  const { query, key, value, output } = projections;
+  const bias = options.bias ?? null;
+  const inner = query.outFeatures;
+  const dim = inner / heads;
+  if (x.ndim === 3 && Number.isInteger(dim) && !(options.dropout && options.training)
+    && fusable(x, [query, key, value, output], [bias])
+    && x.shape[2] === query.inFeatures && key.inFeatures === query.inFeatures && value.inFeatures === query.inFeatures
+    && key.outFeatures === inner && value.outFeatures === inner && output.inFeatures === inner) {
+    const [batch, length, width] = x.shape as [number, number, number];
+    const strides = bias ? attentionBias(bias, batch, heads, length) : null;
+    if (!bias || strides) {
+      const out = selfAttentionForward(
+        x.data as Float32Array, batch, length, width, heads, dim,
+        projection(query), projection(key), projection(value), projection(output), output.outFeatures, options.scale, strides,
+      );
+      if (out) return fromStorage(out, [batch, length, output.outFeatures], 'float32');
+    }
+  }
+  const q = splitHeads(query.forward(x), heads);
+  const k = splitHeads(key.forward(x), heads);
+  const v = splitHeads(value.forward(x), heads);
+  return output.forward(mergeHeads(attention(q, k, v, {
+    scale: options.scale, bias, dropout: options.dropout ?? 0, training: options.training ?? false,
+  })));
+}
+
+/** Broadcast strides of an additive ``[b, h, q, keys]`` bias (``null``: unsupported layout), as fused attention reads it. */
+function attentionBias(bias: Tensor, batch: number, heads: number, length: number): AttentionBias | null {
+  if (bias.ndim > 4 || bias.shape[bias.ndim - 1] !== length) return null;
+  const [bb, bh, bq] = [...new Array<number>(4 - bias.ndim).fill(1), ...bias.shape] as [number, number, number, number];
+  if ((bb !== 1 && bb !== batch) || (bh !== 1 && bh !== heads) || (bq !== 1 && bq !== length)) return null;
+  return {
+    data: bias.data as Float32Array,
+    queryStride: bq === 1 ? 0 : length,
+    headStride: bh === 1 ? 0 : bq * length,
+    batchStride: bb === 1 ? 0 : bh * bq * length,
+  };
 }
 
 /** ``[batch, heads, length, dim]`` → ``[batch, length, heads * dim]``. */

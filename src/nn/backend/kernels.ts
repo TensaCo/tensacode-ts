@@ -185,6 +185,46 @@ export function linearForward(
   }
 }
 
+/**
+ * ``linear(op(linear(x, w1, b1)), w2, b2)`` for ``x [rows, k]``, ``w1 [hidden, k]``
+ * and ``w2 [n, hidden]``, keeping the hidden activations in kernel memory.
+ * Every element is computed exactly as by ``linearForward``, ``unary`` and
+ * ``linearForward`` in turn; only the two intermediate copies out of (and back
+ * into) kernel memory are skipped. ``hidden`` must be a multiple of four.
+ */
+export function mlpForward(
+  x: Float32Array, rows: number, k: number, w1: WeightSource, hidden: number, b1: Float32Array | null, op: UnaryOp,
+  w2: WeightSource, n: number, b2: Float32Array | null,
+): Float32Array | null {
+  const engine = activeEngine();
+  if (!engine || rows === 0 || n === 0 || k === 0 || hidden === 0 || hidden % 4 !== 0) return null;
+  engine.beginCall();
+  const scratch = new Scratch(engine);
+  try {
+    const kp = pad4(k);
+    const first = stageWeight(engine, scratch, w1, hidden, k, rows);
+    const second = stageWeight(engine, scratch, w2, n, hidden, rows);
+    const a = scratch.alloc(rows * kp * 4);
+    const firstBias = b1 ? scratch.alloc(hidden * 4) : 0;
+    const secondBias = b2 ? scratch.alloc(n * 4) : 0;
+    const h = scratch.alloc(rows * hidden * 4);
+    const c = scratch.alloc(rows * n * 4);
+    if (!first || !second || scratch.failed) return null;
+    stage(engine, x, 0, 1, rows, k, kp, a);
+    if (b1) engine.heap.set(b1.subarray(0, hidden), firstBias >>> 2);
+    if (b2) engine.heap.set(b2.subarray(0, n), secondBias >>> 2);
+    gemm(engine, { a, lda: kp, b: first, ldb: kp, c: h, ldc: hidden, bias: firstBias, m: rows, n: hidden, kp, batch: 1, aOffsets: 0, aStride: 0, bOffsets: 0, bStride: 0, cStride: 0 });
+    const count = rows * hidden;
+    const tasks = parallelTasks(engine, count * UNARY_COST[op]!);
+    const per = Math.max(1024, Math.ceil(count / tasks));
+    engine.run(Kernel.Unary, [h, h, count, per, op], Math.ceil(count / per), tasks > 1);
+    gemm(engine, { a: h, lda: hidden, b: second, ldb: hidden, c, ldc: n, bias: secondBias, m: rows, n, kp: hidden, batch: 1, aOffsets: 0, aStride: 0, bOffsets: 0, bStride: 0, cStride: 0 });
+    return read(engine, c, rows * n);
+  } finally {
+    scratch.release();
+  }
+}
+
 /** ``grad [rows, n] @ weight [n, k]`` (the input gradient of ``linear``). */
 export function linearBackwardInput(grad: Float32Array, rows: number, n: number, weight: Float32Array, k: number): Float32Array | null {
   const engine = activeEngine();
@@ -344,32 +384,116 @@ export function attentionForward(
   const scratch = new Scratch(engine);
   try {
     const dp = pad4(dim);
-    const kp = pad4(keys);
-    const parallel = parallelTasks(engine, batch * heads * queries * keys * (dim + valueDim)) > 1;
-    const threads = parallel ? engine.parallelism() : 1;
-    const qb = Math.max(1, Math.min(queries, 32));
-    const blocks = Math.ceil(queries / qb);
     const qPointer = scratch.alloc(batch * heads * queries * dp * 4);
     const kPointer = scratch.alloc(batch * kvHeads * keys * dp * 4);
     const vRaw = scratch.alloc(batch * kvHeads * keys * valueDim * 4);
-    const vt = scratch.alloc(batch * kvHeads * valueDim * kp * 4);
-    const out = scratch.alloc(batch * heads * queries * valueDim * 4);
-    const biasPointer = bias ? scratch.alloc(bias.data.length * 4) : 0;
-    const scoreBytes = qb * kp * 4;
-    const scores = scratch.alloc(threads * scoreBytes);
     if (scratch.failed) return null;
     stage(engine, q, 0, 1, batch * heads * queries, dim, dp, qPointer);
     stage(engine, k, 0, 1, batch * kvHeads * keys, dim, dp, kPointer);
     stage(engine, v, 0, 1, batch * kvHeads * keys, valueDim, valueDim, vRaw);
-    transpose(engine, vRaw, vt, batch * kvHeads, keys, valueDim, valueDim, kp);
-    if (bias) engine.heap.set(bias.data, biasPointer >>> 2);
-    const scaleBits = new Uint32Array(new Float32Array([scale]).buffer)[0]!;
-    engine.run(Kernel.Attention, [
-      qPointer, kPointer, vt, out, biasPointer,
-      bias?.batchStride ?? 0, bias?.headStride ?? 0, bias?.queryStride ?? 0,
-      batch, heads, kvHeads, queries, keys, dp, kp, valueDim, scaleBits, qb, scores, scoreBytes, blocks,
-    ], batch * heads * blocks, parallel);
-    return read(engine, out, batch * heads * queries * valueDim);
+    const out = attend(engine, scratch, qPointer, kPointer, vRaw, batch, heads, kvHeads, queries, keys, dim, valueDim, scale, bias);
+    return out ? read(engine, out, batch * heads * queries * valueDim) : null;
+  } finally {
+    scratch.release();
+  }
+}
+
+/**
+ * The attention kernel over operands already in kernel memory: ``q [B, H, Lq,
+ * pad4(D)]`` and ``k [B, Hkv, Lk, pad4(D)]`` (zero padded) and ``v [B, Hkv, Lk,
+ * Dv]``. Returns the pointer of ``[B, H, Lq, Dv]`` (0: out of memory).
+ */
+function attend(
+  engine: Engine, scratch: Scratch, qPointer: number, kPointer: number, vRaw: number,
+  batch: number, heads: number, kvHeads: number, queries: number, keys: number, dim: number, valueDim: number,
+  scale: number, bias: AttentionBias | null,
+): number {
+  const dp = pad4(dim);
+  const kp = pad4(keys);
+  const parallel = parallelTasks(engine, batch * heads * queries * keys * (dim + valueDim)) > 1;
+  const threads = parallel ? engine.parallelism() : 1;
+  const qb = Math.max(1, Math.min(queries, 32));
+  const blocks = Math.ceil(queries / qb);
+  const vt = scratch.alloc(batch * kvHeads * valueDim * kp * 4);
+  const out = scratch.alloc(batch * heads * queries * valueDim * 4);
+  const biasPointer = bias ? scratch.alloc(bias.data.length * 4) : 0;
+  const scoreBytes = qb * kp * 4;
+  const scores = scratch.alloc(threads * scoreBytes);
+  if (scratch.failed) return 0;
+  transpose(engine, vRaw, vt, batch * kvHeads, keys, valueDim, valueDim, kp);
+  if (bias) engine.heap.set(bias.data, biasPointer >>> 2);
+  const scaleBits = new Uint32Array(new Float32Array([scale]).buffer)[0]!;
+  engine.run(Kernel.Attention, [
+    qPointer, kPointer, vt, out, biasPointer,
+    bias?.batchStride ?? 0, bias?.headStride ?? 0, bias?.queryStride ?? 0,
+    batch, heads, kvHeads, queries, keys, dp, kp, valueDim, scaleBits, qb, scores, scoreBytes, blocks,
+  ], batch * heads * blocks, parallel);
+  return out;
+}
+
+/** Heap-to-heap ``[count, rows, cols, block]`` → ``[count, cols, rows, block]``. */
+function swapInHeap(engine: Engine, src: number, dst: number, count: number, rows: number, cols: number, block: number): void {
+  const n = count * rows * cols * block;
+  const perBatch = Math.max(1, Math.ceil(cols / Math.max(1, Math.ceil(parallelTasks(engine, n) / count))));
+  const tasks = count * Math.ceil(cols / perBatch);
+  engine.run(Kernel.SwapAxes, [src, dst, count, rows, cols, block, perBatch], tasks, tasks > 1);
+}
+
+/** One projection of {@link selfAttentionForward}: ``[out, in]`` weight and optional bias. */
+export interface Projection {
+  weight: WeightSource;
+  bias: Float32Array | null;
+}
+
+/**
+ * Multi-head self-attention of ``x [batch, length, width]`` with every
+ * intermediate kept in kernel memory: ``out(merge(attention(split(q(x)),
+ * split(k(x)), split(v(x)))))`` for ``heads`` heads of ``dim`` (a multiple of
+ * four) features. Every element is computed exactly as by ``linearForward``,
+ * the head permutes, ``attentionForward`` and ``linearForward`` in turn.
+ */
+export function selfAttentionForward(
+  x: Float32Array, batch: number, length: number, width: number, heads: number, dim: number,
+  query: Projection, key: Projection, value: Projection, output: Projection, outWidth: number,
+  scale: number, bias: AttentionBias | null,
+): Float32Array | null {
+  const engine = activeEngine();
+  const rows = batch * length;
+  const inner = heads * dim;
+  if (!engine || rows === 0 || width === 0 || inner === 0 || outWidth === 0 || dim % 4 !== 0) return null;
+  engine.beginCall();
+  const scratch = new Scratch(engine);
+  try {
+    const kp = pad4(width);
+    const weights = [query, key, value].map((projection) => stageWeight(engine, scratch, projection.weight, inner, width, rows));
+    const outWeight = stageWeight(engine, scratch, output.weight, outWidth, inner, rows);
+    const a = scratch.alloc(rows * kp * 4);
+    const biases = [query, key, value, output].map((projection, index) => (projection.bias ? scratch.alloc((index === 3 ? outWidth : inner) * 4) : 0));
+    const flat = [0, 1, 2].map(() => scratch.alloc(rows * inner * 4));
+    const split = [0, 1, 2].map(() => scratch.alloc(rows * inner * 4));
+    const c = scratch.alloc(rows * outWidth * 4);
+    if (weights.some((pointer) => !pointer) || !outWeight || scratch.failed) return null;
+    stage(engine, x, 0, 1, rows, width, kp, a);
+    [query, key, value, output].forEach((projection, index) => {
+      if (projection.bias) engine.heap.set(projection.bias.subarray(0, index === 3 ? outWidth : inner), biases[index]! >>> 2);
+    });
+    for (let index = 0; index < 3; index += 1) {
+      gemm(engine, {
+        a, lda: kp, b: weights[index]!, ldb: kp, c: flat[index]!, ldc: inner, bias: biases[index]!, m: rows, n: inner, kp,
+        batch: 1, aOffsets: 0, aStride: 0, bOffsets: 0, bStride: 0, cStride: 0,
+      });
+      // [batch, length, heads, dim] -> [batch, heads, length, dim]
+      swapInHeap(engine, flat[index]!, split[index]!, batch, length, heads, dim);
+    }
+    const attended = attend(engine, scratch, split[0]!, split[1]!, split[2]!, batch, heads, heads, length, length, dim, dim, scale, bias);
+    if (!attended) return null;
+    // [batch, heads, length, dim] -> [batch, length, heads, dim]
+    swapInHeap(engine, attended, flat[0]!, batch, heads, length, dim);
+    gemm(engine, {
+      a: flat[0]!, lda: inner, b: outWeight, ldb: inner, c, ldc: outWidth, bias: biases[3]!, m: rows, n: outWidth, kp: inner,
+      batch: 1, aOffsets: 0, aStride: 0, bOffsets: 0, bStride: 0, cStride: 0,
+    });
+    return read(engine, c, rows * outWidth);
   } finally {
     scratch.release();
   }

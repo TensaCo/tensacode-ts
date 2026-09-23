@@ -14,7 +14,7 @@ import { RuntimeError, ValueError } from '../../errors.js';
 import type { JsonObject } from '../json.js';
 import type { NativeConfig } from './config.js';
 import { baseInitWeights, initializerStd, postInit } from './hfInit.js';
-import { NativeModel, attention, keyPaddingBias, mergeHeads, splitHeads } from './modules.js';
+import { NativeModel, keyPaddingBias, feedForward, selfAttention } from './modules.js';
 import { LlamaModel, type LlamaLayerCache } from './llama.js';
 import { generateCausal, type CausalForwardInputs, type CausalGenerateOptions, type CausalGenerateOutput, type CausalLanguageModel } from './causalGeneration.js';
 
@@ -100,11 +100,10 @@ class Idefics3VisionAttention extends Module {
   }
 
   forward(hidden: Tensor, bias: Tensor | null): Tensor {
-    const q = splitHeads(this.q_proj.forward(hidden), this.heads);
-    const k = splitHeads(this.k_proj.forward(hidden), this.heads);
-    const v = splitHeads(this.v_proj.forward(hidden), this.heads);
-    const output = attention(q, k, v, { scale: this.headDim ** -0.5, bias, dropout: this.dropoutRate, training: this.training });
-    return this.out_proj.forward(mergeHeads(output));
+    return selfAttention(
+      { query: this.q_proj, key: this.k_proj, value: this.v_proj, output: this.out_proj }, hidden, this.heads,
+      { scale: this.headDim ** -0.5, bias, dropout: this.dropoutRate, training: this.training },
+    );
   }
 }
 
@@ -122,7 +121,7 @@ class Idefics3VisionMLP extends Module {
   }
 
   forward(hidden: Tensor): Tensor {
-    return this.fc2.forward(this.activation_fn.forward(this.fc1.forward(hidden)));
+    return feedForward(this.fc1, this.activation_fn, this.fc2, hidden);
   }
 }
 

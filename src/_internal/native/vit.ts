@@ -7,7 +7,7 @@ import { cat } from '../../nn/ops/shape.js';
 import * as init from '../../nn/init.js';
 import { ValueError } from '../../errors.js';
 import type { NativeConfig } from './config.js';
-import { NativeModel, attention, mergeHeads, splitHeads } from './modules.js';
+import { NativeModel, feedForward, selfAttention } from './modules.js';
 import { baseInitWeights, initializerStd, postInit, type InitWeights } from './hfInit.js';
 
 export class ViTPatchEmbeddings extends Module {
@@ -97,10 +97,10 @@ class ViTAttention extends Module {
   }
 
   forward(hidden: Tensor, bias: Tensor | null): Tensor {
-    const q = splitHeads(this.q_proj.forward(hidden), this.heads);
-    const k = splitHeads(this.k_proj.forward(hidden), this.heads);
-    const v = splitHeads(this.v_proj.forward(hidden), this.heads);
-    return this.o_proj.forward(mergeHeads(attention(q, k, v, { scale: this.headDim ** -0.5, bias, dropout: this.dropoutRate, training: this.training })));
+    return selfAttention(
+      { query: this.q_proj, key: this.k_proj, value: this.v_proj, output: this.o_proj }, hidden, this.heads,
+      { scale: this.headDim ** -0.5, bias, dropout: this.dropoutRate, training: this.training },
+    );
   }
 }
 
@@ -117,7 +117,7 @@ class ViTMLP extends Module {
   }
 
   forward(hidden: Tensor): Tensor {
-    return this.fc2.forward(this.activation_fn.forward(this.fc1.forward(hidden)));
+    return feedForward(this.fc1, this.activation_fn, this.fc2, hidden);
   }
 }
 
