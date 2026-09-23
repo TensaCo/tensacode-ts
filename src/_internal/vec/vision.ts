@@ -265,7 +265,7 @@ export class ImageEncoder extends LatentOperation<Tensor | ProcessedImages, Late
     const { path } = await resolveArtifactDirectory(repo, { ...hub, revision, allowPatterns: ['config.json', 'preprocessor_config.json'] });
     const raw = parseJsonStrict(await readFile(join(path, 'config.json'), 'utf8'));
     if (!isPlainObject(raw) || raw.model_type !== 'vit') throw new ValueError('foundation must be a ViT checkpoint');
-    const loaded = await loadNativeFoundation(repo, { ...hub, revision, head: 'base', addPoolingLayer: false, tokenizer: false });
+    const loaded = await loadNativeFoundation(repo, { ...hub, revision, head: 'base', addPoolingLayer: false, tokenizer: false, useSafetensors: true });
     if (loaded.config.modelType !== 'vit') throw new ValueError('foundation must be a ViT checkpoint');
     const processor = parseJsonStrict(await readFile(join(loaded.directory, 'preprocessor_config.json'), 'utf8'));
     const config: JsonObject = {

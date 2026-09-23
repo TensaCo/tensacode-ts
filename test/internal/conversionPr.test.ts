@@ -63,7 +63,7 @@ function fakeHub(options: { discussions: Discussion[]; isPrivate?: boolean; conv
     match = /^\/org\/model\/resolve\/[0-9a-f]{40}\/(.+)$/.exec(path);
     if (match) {
       const name = decodeURIComponent(match[1]!);
-      if (name === 'pytorch_model.bin') return new Response('pickle', { status: 200 });
+      if (name === 'pytorch_model.bin') return new Response(readFileSync('test/fixtures/torch_checkpoint/albert_pytorch_model.bin'), { status: 200 });
       return new Response(readFileSync(join(fixture, name)), { status: 200 });
     }
     return new Response('missing', { status: 404 });
@@ -114,9 +114,9 @@ describe('safetensors conversion PR', () => {
     expect(calls).toEqual([]);
   });
 
-  it('loads a PyTorch-only foundation from the conversion PR', async () => {
+  it('loads a PyTorch-only foundation from the conversion PR with useSafetensors', async () => {
     const calls: string[] = [];
-    const options = { endpoint: 'https://hub.test', token: null, cacheDir: cache, tokenizer: false };
+    const options = { endpoint: 'https://hub.test', token: null, cacheDir: cache, tokenizer: false, useSafetensors: true };
     const loaded = await loadNativeFoundation('org/model', { ...options, fetch: fakeHub({ discussions: [impostor, bot] }, calls) });
     expect(calls.some((url) => url.endsWith(`/resolve/${CONVERTED}/model.safetensors`))).toBe(true);
     expect(calls.some((url) => url.includes('pytorch_model.bin'))).toBe(false);
@@ -127,6 +127,19 @@ describe('safetensors conversion PR', () => {
 
     vi.stubEnv('DISABLE_SAFETENSORS_CONVERSION', '1');
     await expect(loadNativeFoundation('org/model', { ...options, cacheDir: mkdtempSync(join(cache, 'fresh-')), fetch: fakeHub({ discussions: [bot] }, []) }))
-      .rejects.toThrow(ValueError);
+      .rejects.toThrow('org/model does not appear to have a file named model.safetensors or model.safetensors.index.json and thus cannot be loaded with `safetensors`. Please do not set `use_safetensors=True`.');
+  });
+
+  it('loads pytorch_model.bin by default and starts the conversion in the background', async () => {
+    const calls: string[] = [];
+    const spawns: SpawnRecord[] = [];
+    const options = { endpoint: 'https://hub.test', token: null, cacheDir: mkdtempSync(join(cache, 'bin-')), tokenizer: false };
+    const loaded = await loadNativeFoundation('org/model', { ...options, fetch: fakeHub({ discussions: [impostor], converted: [bot], spawns }, calls) });
+    expect(calls.some((url) => url.endsWith(`/resolve/${MAIN}/pytorch_model.bin`))).toBe(true);
+    expect(calls.some((url) => url.includes(CONVERTED))).toBe(false);
+    const reference = await loadNativeFoundation(fixture, { tokenizer: false });
+    const expected = reference.model.stateDict();
+    for (const [name, value] of loaded.model.stateDict()) expect(value.equal(expected.get(name)!), name).toBe(true);
+    await vi.waitFor(() => expect(spawns).toEqual([{ data: ['org/model', false, null], events: [] }]));
   });
 });

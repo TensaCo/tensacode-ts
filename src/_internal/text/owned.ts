@@ -211,7 +211,7 @@ export abstract class OwnedTextOperation<O> extends Operation<readonly Message[]
       throw new ValueError('foundation config supports semantic, decoding and generation fields only');
     }
     const loaded = await loadNativeFoundation(repo, {
-      ...hub, revision: revision ?? null, head: 'seq2seq', restoreRawTieFlags: true,
+      ...hub, revision: revision ?? null, head: 'seq2seq', restoreRawTieFlags: true, useSafetensors: true,
     });
     if (loaded.tokenizer === null) throw new ValueError('foundation has no tokenizer.json; a fast tokenizer is required');
     settings.native_config = loaded.config.toDiffDict();

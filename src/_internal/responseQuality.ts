@@ -494,7 +494,7 @@ export class ResponseQualityAssessor extends LatentOperation<QualityInputs | Qua
     } catch {
       local = false;
     }
-    const probe = await loadNativeFoundation(repo, { ...hub, revision, localFilesOnly, head: 'base', tokenizer: true, addPoolingLayer: false });
+    const probe = await loadNativeFoundation(repo, { ...hub, revision, localFilesOnly, head: 'base', tokenizer: true, addPoolingLayer: false, useSafetensors: true });
     const native = probe.config;
     if ((native.modelType !== 'bert' && native.modelType !== 'electra') || native.get('is_decoder') === true || native.isEncoderDecoder) {
       throw new ValueError('response quality supports native BERT or Electra encoders');

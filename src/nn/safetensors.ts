@@ -63,10 +63,11 @@ export function tensorBytes(tensor: Tensor): Uint8Array {
   return bytes;
 }
 
-function decodeValues(dtype: DType, bytes: Uint8Array, shape: number[]): Tensor {
+/** A tensor of ``shape`` from little-endian ``dtype`` bytes (safetensors and PyTorch storages). */
+export function decodeTensorBytes(dtype: DType, bytes: Uint8Array, shape: number[]): Tensor {
   const count = numelOf(shape);
   const size = itemSize(dtype);
-  if (bytes.byteLength !== count * size) throw new Error('safetensors tensor byte length does not match its shape');
+  if (bytes.byteLength !== count * size) throw new Error('tensor byte length does not match its shape');
   const out = allocate(dtype, count);
   if (dtype === 'float32' && bytes.byteOffset % 4 === 0) {
     out.set(new Float32Array(bytes.buffer, bytes.byteOffset, count));
@@ -174,7 +175,7 @@ export function deserializeSafetensors(bytes: Uint8Array): SafetensorsContents {
     const [begin, end] = offsets as [number, number];
     if (begin < 0 || end < begin || dataStart + end > bytes.byteLength) throw new Error(`safetensors offsets out of range for ${name}`);
     ranges.push([begin, end]);
-    tensors.set(name, decodeValues(dtype, bytes.subarray(dataStart + begin, dataStart + end), record.shape as number[]));
+    tensors.set(name, decodeTensorBytes(dtype, bytes.subarray(dataStart + begin, dataStart + end), record.shape as number[]));
   }
   ranges.sort((a, b) => a[0] - b[0]);
   let cursor = 0;

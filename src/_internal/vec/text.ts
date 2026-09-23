@@ -87,7 +87,7 @@ async function loadFoundation(repo: string, options: TextFoundationHubOptions, d
     const raw = parseJsonStrict(await readFile(join(path, 'config.json'), 'utf8'));
     seq2seq = NativeConfig.fromPretrainedDict(raw, repo).isEncoderDecoder;
   }
-  const loaded = await loadNativeFoundation(repo, { ...hub, revision, head: seq2seq ? 'seq2seq' : 'base', restoreRawTieFlags: true });
+  const loaded = await loadNativeFoundation(repo, { ...hub, revision, head: seq2seq ? 'seq2seq' : 'base', restoreRawTieFlags: true, useSafetensors: true });
   if (!loaded.tokenizer) throw new ValueError('a fast tokenizer is required for complete offline artifacts');
   return loaded as LoadedFoundation & { tokenizer: FastTokenizer };
 }

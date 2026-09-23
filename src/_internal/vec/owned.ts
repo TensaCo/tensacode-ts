@@ -323,7 +323,7 @@ export abstract class OwnedMap<O = unknown> extends LatentOperation<unknown, O> 
     if (trustRemoteCode || (useSafetensors !== undefined && useSafetensors !== true)) {
       throw new ValueError('foundation requires native code and safetensors');
     }
-    const loaded = await loadNativeFoundation(repo, { ...hub, revision, head: 'base', tokenizer: false });
+    const loaded = await loadNativeFoundation(repo, { ...hub, revision, head: 'base', tokenizer: false, useSafetensors: true });
     const config: JsonObject = {};
     if (outputSpace !== undefined) config.output_space = outputSpace instanceof Space ? outputSpace.configuration() as unknown as JsonObject : outputSpace;
     if (labels !== undefined) config.labels = [...labels];

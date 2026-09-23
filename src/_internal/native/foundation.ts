@@ -1,13 +1,17 @@
 /**
  * Explicit pretrained foundation import (Python ``AutoModel*.from_pretrained``
- * with ``use_safetensors=True``, ``trust_remote_code=False``).
+ * with ``trust_remote_code=False``).
  *
  * Downloads (or resolves from the shared Hub cache) a model repository, reads
- * ``config.json`` and safetensors weights (single file or sharded index),
- * applies transformers' checkpoint conventions (``base_model_prefix``, legacy
+ * ``config.json`` and its weights, applies transformers' checkpoint
+ * conventions (``base_model_prefix``, legacy ``LayerNorm.gamma``/``beta`` and
  * ViT key names, tied T5 embeddings with an untied ``lm_head`` when the
  * checkpoint stores distinct values) and rejects missing or mismatched
- * weights. Only safetensors weights are accepted; no remote code runs.
+ * weights. Weights resolve like transformers: safetensors (single or
+ * sharded) first; with ``useSafetensors: true`` a Hub repository without them
+ * loads the automated conversion pull request, otherwise PyTorch
+ * ``pytorch_model.bin`` weights (single or sharded) are read with a
+ * weights-only unpickler (``torch.load(weights_only=True)``). No remote code runs.
  */
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -18,7 +22,8 @@ import { deserializeSafetensors } from '../../nn/safetensors.js';
 import { isDType, isFloatingDType, roundToDType, type DType } from '../../nn/dtype.js';
 import { ValueError } from '../../errors.js';
 import { parseJsonStrict, type JsonObject } from '../json.js';
-import { resolveArtifactDirectory, safetensorsConversionRevision, type HubOptions } from '../hub.js';
+import { HubError, resolveArtifactDirectory, safetensorsConversionRevision, type HubOptions } from '../hub.js';
+import { loadTorchStateDict } from './torchCheckpoint.js';
 import { pathExists } from '../files.js';
 import { FastTokenizer } from '../tokenizers/index.js';
 import { NativeConfig, generationConfigFromFile, generationConfigFromModel } from './config.js';
@@ -55,6 +60,12 @@ export interface FoundationOptions extends Omit<HubOptions, 'allowPatterns'> {
    * ``missing_keys``).
    */
   initializeMissing?: boolean;
+  /**
+   * transformers ``use_safetensors``: ``true`` requires safetensors weights
+   * (a Hub repository without them loads its conversion pull request);
+   * ``null`` (the default) falls back to ``pytorch_model.bin`` weights.
+   */
+  useSafetensors?: boolean | null;
 }
 
 export interface LoadedFoundation<T extends NativeModel = NativeModel> {
@@ -87,24 +98,75 @@ async function hasSafetensors(directory: string): Promise<boolean> {
   return (await pathExists(join(directory, 'model.safetensors'))) || pathExists(join(directory, 'model.safetensors.index.json'));
 }
 
+async function hasTorchWeights(directory: string): Promise<boolean> {
+  return (await pathExists(join(directory, 'pytorch_model.bin'))) || pathExists(join(directory, 'pytorch_model.bin.index.json'));
+}
+
+/** Weight files of a single-file or sharded (``<index>``) checkpoint. */
+async function checkpointFiles(directory: string, single: string, index: string): Promise<string[]> {
+  if (await pathExists(join(directory, single))) return [join(directory, single)];
+  const map = parseJsonStrict(await readFile(join(directory, index), 'utf8')) as { weight_map?: Record<string, string> };
+  return [...new Set(Object.values(map.weight_map ?? {}).map((file) => join(directory, file)))];
+}
+
 async function readWeights(directory: string): Promise<Map<string, Tensor>> {
-  const single = join(directory, 'model.safetensors');
-  const index = join(directory, 'model.safetensors.index.json');
-  const files: string[] = [];
-  if (await pathExists(single)) files.push(single);
-  else if (await pathExists(index)) {
-    const map = parseJsonStrict(await readFile(index, 'utf8')) as { weight_map?: Record<string, string> };
-    files.push(...new Set(Object.values(map.weight_map ?? {}).map((file) => join(directory, file))));
-  } else {
-    throw new ValueError(`no safetensors weights in ${directory}; TensorCode accepts only safetensors foundation weights`);
-  }
   const tensors = new Map<string, Tensor>();
-  for (const file of files) {
+  for (const file of await checkpointFiles(directory, 'model.safetensors', 'model.safetensors.index.json')) {
     const bytes = await readFile(file);
     const contents = deserializeSafetensors(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
     for (const [name, value] of contents.tensors) tensors.set(name, value);
   }
   return tensors;
+}
+
+/** ``pytorch_model.bin`` weights (``torch.load(..., weights_only=True)`` per shard). */
+async function readTorchWeights(directory: string): Promise<Map<string, Tensor>> {
+  const tensors = new Map<string, Tensor>();
+  for (const file of await checkpointFiles(directory, 'pytorch_model.bin', 'pytorch_model.bin.index.json')) {
+    const bytes = await readFile(file);
+    for (const [name, value] of loadTorchStateDict(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength))) tensors.set(name, value);
+  }
+  return tensors;
+}
+
+/**
+ * transformers' ``_get_resolved_checkpoint_files`` for the default variant:
+ * safetensors first, then (unless ``useSafetensors``) PyTorch weights; a Hub
+ * repository without safetensors loads its conversion pull request when
+ * ``useSafetensors`` is set, and otherwise starts that conversion in the
+ * background after loading the PyTorch weights.
+ */
+async function resolveWeights(
+  source: string, path: string, remote: boolean, useSafetensors: boolean | null, hub: Omit<HubOptions, 'allowPatterns'>,
+): Promise<Map<string, Tensor>> {
+  if (await hasSafetensors(path)) return readWeights(path);
+  if (!remote) {
+    if (useSafetensors !== true && (await hasTorchWeights(path))) return readTorchWeights(path);
+    throw new HubError(useSafetensors === true
+      ? `Error no file named model.safetensors found in directory ${source}.`
+      : `Error no file named model.safetensors, or pytorch_model.bin, found in directory ${source}.`);
+  }
+  if (useSafetensors === true) {
+    const conversion = await safetensorsConversionRevision(source, hub);
+    const converted = conversion === null ? null : (await resolveArtifactDirectory(source, {
+      ...hub, revision: conversion, allowPatterns: ['model.safetensors', 'model.safetensors.index.json', 'model-*.safetensors'],
+    })).path;
+    if (converted === null || !(await hasSafetensors(converted))) {
+      throw new HubError(`${source} does not appear to have a file named model.safetensors or model.safetensors.index.json `
+        + 'and thus cannot be loaded with `safetensors`. Please do not set `use_safetensors=True`.');
+    }
+    return readWeights(converted);
+  }
+  const torch = (await resolveArtifactDirectory(source, {
+    ...hub, allowPatterns: ['pytorch_model.bin', 'pytorch_model.bin.index.json', 'pytorch_model-*.bin'],
+  })).path;
+  if (!(await hasTorchWeights(torch))) {
+    throw new HubError(`${source} does not appear to have a file named pytorch_model.bin or model.safetensors.`);
+  }
+  const weights = await readTorchWeights(torch);
+  // transformers starts ``auto_conversion`` in a background thread and ignores its errors.
+  void safetensorsConversionRevision(source, hub).catch(() => null);
+  return weights;
 }
 
 /** Map checkpoint names onto the constructed model's state names. */
@@ -116,7 +178,8 @@ function mapCheckpoint(model: NativeModel, tensors: Map<string, Tensor>): { mapp
   const mapped = new Map<string, Tensor>();
   const unexpected: string[] = [];
   for (const [original, value] of tensors) {
-    let key = original;
+    // transformers' ``legacy`` conversion mapping applies to every checkpoint.
+    let key = original.replace(/LayerNorm.gamma/g, 'LayerNorm.weight').replace(/LayerNorm.beta/g, 'LayerNorm.bias');
     if (type === 'vit') key = legacyVitKey(key);
     if (prefix && !own.has(key)) {
       if (!ownPrefixed && key.startsWith(`${prefix}.`)) key = key.slice(prefix.length + 1);
@@ -220,21 +283,11 @@ function resolveDtype(requested: DType | 'auto', rawConfig: JsonObject, weights:
 export async function loadNativeFoundation(source: string, options: FoundationOptions = {}): Promise<LoadedFoundation> {
   const {
     head = 'base', addPoolingLayer, tokenizer: wantTokenizer, restoreRawTieFlags, configOverrides, dtype: requested = 'auto', initializeMissing = false,
-    ...hub
+    useSafetensors = null, ...hub
   } = options;
   const { path, remote } = await resolveArtifactDirectory(source, { ...hub, allowPatterns: FOUNDATION_FILES });
   const rawConfig = parseJsonStrict(await readFile(join(path, 'config.json'), 'utf8')) as JsonObject;
-  let weightsPath = path;
-  if (remote && !(await hasSafetensors(path))) {
-    // transformers loads ``model.safetensors`` from the Hub's conversion PR.
-    const conversion = await safetensorsConversionRevision(source, hub);
-    if (conversion) {
-      weightsPath = (await resolveArtifactDirectory(source, {
-        ...hub, revision: conversion, allowPatterns: ['model.safetensors', 'model.safetensors.index.json', 'model-*.safetensors'],
-      })).path;
-    }
-  }
-  const weights = await readWeights(weightsPath);
+  const weights = await resolveWeights(source, path, remote, useSafetensors, hub);
   const dtype = resolveDtype(requested, rawConfig, weights);
   let config = NativeConfig.fromPretrainedDict({ ...rawConfig, ...(configOverrides ?? {}) }, source, dtype);
   // transformers builds on the meta device and loads every weight, so loading draws no random numbers.
