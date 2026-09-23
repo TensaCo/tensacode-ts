@@ -8,6 +8,7 @@ import { isFloatingDType } from '../../nn/dtype.js';
 import { crossEntropy, mseLoss } from '../../nn/ops/nn.js';
 import { stack } from '../../nn/ops/shape.js';
 import { ValueError } from '../../errors.js';
+import { isPythonNumber, pythonKindOf, unboxNumber, unboxNumbers } from '../json.js';
 import type { Supervision, Trace } from '../tracing.js';
 import type { OperationLike } from '../../ops/base.js';
 
@@ -46,27 +47,28 @@ export function validateOptimizer(optimizer: Optimizer, params: readonly Tensor[
 
 function asTarget(value: unknown, dtype: 'int64' | Tensor['dtype']): Tensor {
   if (value instanceof Tensor) return value.detach().to(dtype);
-  return makeTensor(value as NestedNumbers, { dtype });
+  return makeTensor(unboxNumbers(value) as NestedNumbers, { dtype });
 }
 
-function inferredKind(value: unknown): 'float' | 'bool' | 'int' {
-  // ``torch.as_tensor`` dtype inference for the cross-entropy target check.
+function inferredKind(value: unknown, container: object | null = null, key: unknown = null): 'float' | 'bool' | 'int' {
+  // ``torch.as_tensor`` dtype inference for the cross-entropy target check. A
+  // Python float (``1.0``, or ``float(1)``) is a float even when integral.
   if (value instanceof Tensor) return isFloatingDType(value.dtype) ? 'float' : value.dtype === 'bool' ? 'bool' : 'int';
   let kind: 'float' | 'bool' | 'int' | null = null;
-  const visit = (item: unknown): void => {
+  const visit = (item: unknown, holder: object | null, slot: unknown): void => {
     if (Array.isArray(item)) {
-      item.forEach(visit);
+      item.forEach((child, index) => visit(child, item, index));
       return;
     }
     if (typeof item === 'boolean') kind ??= 'bool';
-    else if (typeof item === 'number') {
-      if (!Number.isInteger(item)) kind = 'float';
+    else if (typeof item === 'number' || isPythonNumber(item)) {
+      if (!Number.isInteger(unboxNumber(item)) || pythonKindOf(item, holder, slot) === 'float') kind = 'float';
       else if (kind !== 'float') kind = 'int';
     } else {
       throw new TypeError('Cross-entropy targets must be integer indices or named labels');
     }
   };
-  visit(value);
+  visit(value, container, key);
   return kind ?? 'float';
 }
 
@@ -133,7 +135,8 @@ export class OperationTrainer {
           }
           target = target.map((item) => labels.indexOf(item));
         }
-        if (inferredKind(target) !== 'int') throw new ValueError('Cross-entropy targets must be integer indices or named labels');
+        const raw = target === supervision.target;
+        if (inferredKind(target, raw ? supervision : null, raw ? 'target' : null) !== 'int') throw new ValueError('Cross-entropy targets must be integer indices or named labels');
         loss = crossEntropy(prediction, asTarget(target, 'int64'));
       } else if (supervision.loss === 'mse') {
         const target = asTarget(supervision.target, prediction.dtype);

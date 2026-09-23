@@ -5,12 +5,9 @@
  * spelled as floats by the session writers, in addition to the global
  * {@link PYTHON_FLOAT_KEYS}. The global registry is never mutated.
  */
-import { PYTHON_FLOAT_KEYS } from '../json.js';
+import { PYTHON_FLOAT_KEYS, SESSION_FLOAT_FIELDS } from '../json.js';
 
-export const SESSION_FLOAT_FIELDS: readonly string[] = Object.freeze([
-  'predicted_score', 'probability', 'score', 'attention', 'relations', 'embeddings',
-  'support', 'contradiction', 'unknown',
-]);
+export { SESSION_FLOAT_FIELDS };
 
 /** Float keys for session JSON writers (computed per call; includes application-registered keys). */
 export function sessionFloatKeys(): ReadonlySet<string> {

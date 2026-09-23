@@ -8,7 +8,9 @@
 import { Module, publicAttributes } from '../nn/module.js';
 import { ValueError } from '../errors.js';
 import { qualifiedName } from './identity.js';
-import { canonicalJson, isPlainObject, sha256Hex, type JsonObject, type JsonValue } from './json.js';
+import {
+  canonicalJson, isPlainObject, isPythonNumber, sha256Hex, unboxNumber, validatedJson, type JsonObject, type JsonValue,
+} from './json.js';
 import { stateTopology } from './vec/configuration.js';
 import type { OperationLike } from '../ops/base.js';
 
@@ -17,19 +19,30 @@ export interface IdentifiedOperation {
   operationIdentity(): string;
 }
 
+/**
+ * Python ``_configuration_value``: JSON scalars, lists/tuples and string-keyed
+ * mappings (``Map`` included). The copy keeps recorded Python number kinds and
+ * key order, so configurations read from Python fingerprint identically.
+ */
 function configurationValue(value: unknown): JsonValue {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new TypeError('Operation configuration requires finite JSON numbers');
-    return value;
-  }
-  if (Array.isArray(value)) return value.map(configurationValue);
-  if (isPlainObject(value)) {
-    const result: JsonObject = {};
-    for (const [key, item] of Object.entries(value)) result[key] = configurationValue(item);
-    return result;
-  }
-  throw new TypeError('Operation configuration requires JSON data; custom callbacks need explicit configuration() metadata');
+  const check = (item: unknown): void => {
+    if (item === null || typeof item === 'string' || typeof item === 'boolean') return;
+    if (typeof item === 'number' || isPythonNumber(item)) {
+      if (!Number.isFinite(unboxNumber(item))) throw new TypeError('Operation configuration requires finite JSON numbers');
+      return;
+    }
+    if (Array.isArray(item)) {
+      item.forEach(check);
+      return;
+    }
+    if (isPlainObject(item) || (item instanceof Map && [...item.keys()].every((key) => typeof key === 'string'))) {
+      for (const child of item instanceof Map ? item.values() : Object.values(item)) check(child);
+      return;
+    }
+    throw new TypeError('Operation configuration requires JSON data; custom callbacks need explicit configuration() metadata');
+  };
+  check(value);
+  return validatedJson(value);
 }
 
 /** ``{type, config, state_topology, replayable}`` for an operation binding. */
@@ -45,9 +58,7 @@ export function operationConfiguration(operation: OperationLike): JsonObject {
     const modules: [string, object][] = operation instanceof Module ? operation.namedModules() : [['', operation]];
     for (const [name, module] of modules) {
       const attributes = module instanceof Module ? module.configurationAttributes() : publicAttributes(module);
-      const values: JsonObject = {};
-      for (const [key, value] of Object.entries(attributes)) values[key] = configurationValue(value);
-      entries[name] = { type: qualifiedName(module), attributes: values };
+      entries[name] = { type: qualifiedName(module), attributes: configurationValue(attributes) };
     }
     config = entries;
   }

@@ -10,7 +10,8 @@ import type { DType } from '../../nn/dtype.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Module } from '../../nn/module.js';
-import { Parameter, Tensor, ones, randn, tensor } from '../../nn/tensor.js';
+import { Parameter, Tensor, ones, tensor, zeros } from '../../nn/tensor.js';
+import { normal_ } from '../../nn/init.js';
 import { noGrad } from '../../nn/autograd.js';
 import { Identity, Linear } from '../../nn/layers.js';
 import { cat, padSequence } from '../../nn/ops/shape.js';
@@ -21,7 +22,7 @@ import { LatentOperation, asSequence } from '../latentOps.js';
 import { parseObjectiveEnvelope } from '../contracts.js';
 import { qualifiedName } from '../identity.js';
 import { resolveArtifactDirectory } from '../hub.js';
-import { deepCopy, isPlainObject, parseJsonStrict, type JsonObject, type JsonValue } from '../json.js';
+import { deepCopy, isPlainObject, mergeJson, parseJsonStrict, type JsonObject, type JsonValue } from '../json.js';
 import {
   NativeConfig, nativeConfig, generationConfigFromFile, generationConfigFromModel,
 } from '../native/config.js';
@@ -144,7 +145,8 @@ export class TextEncoder extends LatentOperation<string | readonly string[], Lat
     this.readout = readout;
     if (readout === 'output_encoding') {
       const width = this.model.getInputEmbeddings().weight.shape[1]!;
-      this.outputEncoding = this.registerParameter('output_encoding', new Parameter(noGrad(() => randn([1, 1, width]).mul(0.02))));
+      // ``nn.init.normal_(torch.empty(1, 1, width), std=0.02)``
+      this.outputEncoding = this.registerParameter('output_encoding', new Parameter(normal_(zeros([1, 1, width]), 0, 0.02)));
     }
     this.outputSpace = Space.fromConfig(cfg.output_space);
     if (this.outputSpace.dimensions !== nativeWidth(native) || this.outputSpace.organization !== (readout === 'sequence' ? 'sequence' : 'feature')) {
@@ -368,7 +370,7 @@ export class TextDecoder extends LatentOperation<Latent, string | string[]> {
     }
     const supplied = cfg.generation ?? {};
     if (!isPlainObject(supplied)) throw new ValueError('generation must be a mapping');
-    this.generation = { max_new_tokens: 32, do_sample: false, ...(supplied as GenerationSettings) };
+    this.generation = mergeJson({ max_new_tokens: 32, do_sample: false }, supplied as JsonObject) as GenerationSettings;
     if (Object.keys(this.generation).some((key) => !(GENERATION_KEYS as readonly string[]).includes(key))) {
       throw new ValueError('unsupported generation setting');
     }

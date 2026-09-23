@@ -121,6 +121,8 @@ export class Hypothesis {
 export class Assessment {
   static readonly qualifiedName: string = 'tensorcode.tools.cognition.Assessment';
   static readonly recordFields = ['evidence_id', 'hypothesis_id', 'scores', 'model_provenance', 'revision'] as const;
+  /** Python ``Mapping[str, float]`` (integral scores persist as ``1.0``). */
+  static readonly recordFloatFields = ['scores'] as const;
   readonly evidenceId: string;
   readonly hypothesisId: string;
   /** A frozen copy (Python ``MappingProxyType``); assignment throws ``TypeError``. */
@@ -270,6 +272,8 @@ export class Observation {
 export class RetrievalHit {
   static readonly qualifiedName: string = 'tensorcode.tools.cognition.RetrievalHit';
   static readonly recordFields = ['evidence', 'score', 'episode_id', 'question', 'outcome'] as const;
+  /** Python ``float`` annotations (integral values persist as ``1.0``). */
+  static readonly recordFloatFields = ['score'] as const;
   readonly evidence: Evidence;
   readonly score: number;
   readonly episodeId: string;

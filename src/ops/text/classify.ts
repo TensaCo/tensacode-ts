@@ -6,7 +6,7 @@ import {
 import type { JsonObject } from '../../_internal/json.js';
 
 export interface SelectionFields {
-  distribution?: Readonly<Record<string, number>> | null;
+  distribution?: Readonly<Record<string, number>> | ReadonlyMap<string, number> | null;
   confidence?: number | null;
   abstained?: boolean;
 }
@@ -15,6 +15,8 @@ export interface SelectionFields {
 export class ClassificationResult {
   static readonly qualifiedName: string = 'tensorcode.ops.text.classify.ClassificationResult';
   static readonly recordFields = ['label', 'distribution', 'confidence', 'abstained'] as const;
+  /** Python ``float`` annotations (integral values persist as ``1.0``). */
+  static readonly recordFloatFields = ['distribution', 'confidence'] as const;
   readonly label: string | null;
   readonly distribution: ReadonlyMapping<number> | null;
   readonly confidence: number | null;
@@ -22,7 +24,7 @@ export class ClassificationResult {
 
   constructor(label: string | null, fields: SelectionFields = {}) {
     this.label = label;
-    this.distribution = fields.distribution === null || fields.distribution === undefined ? null : frozenMapping({ ...fields.distribution });
+    this.distribution = fields.distribution === null || fields.distribution === undefined ? null : frozenMapping(fields.distribution);
     this.confidence = fields.confidence ?? null;
     this.abstained = fields.abstained ?? false;
     Object.freeze(this);

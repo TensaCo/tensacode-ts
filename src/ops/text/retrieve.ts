@@ -1,6 +1,6 @@
 /** Select authored item keys (Python ``tensorcode/ops/text/retrieve.py``). */
 import { ValueError } from '../../errors.js';
-import { isPlainObject, type JsonObject } from '../../_internal/json.js';
+import { isPlainObject, markPlainData, orderedEntries, orderedKeys, orderedObject, type JsonObject } from '../../_internal/json.js';
 import type { Alternative } from '../../_internal/text/native.js';
 import {
   InvalidModelOutput, StructuredOperation, finiteScores, frozenMapping, modelConfiguration, optionalBool, type ReadonlyMapping,
@@ -15,6 +15,8 @@ export interface RetrievalFields {
 export class RetrievalResult {
   static readonly qualifiedName: string = 'tensorcode.ops.text.retrieve.RetrievalResult';
   static readonly recordFields = ['keys', 'items', 'scores', 'abstained'] as const;
+  /** Python ``float`` annotations (integral values persist as ``1.0``). */
+  static readonly recordFloatFields = ['scores'] as const;
   readonly keys: readonly string[];
   readonly items: readonly unknown[];
   readonly scores: ReadonlyMapping<number> | null;
@@ -23,7 +25,7 @@ export class RetrievalResult {
   constructor(keys: Iterable<string>, items: Iterable<unknown>, fields: RetrievalFields = {}) {
     this.keys = Object.freeze([...keys]);
     this.items = Object.freeze([...items]);
-    this.scores = fields.scores === null || fields.scores === undefined ? null : frozenMapping({ ...fields.scores });
+    this.scores = fields.scores === null || fields.scores === undefined ? null : frozenMapping(fields.scores);
     this.abstained = fields.abstained ?? false;
     Object.freeze(this);
   }
@@ -42,6 +44,13 @@ export class RetrievalResult {
   }
 }
 
+/** A ``Map`` with string keys as an ordered object (Python ``TypeError`` for other keys); other values unchanged. */
+function mappingOf(value: unknown): unknown {
+  if (!(value instanceof Map)) return value;
+  if (![...value.keys()].every((key) => typeof key === 'string')) throw new TypeError('item keys must be strings');
+  return orderedObject(value as Map<string, unknown>);
+}
+
 /**
  * Select authored item keys using an owned seq2seq model.
  *
@@ -57,8 +66,9 @@ export class Retrieve extends StructuredOperation<RetrievalResult> {
   declare descriptions: ReadonlyMapping<string>;
   declare limit: number;
 
+  /** Item keys in Python insertion order (integer-like keys included). */
   private get itemKeys(): string[] {
-    return Object.keys(this.items);
+    return orderedKeys(this.items);
   }
 
   _alternatives(): Alternative[] {
@@ -67,8 +77,7 @@ export class Retrieve extends StructuredOperation<RetrievalResult> {
 
   _fromScores(scores: readonly number[]): RetrievalResult {
     const keys = this.itemKeys;
-    const keyed: Record<string, number> = {};
-    keys.forEach((key, index) => { keyed[key] = scores[index]!; });
+    const keyed = orderedObject(keys.map((key, index) => [key, scores[index]!] as const));
     // Stable descending order (Python ``sorted(..., reverse=True)``).
     const ranked = keys.map((key, index) => ({ key, index })).sort((a, b) => (keyed[b.key]! - keyed[a.key]!) || (a.index - b.index));
     const selected = ranked.slice(0, this.limit).map(({ key }) => key);
@@ -82,16 +91,20 @@ export class Retrieve extends StructuredOperation<RetrievalResult> {
 
   protected override _configureSemantics(config: Record<string, unknown>): void {
     super._configureSemantics(config);
-    const items = config.items;
-    let descriptions = config.descriptions ?? null;
+    // Items are an ordered Python mapping: a ``Map`` or an object (whose
+    // parsed or ``orderedObject`` key order is kept, integer-like keys included).
+    const items = mappingOf(config.items);
+    let descriptions = mappingOf(config.descriptions ?? null);
     const limit = config.limit ?? 1;
     if (!isPlainObject(items) || !Object.keys(items).length) throw new ValueError('items must be a nonempty mapping of stable string keys');
     if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > Object.keys(items).length) {
       throw new ValueError('limit must be between 1 and the item count');
     }
-    this.items = frozenMapping({ ...items });
+    // Item values are caller data, written as Python writes them (no float schema).
+    if (config.items !== null && typeof config.items === 'object') markPlainData(config.items as object);
+    this.items = markPlainData(frozenMapping(items));
     if (descriptions === null) {
-      descriptions = Object.fromEntries(Object.entries(this.items).filter(([, item]) => typeof item === 'string'));
+      descriptions = orderedObject(orderedEntries(this.items).filter(([, item]) => typeof item === 'string'));
     }
     const keys = Object.keys(this.items);
     if (!isPlainObject(descriptions) || Object.keys(descriptions).length !== keys.length
@@ -99,14 +112,13 @@ export class Retrieve extends StructuredOperation<RetrievalResult> {
       || !Object.values(descriptions).every((description) => typeof description === 'string' && description.length > 0)) {
       throw new ValueError('descriptions must provide nonempty text for every item; arbitrary item values are not stringified');
     }
-    this.descriptions = frozenMapping({ ...(descriptions as Record<string, string>) });
+    this.descriptions = frozenMapping(descriptions as Record<string, string>);
     this.limit = limit;
   }
 
   responseSchema(): Record<string, unknown> {
     const keys = this.itemKeys;
-    const scoreProperties: Record<string, unknown> = {};
-    for (const key of keys) scoreProperties[key] = { type: 'number' };
+    const scoreProperties = orderedObject(keys.map((key) => [key, { type: 'number' }] as const));
     return {
       type: 'object',
       properties: {
@@ -150,7 +162,7 @@ export class Retrieve extends StructuredOperation<RetrievalResult> {
     return {
       type: 'text_retrieve',
       item_keys: this.itemKeys,
-      descriptions: { ...this.descriptions },
+      descriptions: orderedObject(orderedEntries(this.descriptions)),
       limit: this.limit,
       instructions: this.instructions,
       model: modelConfiguration(this.model) as JsonObject,

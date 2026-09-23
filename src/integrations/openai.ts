@@ -1,9 +1,9 @@
 /** OpenAI-compatible Chat Completions and Responses HTTP model adapter (Python ``tensorcode/integrations/openai.py``). */
 import { ValueError } from '../errors.js';
-import { isPlainObject } from '../_internal/json.js';
+import { isPlainObject, pythonJsonLoads } from '../_internal/json.js';
 import { ImagePart, TextPart, type Message, type MessagePart } from '../ops/text/messages.js';
 import { ModelOutput, ModelRequest } from '../ops/text/model.js';
-import { ProviderProtocolError, endpoint, postJson, pythonRepr, validateTimeout, type FetchLike } from './http.js';
+import { ProviderProtocolError, endpoint, postJson, postJsonSync, pythonRepr, validateTimeout, type FetchLike } from './http.js';
 
 export type OpenAIApi = 'chat_completions' | 'responses';
 
@@ -109,8 +109,9 @@ function responsesText(response: Json): string {
  *
  * ``api: 'chat_completions'`` targets the broadly implemented
  * ``/chat/completions`` contract; ``api: 'responses'`` targets ``/responses``.
- * Requests are never retried or silently routed to another provider. The
- * adapter is asynchronous: wrap it in an operation and use ``acall``.
+ * Requests are never retried or silently routed to another provider.
+ * ``complete`` blocks until the response arrives (``op.call``); ``acomplete``
+ * is its asynchronous form (``op.acall``).
  */
 export class OpenAICompatibleModel {
   static readonly qualifiedName: string = 'tensorcode.integrations.openai.OpenAICompatibleModel';
@@ -146,22 +147,35 @@ export class OpenAICompatibleModel {
     return { type: 'openai_compatible', base_url: this.baseUrl, model: this.model, api: this.api, timeout: this.timeout };
   }
 
-  /** Send one request and return a ``ModelOutput``. */
+  /** Send one request and return a ``ModelOutput`` (blocks; see {@link postJsonSync}). */
+  complete(request: ModelRequest): ModelOutput {
+    if (!(request instanceof ModelRequest)) throw new TypeError('complete expects ModelRequest');
+    const [url, payload] = this.request(request);
+    return this.output(request, postJsonSync(url, payload, { apiKey: this.#apiKey, timeout: this.timeout, fetch: this.#fetch }));
+  }
+
+  /** Asynchronous {@link complete}. */
   async acomplete(request: ModelRequest): Promise<ModelOutput> {
     if (!(request instanceof ModelRequest)) throw new TypeError('acomplete expects ModelRequest');
+    const [url, payload] = this.request(request);
+    return this.output(request, await postJson(url, payload, { apiKey: this.#apiKey, timeout: this.timeout, fetch: this.#fetch }));
+  }
+
+  private request(request: ModelRequest): [string, Json] {
     const chat = this.api === 'chat_completions';
     const payload = chat ? this.chatPayload(request) : this.responsesPayload(request);
-    const response = await postJson(endpoint(this.baseUrl, chat ? 'chat/completions' : 'responses'), payload, {
-      apiKey: this.#apiKey, timeout: this.timeout, fetch: this.#fetch,
-    });
-    const text = chat ? chatText(response) : responsesText(response);
+    return [endpoint(this.baseUrl, chat ? 'chat/completions' : 'responses'), payload];
+  }
+
+  private output(request: ModelRequest, response: Json): ModelOutput {
+    const text = this.api === 'chat_completions' ? chatText(response) : responsesText(response);
     const metadata: Json = {};
     for (const key of ['id', 'model', 'usage', 'status']) if (Object.hasOwn(response, key)) metadata[key] = response[key];
     const providerMetadata = Object.keys(metadata).length ? metadata : null;
     if (request.responseSchema === null) return new ModelOutput({ text, providerMetadata });
     let structured: unknown;
     try {
-      structured = JSON.parse(text);
+      structured = pythonJsonLoads(text);
     } catch (error) {
       throw new ProviderProtocolError('Structured provider response is not valid JSON', { cause: error });
     }

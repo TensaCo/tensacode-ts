@@ -10,6 +10,8 @@ import type { JsonObject } from '../../_internal/json.js';
 export class DecisionResult {
   static readonly qualifiedName: string = 'tensorcode.ops.text.decide.DecisionResult';
   static readonly recordFields = ['choice', 'distribution', 'confidence', 'abstained'] as const;
+  /** Python ``float`` annotations (integral values persist as ``1.0``). */
+  static readonly recordFloatFields = ['distribution', 'confidence'] as const;
   readonly choice: string | null;
   readonly distribution: ReadonlyMapping<number> | null;
   readonly confidence: number | null;
@@ -17,7 +19,7 @@ export class DecisionResult {
 
   constructor(choice: string | null, fields: SelectionFields = {}) {
     this.choice = choice;
-    this.distribution = fields.distribution === null || fields.distribution === undefined ? null : frozenMapping({ ...fields.distribution });
+    this.distribution = fields.distribution === null || fields.distribution === undefined ? null : frozenMapping(fields.distribution);
     this.confidence = fields.confidence ?? null;
     this.abstained = fields.abstained ?? false;
     Object.freeze(this);

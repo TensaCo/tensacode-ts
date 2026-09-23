@@ -5,11 +5,13 @@ import { Parameter, Tensor, tensor, scalar } from '../../nn/tensor.js';
 import { Conv2d, Embedding, LayerNorm, Linear, ModuleList } from '../../nn/layers.js';
 import { normalize } from '../../nn/ops/nn.js';
 import { cat } from '../../nn/ops/shape.js';
-import { noGrad } from '../../nn/autograd.js';
 import * as init from '../../nn/init.js';
 import { ValueError } from '../../errors.js';
 import type { NativeConfig } from './config.js';
-import { NativeModel, attention, causalBias, combineBias, keyPaddingBias, mergeHeads, newParameter, positionIds, splitHeads } from './modules.js';
+import { baseInitWeights, initializerStd, postInit, type InitWeights } from './hfInit.js';
+import {
+  NativeModel, attention, causalBias, combineBias, keyPaddingBias, mergeHeads, newParameter, positionIds, registerPositionBuffers, splitHeads,
+} from './modules.js';
 
 class CLIPAttention extends Module {
   readonly heads: number;
@@ -103,6 +105,7 @@ class CLIPTextEmbeddings extends Module {
     const hidden = config.number('hidden_size');
     this.token_embedding = this.registerModule('token_embedding', new Embedding(config.number('vocab_size'), hidden));
     this.position_embedding = this.registerModule('position_embedding', new Embedding(config.number('max_position_embeddings'), hidden));
+    registerPositionBuffers(this, config.number('max_position_embeddings'), false);
   }
 
   forward(inputIds: Tensor | null, inputsEmbeds: Tensor | null): Tensor {
@@ -130,6 +133,8 @@ export class CLIPTextTransformer extends Module {
     this.encoder = this.registerModule('encoder', new CLIPEncoder(config));
     this.final_layer_norm = this.registerModule('final_layer_norm', new LayerNorm(config.number('hidden_size'), { eps: config.number('layer_norm_eps') }));
     this.eosTokenId = config.number('eos_token_id');
+    // Python's ``CLIPTextModel`` is a pretrained model whose ``post_init`` runs as it is constructed.
+    postInit(this, clipInitWeights(config));
   }
 
   forward(inputIds: Tensor, attentionMask: Tensor | null = null): TextOutput {
@@ -172,6 +177,7 @@ class CLIPVisionEmbeddings extends Module {
       new Conv2d(config.number('num_channels'), hidden, this.patchSize, { stride: this.patchSize, bias: false }));
     const patches = Math.floor(this.imageSize / this.patchSize) ** 2;
     this.position_embedding = this.registerModule('position_embedding', new Embedding(patches + 1, hidden));
+    registerPositionBuffers(this, patches + 1, false);
   }
 
   forward(pixels: Tensor): Tensor {
@@ -201,6 +207,8 @@ export class CLIPVisionTransformer extends Module {
     this.pre_layrnorm = this.registerModule('pre_layrnorm', new LayerNorm(hidden, { eps }));
     this.encoder = this.registerModule('encoder', new CLIPEncoder(config));
     this.post_layernorm = this.registerModule('post_layernorm', new LayerNorm(hidden, { eps }));
+    // Python's ``CLIPVisionModel`` is a pretrained model whose ``post_init`` runs as it is constructed.
+    postInit(this, clipInitWeights(config));
   }
 
   forward(pixels: Tensor): TextOutput {
@@ -217,6 +225,45 @@ export interface CLIPOutput {
   logitsPerText: Tensor;
   text: TextOutput;
   vision: TextOutput;
+}
+
+/**
+ * ``CLIPPreTrainedModel._init_weights`` for a CLIP configuration (the model's
+ * own, or the text or vision configuration of a tower): the base Hugging Face
+ * initialization followed by CLIP's scaled normals.
+ */
+function clipInitWeights(config: NativeConfig): InitWeights {
+  const factor = config.number('initializer_factor');
+  const std = initializerStd(config);
+  return (module) => {
+    baseInitWeights(module, std);
+    if (module instanceof CLIPTextEmbeddings) {
+      init.normal_(module.token_embedding.weight, 0, factor * 0.02);
+      init.normal_(module.position_embedding.weight, 0, factor * 0.02);
+    } else if (module instanceof CLIPVisionEmbeddings) {
+      const range = config.number('initializer_range');
+      init.normal_(module.class_embedding, 0, module.class_embedding.shape[0]! ** -0.5 * factor);
+      init.normal_(module.patch_embedding.weight, 0, range * factor);
+      init.normal_(module.position_embedding.weight, 0, range * factor);
+    } else if (module instanceof CLIPAttention) {
+      const embed = config.number('hidden_size');
+      const inProj = (embed ** -0.5) * ((2 * config.number('num_hidden_layers')) ** -0.5) * factor;
+      const outProj = (embed ** -0.5) * factor;
+      init.normal_(module.q_proj.weight, 0, inProj);
+      init.normal_(module.k_proj.weight, 0, inProj);
+      init.normal_(module.v_proj.weight, 0, inProj);
+      init.normal_(module.out_proj.weight, 0, outProj);
+    } else if (module instanceof CLIPMLP) {
+      const hidden = config.number('hidden_size');
+      const inProj = (hidden ** -0.5) * ((2 * config.number('num_hidden_layers')) ** -0.5) * factor;
+      const fc = (2 * hidden) ** -0.5 * factor;
+      init.normal_(module.fc1.weight, 0, fc);
+      init.normal_(module.fc2.weight, 0, inProj);
+    } else if (module instanceof CLIPModel) {
+      init.normal_(module.text_projection.weight, 0, module.text_projection.inFeatures ** -0.5 * factor);
+      init.normal_(module.visual_projection.weight, 0, module.visual_projection.inFeatures ** -0.5 * factor);
+    }
+  };
 }
 
 /** ``CLIPModel``. */
@@ -237,19 +284,7 @@ export class CLIPModel extends NativeModel {
     this.vision_model = this.registerModule('vision_model', new CLIPVisionTransformer(vision));
     this.visual_projection = this.registerModule('visual_projection', new Linear(vision.number('hidden_size'), projection, { bias: false }));
     this.text_projection = this.registerModule('text_projection', new Linear(text.number('hidden_size'), projection, { bias: false }));
-    const factor = config.number('initializer_factor');
-    noGrad(() => {
-      for (const module of this.modules()) {
-        if (module instanceof Linear) {
-          init.normal_(module.weight, 0, 0.02 * factor);
-          module.bias?.zero_();
-        } else if (module instanceof Embedding) init.normal_(module.weight, 0, 0.02 * factor);
-        else if (module instanceof LayerNorm) {
-          module.weight?.fill_(1);
-          module.bias?.zero_();
-        }
-      }
-    });
+    postInit(this, clipInitWeights(config));
   }
 
   getInputEmbeddings(): Embedding {

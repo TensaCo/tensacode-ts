@@ -5,7 +5,7 @@
  */
 import { tensor, type Tensor } from '../../nn/tensor.js';
 import { ValueError } from '../../errors.js';
-import { isPlainObject, pythonJsonDumps } from '../../_internal/json.js';
+import { isPlainObject, isPythonNumber, orderedEntries, orderedObject, pythonJsonDumps } from '../../_internal/json.js';
 import { pythonSum } from '../../_internal/numeric.js';
 import { qualifiedName } from '../../_internal/identity.js';
 import { activeSession, invoke } from '../../_internal/tracing.js';
@@ -22,9 +22,15 @@ export { InvalidModelOutput };
 /** A read-only mapping (Python ``MappingProxyType``). */
 export type ReadonlyMapping<V> = Readonly<Record<string, V>>;
 
-/** Freeze a shallow copy of a mapping. */
-export function frozenMapping<V>(value: Record<string, V>): ReadonlyMapping<V> {
-  return Object.freeze({ ...value });
+/**
+ * Freeze a shallow copy of a mapping (an object, or a ``Map`` whose integer
+ * keys become decimal strings), keeping Python insertion order.
+ */
+export function frozenMapping<V>(value: Readonly<Record<string, V>> | ReadonlyMap<string | number, V>): ReadonlyMapping<V> {
+  const entries = value instanceof Map
+    ? [...(value as ReadonlyMap<string | number, V>)].map(([key, item]) => [String(key), item] as const)
+    : orderedEntries(value as Record<string, V>);
+  return Object.freeze(orderedObject(entries));
 }
 
 /** JSON description of an external model (its ``configuration()`` or its class identity). */
@@ -44,8 +50,10 @@ export function modelConfiguration(model: unknown): unknown {
 
 function isJsonSafe(value: unknown): boolean {
   if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return true;
+  if (isPythonNumber(value)) return true;
   if (Array.isArray(value)) return value.every(isJsonSafe);
   if (isPlainObject(value)) return Object.values(value).every(isJsonSafe);
+  if (value instanceof Map) return [...value.values()].every(isJsonSafe);
   return false;
 }
 
@@ -117,9 +125,9 @@ export function probabilityDistribution(
 ): ReadonlyMapping<number> | null {
   if (raw === null || raw === undefined) return null;
   if (!isPlainObject(raw)) throw new InvalidModelOutput('distribution must be a mapping');
-  const distribution: Record<string, unknown> = {};
+  let distribution: Record<string, unknown>;
   try {
-    for (const [key, value] of Object.entries(raw)) distribution[keyTransform(key)] = value;
+    distribution = orderedObject(orderedEntries(raw).map(([key, value]) => [keyTransform(key), value] as const));
   } catch (error) {
     throw new InvalidModelOutput('distribution contains invalid keys', { cause: error });
   }
@@ -128,15 +136,15 @@ export function probabilityDistribution(
   if (keys.length !== expected.size || !keys.every((key) => expected.has(key))) {
     throw new InvalidModelOutput('distribution keys must match the configured alternatives');
   }
-  const normalized: Record<string, number> = {};
-  for (const [key, probability] of Object.entries(distribution)) {
+  const entries = orderedEntries(distribution).map(([key, probability]) => {
     if (typeof probability !== 'number') throw new InvalidModelOutput('distribution probabilities must be numbers');
     if (!Number.isFinite(probability) || probability < 0 || probability > 1) {
       throw new InvalidModelOutput('distribution probabilities must be between 0 and 1');
     }
-    normalized[key] = probability;
-  }
-  const total = pythonSum(Object.values(normalized));
+    return [key, probability] as const;
+  });
+  const normalized = orderedObject(entries);
+  const total = pythonSum(entries.map(([, probability]) => probability));
   if (!(Math.abs(total - 1) <= 1e-3)) throw new InvalidModelOutput('distribution probabilities must sum to 1');
   return frozenMapping(normalized);
 }
@@ -148,11 +156,10 @@ export function finiteScores(raw: unknown, expectedKeys: readonly string[]): Rea
   if (!isPlainObject(raw) || Object.keys(raw).length !== expected.size || !Object.keys(raw).every((key) => expected.has(key))) {
     throw new InvalidModelOutput('scores must contain exactly the configured item keys');
   }
-  const result: Record<string, number> = {};
-  for (const [key, score] of Object.entries(raw)) {
+  const result = orderedObject(orderedEntries(raw).map(([key, score]) => {
     if (typeof score !== 'number' || !Number.isFinite(score)) throw new InvalidModelOutput('scores must be finite numbers');
-    result[key] = score;
-  }
+    return [key, score] as const;
+  }));
   return frozenMapping(result);
 }
 
@@ -364,12 +371,10 @@ export abstract class SelectionOperation<R extends SelectionResult> extends Stru
 
 /** Selection schema shared by ``Classify`` (``label``) and ``Decide`` (``choice``). */
 export function selectionSchema(field: string, alternatives: readonly string[], descriptions: ReadonlyMapping<string> = {}): Record<string, unknown> {
-  const properties: Record<string, unknown> = {};
-  for (const label of alternatives) {
-    properties[label] = {
-      type: 'number', minimum: 0, maximum: 1, ...(Object.hasOwn(descriptions, label) ? { description: descriptions[label] } : {}),
-    };
-  }
+  // Python dict order, including integer-like labels.
+  const properties = orderedObject(alternatives.map((label) => [label, {
+    type: 'number', minimum: 0, maximum: 1, ...(Object.hasOwn(descriptions, label) ? { description: descriptions[label] } : {}),
+  }] as const));
   return {
     type: 'object',
     properties: {

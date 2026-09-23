@@ -24,8 +24,9 @@ import * as init from '../../nn/init.js';
 import { noGrad } from '../../nn/autograd.js';
 import { ValueError } from '../../errors.js';
 import type { NativeConfig } from './config.js';
+import { baseInitWeights, initializerStd, postInit, type InitWeights } from './hfInit.js';
 import {
-  NativeModel, initializeWeights, type EncoderInputs, type EncoderOutput, type NativeEncoder,
+  NativeModel, registerPositionBuffers, type EncoderInputs, type EncoderOutput, type NativeEncoder,
 } from './modules.js';
 import type { ClassifierOutput, NativeSequenceClassifier } from './bert.js';
 
@@ -381,6 +382,7 @@ class DebertaV2Embeddings extends Module {
       ? this.registerModule('embed_proj', new Linear(this.embeddingSize, hidden, { bias: false })) : null;
     this.LayerNorm = this.registerModule('LayerNorm', new LayerNorm(hidden, { eps: num(config, 'layer_norm_eps') }));
     this.dropout = this.registerModule('dropout', new Dropout(num(config, 'hidden_dropout_prob')));
+    registerPositionBuffers(this, num(config, 'max_position_embeddings'), false);
   }
 
   forward(inputs: EncoderInputs, mask: Tensor): Tensor {
@@ -468,7 +470,9 @@ export class DebertaV2Model extends NativeModel implements NativeEncoder {
     super(config);
     this.embeddings = this.registerModule('embeddings', new DebertaV2Embeddings(config));
     this.encoder = this.registerModule('encoder', new DebertaV2Encoder(config));
-    if (options.initialize !== false) initializeDeberta(this, num(config, 'initializer_range'));
+    // ``DebertaV2Model`` is a pretrained model: its ``post_init`` runs as it is constructed,
+    // also inside a task head (whose own ``post_init`` then skips these modules).
+    if (options.initialize !== false) postInit(this, debertaInitWeights(config));
   }
 
   getInputEmbeddings(): Embedding {
@@ -487,16 +491,16 @@ export class DebertaV2Model extends NativeModel implements NativeEncoder {
   }
 }
 
-function initializeDeberta(module: Module, std: number): void {
-  initializeWeights(module, std);
-  noGrad(() => {
-    for (const child of module.modules()) {
-      if (child instanceof Conv1d) {
-        init.normal_(child.weight, 0, std);
-        if (child.bias) child.bias.zero_();
-      }
+/** ``DebertaV2PreTrainedModel._init_weights``: the base Hugging Face initialization (``nn.Conv1d`` included). */
+function debertaInitWeights(config: NativeConfig): InitWeights {
+  const std = initializerStd(config);
+  return (module) => {
+    baseInitWeights(module, std);
+    if (module instanceof Conv1d) {
+      init.normal_(module.weight, 0, std);
+      if (module.bias) init.zeros_(module.bias);
     }
-  });
+  };
 }
 
 /** ``ContextPooler``: first token → dropout → dense → activation. */
@@ -527,12 +531,12 @@ export class DebertaV2ForSequenceClassification extends NativeModel implements N
 
   constructor(config: NativeConfig) {
     super(config);
-    this.deberta = this.registerModule('deberta', new DebertaV2Model(config, { initialize: false }));
+    this.deberta = this.registerModule('deberta', new DebertaV2Model(config));
     this.pooler = this.registerModule('pooler', new ContextPooler(config));
     this.classifier = this.registerModule('classifier', new Linear(num(config, 'hidden_size'), config.numLabels));
     const clsDropout = config.get('cls_dropout');
     this.dropout = this.registerModule('dropout', new Dropout(typeof clsDropout === 'number' ? clsDropout : num(config, 'hidden_dropout_prob')));
-    initializeDeberta(this, num(config, 'initializer_range'));
+    postInit(this, debertaInitWeights(config));
   }
 
   get base(): NativeEncoder {

@@ -6,12 +6,22 @@
  * instance ``toRecord()`` returning those fields. Tracing walks record fields
  * for dependencies and experience codecs persist them through an explicit
  * allowlist; nothing is ever reconstructed from an artifact-named class.
+ *
+ * Python dataclass annotations become two optional schema hints read by the
+ * experience codec: ``static recordFloatFields`` (fields annotated ``float``,
+ * including ``Mapping[..., float]``: their integral numbers are written
+ * ``1.0``) and ``static recordIntKeyFields`` (``Mapping[int, ...]`` fields held
+ * as objects keyed by decimal strings: persisted with Python int keys).
  */
 
 export type RecordFields = Record<string, unknown>;
 
 export interface RecordClass<T = unknown> {
   readonly recordFields: readonly string[];
+  /** Fields Python annotates as ``float`` (numbers inside them are Python floats). */
+  readonly recordFloatFields?: readonly string[];
+  /** Mapping fields whose Python keys are ``int`` (JavaScript decimal-string keys). */
+  readonly recordIntKeyFields?: readonly string[];
   fromRecord(fields: RecordFields): T;
   readonly name: string;
 }

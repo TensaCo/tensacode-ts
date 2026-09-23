@@ -21,7 +21,10 @@
 import { Tensor } from '../nn/tensor.js';
 import { ValueError } from '../errors.js';
 import { ContextVariable } from './context.js';
-import { isPlainObject } from './json.js';
+import {
+  PythonFloat, PythonInt, isPlainObject, isPythonNumber, mapKeyKind, orderedEntries, orderedObject, setMapKeyKind,
+  transferPythonNumberKind,
+} from './json.js';
 import { recordClassOf, recordFields, type RecordClass } from './records.js';
 import type { Context, OperationLike } from '../ops/base.js';
 
@@ -135,9 +138,9 @@ export class Supervision {
 // Value helpers.
 // ---------------------------------------------------------------------------
 
-export function isScalar(value: unknown): value is string | number | boolean | null | undefined {
+export function isScalar(value: unknown): value is string | number | boolean | null | undefined | PythonFloat | PythonInt {
   return value === null || value === undefined || typeof value === 'string' || typeof value === 'number'
-    || typeof value === 'boolean' || typeof value === 'bigint';
+    || typeof value === 'boolean' || typeof value === 'bigint' || isPythonNumber(value);
 }
 
 function isBytes(value: unknown): value is Uint8Array {
@@ -163,6 +166,7 @@ function snapshotValue(value: unknown): unknown {
   if (isBytes(value)) return value.slice();
   if (Array.isArray(value)) {
     const items = value.map(snapshotValue);
+    value.forEach((_, index) => transferPythonNumberKind(items, index, value, index));
     return Object.isFrozen(value) ? Object.freeze(items) : items;
   }
   const record = recordClassOf(value);
@@ -170,11 +174,24 @@ function snapshotValue(value: unknown): unknown {
     const fields = recordFields(value);
     const copied: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(fields)) copied[key] = snapshotValue(item);
-    return record.fromRecord(copied);
+    const result = record.fromRecord(copied);
+    if (result !== null && typeof result === 'object') {
+      for (const [key, item] of Object.entries(fields)) if (typeof item === 'number') transferPythonNumberKind(result, key, value as object, key, item);
+    }
+    return result;
   }
   if (isPlainObject(value)) {
-    const result: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) result[key] = snapshotValue(item);
+    const result = orderedObject(orderedEntries(value).map(([key, item]) => [key, snapshotValue(item)] as const));
+    for (const key of Object.keys(value)) transferPythonNumberKind(result, key, value, key);
+    return result;
+  }
+  if (value instanceof Map) {
+    // A Python ``dict`` with non-string keys (for example decoded from Python).
+    const result = new Map([...value].map(([key, item]) => [key, snapshotValue(item)]));
+    for (const key of value.keys()) {
+      transferPythonNumberKind(result, key, value, key);
+      if (typeof key === 'number') setMapKeyKind(result, key, mapKeyKind(value, key));
+    }
     return result;
   }
   return value;
@@ -203,6 +220,8 @@ export function stamp(value: unknown): string {
   if (typeof value === 'string') return `s${JSON.stringify(value)}`;
   if (typeof value === 'number') return `f${Object.is(value, -0) ? '-0' : String(value)}`;
   if (typeof value === 'boolean') return value ? 'b1' : 'b0';
+  if (value instanceof PythonFloat) return `pf${Object.is(value.value, -0) ? '-0' : String(value.value)}`;
+  if (value instanceof PythonInt) return `pi${value.text}`;
   if (typeof value === 'bigint') return `i${value}`;
   if (isBytes(value)) return `y${Array.from(value, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
   if (Array.isArray(value)) return `${Object.isFrozen(value) ? '(' : '['}${value.map(stamp).join(',')}${Object.isFrozen(value) ? ')' : ']'}`;
@@ -214,6 +233,7 @@ export function stamp(value: unknown): string {
   if (isPlainObject(value)) {
     return `{${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}:${stamp(item)}`).join(',')}}`;
   }
+  if (value instanceof Map) return `M{${[...value].map(([key, item]) => `${stamp(key)}:${stamp(item)}`).join(',')}}`;
   const name = (value as { constructor?: { name?: string } })?.constructor?.name ?? typeof value;
   throw new TypeError(`Unsupported trace value ${name}; use tensors, records, arrays or plain objects`);
 }
@@ -223,7 +243,9 @@ function childEntries(value: unknown): [PathKey, unknown][] | null {
   const record = recordClassOf(value);
   if (record) return Object.entries(recordFields(value));
   if (Array.isArray(value)) return value.map((item, index) => [index, item]);
-  if (isPlainObject(value)) return Object.entries(value);
+  if (isPlainObject(value)) return orderedEntries(value);
+  // A Python dict with non-string keys: children are addressed by their keys.
+  if (value instanceof Map) return [...value].map(([key, item]) => [key as PathKey, item]);
   return null;
 }
 
@@ -369,6 +391,8 @@ export class Trace {
       if (record) {
         if (typeof key !== 'string' || !record.recordFields.includes(key)) throw new ValueError('Output path must name a record field');
         value = recordFields(value)[key];
+      } else if (value instanceof Map) {
+        value = value.get(key);
       } else if (value !== null && typeof value === 'object') {
         value = (value as Record<PathKey, unknown>)[key];
       } else {
@@ -413,8 +437,14 @@ export class Trace {
       return match.ref;
     }
     if (isPlainObject(value)) {
-      const children: Record<string, Bound> = {};
-      for (const [key, item] of Object.entries(value)) children[key] = this._bind(item);
+      // Python binds dict children in insertion order (input roots are numbered in that order).
+      const children = orderedObject(orderedEntries(value).map(([key, item]) => [key, this._bind(item)] as const));
+      return new Tree('dict', children);
+    }
+    if (value instanceof Map) {
+      // A ``Map`` is a Python dict: traced like one, so its keys must be strings.
+      if (![...value.keys()].every((key) => typeof key === 'string')) throw new TypeError('Traced mapping keys must be strings');
+      const children = orderedObject([...value].map(([key, item]) => [key as string, this._bind(item)] as const));
       return new Tree('dict', children);
     }
     if (Array.isArray(value)) {
@@ -452,10 +482,8 @@ export class Trace {
       const items = (bound.children as readonly Bound[]).map((child) => this._resolve(child, results, inputs));
       return bound.kind === 'tuple' ? Object.freeze(items) : items;
     }
-    const resolved: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(bound.children as Record<string, Bound>)) {
-      resolved[key] = this._resolve(child, results, inputs);
-    }
+    const resolved = orderedObject(orderedEntries(bound.children as Record<string, Bound>)
+      .map(([key, child]) => [key, this._resolve(child, results, inputs)] as const));
     return bound.kind === 'dict' ? resolved : bound.kind.fromRecord(resolved);
   }
 
@@ -665,11 +693,12 @@ export function unwrap(value: unknown, session: Trace): unknown {
   if (value instanceof OutputRef) return session._get(value);
   if (isPlainObject(value)) {
     let changed = false;
-    const resolved: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) {
-      resolved[key] = unwrap(item, session);
-      if (resolved[key] !== item) changed = true;
-    }
+    const resolved = orderedObject(orderedEntries(value).map(([key, item]) => {
+      const result = unwrap(item, session);
+      if (result !== item) changed = true;
+      return [key, result] as const;
+    }));
+    if (changed) for (const key of Object.keys(value)) transferPythonNumberKind(resolved, key, value, key);
     return changed ? resolved : value;
   }
   if (Array.isArray(value)) {

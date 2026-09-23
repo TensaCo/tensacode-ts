@@ -9,10 +9,20 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { ValueError } from '../../errors.js';
-import { isPlainObject, parseJsonStrict, pythonJsonDumps, type JsonObject, type JsonValue } from '../json.js';
+import {
+  isPlainObject, isPythonNumber, orderedEntries, orderedObject, parseJsonStrict, pythonJsonDumps, transferPythonNumberKind,
+  type JsonObject, type JsonValue,
+} from '../json.js';
+
+/** Caller data (state, observations, arguments) is written as Python ``json.dumps`` writes it: no float schema. */
+const NO_FLOAT_KEYS: ReadonlySet<string> = new Set();
 import { atomicWriteFile } from '../files.js';
 import { ActionOutcome } from '../../tools/actions.js';
 import { deepClone } from './clone.js';
+import { describePythonError, pythonErrorMessage, pythonErrorName } from '../pythonErrors.js';
+import { actionSignature, bindArguments, type ActionSignature, type ResolvedSignature } from './signature.js';
+
+export { withSignature, type ActionSignature, type ActionParameter } from './signature.js';
 
 /**
  * Copy strictly JSON data without coercing tuples (frozen arrays), keys, or
@@ -21,13 +31,24 @@ import { deepClone } from './clone.js';
 export function strictJson(value: unknown): JsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (Array.isArray(value) && !Object.isFrozen(value)) return value.map(strictJson);
+  if (isPythonNumber(value) && Number.isFinite(value.value)) return value.value;
+  // Copies keep Python number kinds (``1.0``) and dict insertion order.
+  if (Array.isArray(value) && !Object.isFrozen(value)) {
+    const result = value.map(strictJson);
+    value.forEach((item, index) => transferPythonNumberKind(result, index, value, index, item));
+    return result;
+  }
   if (isPlainObject(value)) {
-    const result: JsonObject = {};
-    for (const [key, item] of Object.entries(value)) result[key] = strictJson(item);
+    const result = orderedObject(orderedEntries(value).map(([key, item]) => [key, strictJson(item)] as const));
+    for (const key of Object.keys(value)) transferPythonNumberKind(result, key, value, key);
     return result;
   }
   throw new ValueError('trajectory values must use finite JSON types and string keys');
+}
+
+/** ``target[key] = source[key]`` for a record field, keeping a scalar's Python number kind. */
+function keepKind(target: object, source: object, key: string, value: unknown): void {
+  transferPythonNumberKind(target, key, source, key, value);
 }
 
 function nonemptyText(value: unknown): value is string {
@@ -111,16 +132,22 @@ export class OutcomeExperience {
   }
 
   static fromRecord(fields: Record<string, unknown>): OutcomeExperience {
-    return new OutcomeExperience(fields.candidate_id as string, fields.action as string, fields.source_id as string,
+    const result = new OutcomeExperience(fields.candidate_id as string, fields.action as string, fields.source_id as string,
       fields.observation, fields.status as ExperienceStatus, (fields.arguments as Record<string, unknown> | undefined) ?? {},
       fields.expected_observation ?? null);
+    keepKind(result, fields, 'observation', result.observation);
+    keepKind(result, fields, 'expected_observation', result.expectedObservation);
+    return result;
   }
 
   toRecord(): Record<string, unknown> {
-    return {
+    const record = {
       candidate_id: this.candidateId, action: this.action, source_id: this.sourceId, observation: this.observation,
       status: this.status, arguments: this.arguments, expected_observation: this.expectedObservation,
     };
+    keepKind(record, this, 'observation', this.observation);
+    keepKind(record, this, 'expected_observation', this.expectedObservation);
+    return record;
   }
 
   /** Attach an explicit retrospective label only to the observed candidate. */
@@ -129,11 +156,18 @@ export class OutcomeExperience {
     return { candidate_id: this.candidateId, outcome };
   }
 
+  private toEvidenceData(): Record<string, unknown> {
+    const data = { action: this.action, status: this.status, observation: this.observation };
+    keepKind(data, this, 'observation', this.observation);
+    return data;
+  }
+
   /** Render this observation as a ``{source_id, text}`` evidence item. */
   asEvidence(): { source_id: string; text: string } {
     return {
       source_id: this.sourceId,
-      text: pythonJsonDumps({ action: this.action, status: this.status, observation: this.observation }, { sortKeys: true, allowNan: false }),
+      // Python ``json.dumps(..., sort_keys=True)``: observations have no float schema.
+      text: pythonJsonDumps(this.toEvidenceData(), { sortKeys: true, allowNan: false, floatKeys: NO_FLOAT_KEYS }),
     };
   }
 }
@@ -216,13 +250,15 @@ export class PlanExecutionResult<S = unknown> {
       experiences: this.experiences.map((item) => item.toRecord()),
       stop_reason: this.stopReason, policy_errors: [...this.policyErrors],
     };
+    keepKind(data, this, 'state', this.state);
     PlanExecutionResult.fromData(data);
     return strictJson(data) as JsonObject;
   }
 
   /** Atomically persist validated JSON data, without executable code. */
   async save(path: string): Promise<void> {
-    const encoded = pythonJsonDumps(this.toData(), { allowNan: false });
+    // Python ``json.dumps(data)``: caller state and observations have no float schema.
+    const encoded = pythonJsonDumps(this.toData(), { allowNan: false, floatKeys: NO_FLOAT_KEYS });
     await atomicWriteFile(path, encoded);
   }
 
@@ -265,7 +301,9 @@ export class PlanExecutionResult<S = unknown> {
     if (reason === 'completed' && experiences[experiences.length - 1]!.status !== 'observed') {
       throw new ValueError('completed trajectories require a final observed outcome');
     }
-    return new PlanExecutionResult(data.state as JsonValue, experiences, reason as PlanStopReason, errors as string[]);
+    const result = new PlanExecutionResult(data.state as JsonValue, experiences, reason as PlanStopReason, errors as string[]);
+    keepKind(result, data, 'state', result.state);
+    return result;
   }
 
   /** Load and validate a trajectory saved with {@link save}. */
@@ -285,21 +323,14 @@ export class PlanExecutionResult<S = unknown> {
 /**
  * A registry action: receives a copy of the state and a copy of the step's JSON
  * arguments (Python ``action(state, **arguments)``) and returns an
- * {@link ActionOutcome}, synchronously or asynchronously.
+ * {@link ActionOutcome}, synchronously or asynchronously. The keyword
+ * parameters it destructures from ``args`` are its signature.
  */
-export type PlanAction<S = any> = (state: S, args: Record<string, JsonValue>) => ActionOutcome<S> | Promise<ActionOutcome<S>>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type PlanAction<S = any> = (state: S, args: any) => ActionOutcome<S> | Promise<ActionOutcome<S>>;
 
 /** A replan policy: returns the next explicit plan, or ``null`` to abstain. */
 export type ReplanPolicy<S = any> = (request: ReplanRequest<S>) => unknown;
-
-function errorType(error: unknown): string {
-  if (error instanceof Error) return error.name || error.constructor.name || 'Error';
-  return typeof error === 'object' && error !== null ? (error.constructor?.name ?? 'Error') : 'Error';
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 /**
  * Execute one validated step, observe, and ask the policy for a new plan.
@@ -309,17 +340,25 @@ function errorMessage(error: unknown): string {
  * must explicitly select subsequent actions; there is no first-action fallback.
  * Input state is copied; only returned ActionOutcome state advances the run.
  *
- * JavaScript cannot bind keyword arguments against a signature like Python's
- * ``inspect.signature(...).bind``; validation instead rejects arguments for
- * actions declared with a single ``state`` parameter.
+ * Validation binds every step's arguments against the action's keyword
+ * parameters like Python's ``inspect.signature(action).bind(None, **arguments)``:
+ * the properties the action destructures from its second parameter, or an
+ * explicit signature ({@link withSignature} or the ``signatures`` option).
+ * Error observations record Python exception names (``Error`` →
+ * ``RuntimeError``; see ``pythonErrorName``).
  */
 export class PlanExecutor<S = any> {
   static readonly qualifiedName: string = 'tensorcode._internal.execution.planning.PlanExecutor';
   readonly actions: ReadonlyMap<string, PlanAction<S>>;
   readonly replan: ReplanPolicy<S>;
   readonly maxSteps: number;
+  readonly #signatures: ReadonlyMap<string, ResolvedSignature>;
 
-  constructor(options: { actions: Record<string, PlanAction<S>> | Map<string, PlanAction<S>>; replan: ReplanPolicy<S>; maxSteps: number }) {
+  constructor(options: {
+    actions: Record<string, PlanAction<S>> | Map<string, PlanAction<S>>; replan: ReplanPolicy<S>; maxSteps: number;
+    /** Explicit keyword signatures by action name (override what is read from each function). */
+    signatures?: Readonly<Record<string, ActionSignature>> | null;
+  }) {
     const { replan, maxSteps } = options;
     if (typeof replan !== 'function') throw new TypeError('replan must be an explicit callable policy');
     if (typeof maxSteps !== 'number' || !Number.isInteger(maxSteps) || maxSteps < 0) throw new ValueError('max_steps must be a nonnegative integer');
@@ -327,6 +366,12 @@ export class PlanExecutor<S = any> {
     for (const [name, fn] of actions) {
       if (!nonemptyText(name) || typeof fn !== 'function') throw new ValueError('actions must map nonempty names to callables');
     }
+    const explicit = options.signatures ?? {};
+    if (explicit === null || typeof explicit !== 'object') throw new TypeError('signatures must map action names to signatures');
+    for (const name of Object.keys(explicit)) {
+      if (!actions.has(name)) throw new ValueError(`signature for unregistered action ${JSON.stringify(name)}`);
+    }
+    this.#signatures = new Map([...actions].map(([name, fn]) => [name, actionSignature(fn, explicit[name] ?? null)]));
     this.actions = actions;
     this.replan = replan;
     this.maxSteps = maxSteps;
@@ -345,10 +390,7 @@ export class PlanExecutor<S = any> {
       if (!isPlainObject(step.arguments)) throw new ValueError('step arguments must be a JSON object');
       strictJson(step.arguments);
       strictJson(step.expectedObservation);
-      const action = this.actions.get(step.action)!;
-      if (Object.keys(step.arguments).length && action.length < 2) {
-        throw new TypeError(`action ${step.action} does not accept arguments ${JSON.stringify(Object.keys(step.arguments))}`);
-      }
+      bindArguments(this.#signatures.get(step.action)!, step.arguments);
     }
     return new ExecutablePlan(plan.candidateId, plan.steps.map((step) => new PlanStep(
       step.action, strictJson(step.arguments) as Record<string, unknown>, strictJson(step.expectedObservation),
@@ -376,7 +418,7 @@ export class PlanExecutor<S = any> {
         status = 'observed';
         done = outcome.done;
       } catch (error) {
-        observation = { error_type: errorType(error), message: errorMessage(error) };
+        observation = { error_type: pythonErrorName(error), message: pythonErrorMessage(error) };
         status = 'error';
         done = false;
       }
@@ -390,7 +432,7 @@ export class PlanExecutor<S = any> {
         if (proposed === null || proposed === undefined) return new PlanExecutionResult(value, experiences, 'abstained');
         current = this.validate(proposed);
       } catch (error) {
-        return new PlanExecutionResult(value, experiences, 'policy_error', [`${errorType(error)}: ${errorMessage(error)}`]);
+        return new PlanExecutionResult(value, experiences, 'policy_error', [describePythonError(error)]);
       }
     }
     return new PlanExecutionResult(value, experiences, 'budget_exhausted');

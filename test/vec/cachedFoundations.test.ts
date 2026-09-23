@@ -3,7 +3,7 @@
  * are in the local Hub cache): flan-T5-small text encoding/decoding and CLIP
  * perception inside Scene, against outputs recorded from Python.
  */
-import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -13,6 +13,7 @@ import { FoundationSceneRank, Scene } from '../../src/tools/scene.js';
 import { cachedSnapshot } from '../helpers/hub.js';
 import { expectClose } from '../helpers/gradcheck.js';
 import { fixtureJson, fromJson } from '../helpers/fixtures.js';
+import { deepCopy, parseJsonStrict, pythonJsonDumps } from '../../src/_internal/json.js';
 
 const records = fixtureJson('vec/cached.json');
 const T5_SNAPSHOT = '0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab';
@@ -65,6 +66,16 @@ describe('cached real foundations', () => {
     expect((configuration.foundation_config as any)._name_or_path).toBe(directory);
     expect({ ...configuration, foundation_config: { ...(configuration.foundation_config as object), _name_or_path: null } })
       .toEqual({ ...expected, foundation_config: { ...expected.foundation_config, _name_or_path: null } });
+    // Byte for byte as Python writes it (Python float kinds read losslessly from the fixture).
+    const python = (parseJsonStrict(readFileSync(new URL('../fixtures/vec/cached.json', import.meta.url), 'utf8')) as any).clip.configuration;
+    const bytes = (value: any) => {
+      const copy = deepCopy(value);
+      delete copy.tokenizer_sha256;
+      delete copy.foundation_source;
+      copy.foundation_config._name_or_path = null;
+      return pythonJsonDumps(copy, { indent: 2, sortKeys: true, allowNan: false });
+    };
+    expect(bytes(scene.configuration())).toBe(bytes(python));
     const rank = scene.rank as FoundationSceneRank;
     expect(rank.tokens('a photo of a cat').toArray()).toEqual(record.tokens);
     const [patches, imageGlobal] = rank.encodeImage(fromJson(record.pixels));

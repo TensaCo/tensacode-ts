@@ -51,9 +51,10 @@ describe('package entry points', () => {
 
   it('entry points export the Python public names', async () => {
     const names = async (path: string) => Object.keys(await import(path)).sort();
-    // Python ``tensorcode.__all__`` plus the version and error classes.
+    // Python ``tensorcode.__all__`` plus the version, error classes and the
+    // Python value helpers (``float``/``int`` markers, ordered dicts).
     expect(await names('../../src/index.js')).toEqual(
-      ['InputRef', 'MissingDependencyError', 'NotImplementedError', 'OutputRef', 'Trace', 'ValueError', 'trace', 'version']);
+      ['InputRef', 'MissingDependencyError', 'NotImplementedError', 'OutputRef', 'Trace', 'ValueError', 'float', 'int', 'orderedObject', 'trace', 'version']);
     // Python ``tensorcode.tools.__all__`` plus the shared pretrained base.
     expect(await names('../../src/tools/index.js')).toEqual(
       ['Chatbot', 'Decision', 'Investigator', 'Planner', 'PretrainedModule', 'Scene']);

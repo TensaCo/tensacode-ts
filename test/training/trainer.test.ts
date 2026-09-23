@@ -129,8 +129,9 @@ describe('operation trainers', () => {
     const payload = parseCheckpoint(readFileSync(path, 'utf8')) as Record<string, any>;
     const codec = new Codec();
     const state = codec.decode(payload.optimizer.state) as Record<string, any>;
-    state.state['0'].momentum_buffer = tensor([1, 1, 1, 1, 1, 1, 1]);
-    const slots = new Map<number, unknown>(Object.entries(state.state).map(([key, value]) => [Number(key), value]));
+    // Python int parameter keys decode as a Map with number keys.
+    const slots = state.state as Map<number, Record<string, unknown>>;
+    slots.get(0)!.momentum_buffer = tensor([1, 1, 1, 1, 1, 1, 1]);
     payload.optimizer.state = codec.encode(new Map<string, unknown>([['state', slots], ['param_groups', state.param_groups]]));
     writeFileSync(path, pythonDumps(payload));
     noGrad(() => head.module.weight.add_(10));

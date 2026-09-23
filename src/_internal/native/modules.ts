@@ -91,10 +91,11 @@ export function combineBias(...biases: (Tensor | null | undefined)[]): Tensor | 
 /** Multi-head attention core over pre-projected ``[batch, heads, length, dim]`` tensors. */
 export function attention(
   query: Tensor, key: Tensor, value: Tensor,
-  options: { scale: number; bias?: Tensor | null; dropout?: number; training?: boolean },
+  options: { scale: number; bias?: Tensor | null; dropout?: number; training?: boolean; enableGqa?: boolean },
 ): Tensor {
   return scaledDotProductAttention(query, key, value, {
     scale: options.scale, bias: options.bias ?? null, dropout: options.dropout ?? 0, training: options.training ?? false,
+    enableGqa: options.enableGqa ?? false,
   }).output;
 }
 
@@ -103,6 +104,17 @@ export function positionIds(batch: number, length: number, start = 0): Tensor {
   const values: number[] = [];
   for (let b = 0; b < batch; b += 1) for (let i = 0; i < length; i += 1) values.push(start + i);
   return tensor(values, { shape: [batch, length], dtype: 'int64' });
+}
+
+/**
+ * Register transformers' non-persistent embedding buffers: ``position_ids``
+ * (``arange(length).expand((1, -1))``) and optionally ``token_type_ids``
+ * (zeros). They are not in state dicts, but ``named_buffers()`` (tensor
+ * schemas, content fingerprints) lists them exactly as in Python.
+ */
+export function registerPositionBuffers(module: Module, length: number, tokenTypes: boolean): void {
+  module.registerBuffer('position_ids', positionIds(1, length), false);
+  if (tokenTypes) module.registerBuffer('token_type_ids', zerosLong([1, length]), false);
 }
 
 export function zerosLong(shape: readonly number[]): Tensor {

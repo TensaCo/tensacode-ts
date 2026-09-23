@@ -1,0 +1,57 @@
+{
+  "config": {
+    "foundation_config": {
+      "_name_or_path": "",
+      "add_cross_attention": false,
+      "architectures": null,
+      "attention_probs_dropout_prob": 0,
+      "bos_token_id": null,
+      "chunk_size_feed_forward": 0,
+      "classifier_dropout": null,
+      "dtype": null,
+      "eos_token_id": null,
+      "hidden_act": "gelu",
+      "hidden_dropout_prob": 0,
+      "hidden_size": 8,
+      "id2label": {
+        "0": "LABEL_0",
+        "1": "LABEL_1"
+      },
+      "initializer_range": 0.02,
+      "intermediate_size": 16,
+      "is_decoder": false,
+      "is_encoder_decoder": false,
+      "label2id": {
+        "LABEL_0": 0,
+        "LABEL_1": 1
+      },
+      "layer_norm_eps": 1e-12,
+      "max_position_embeddings": 512,
+      "model_type": "bert",
+      "num_attention_heads": 2,
+      "num_hidden_layers": 1,
+      "output_attentions": false,
+      "output_hidden_states": false,
+      "pad_token_id": 0,
+      "problem_type": null,
+      "return_dict": true,
+      "tie_word_embeddings": true,
+      "transformers_version": "5.17.0",
+      "type_vocab_size": 2,
+      "use_cache": true,
+      "vocab_size": 8
+    },
+    "freeze_foundation": false,
+    "max_tokens": 4,
+    "normalize": true,
+    "pooling": "masked_mean",
+    "tokenizer_json": "{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[],\"normalizer\":null,\"pre_tokenizer\":{\"type\":\"Whitespace\"},\"post_processor\":null,\"decoder\":null,\"model\":{\"type\":\"WordLevel\",\"vocab\":{\"<pad>\":0,\"</s>\":1,\"<unk>\":2,\"user\":3,\":\":4,\"hello\":5,\"world\":6,\"answer\":7},\"unk_token\":\"<unk>\"}}",
+    "tokenizer_special_tokens": {
+      "pad_token": "<pad>",
+      "unk_token": "<unk>"
+    }
+  },
+  "format": "tensorcode.pretrained",
+  "tool": "tensorcode._internal.retrieval.RetrievalEncoder",
+  "version": 1
+}

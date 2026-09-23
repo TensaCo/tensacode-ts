@@ -10,7 +10,7 @@ import { activation } from '../../nn/ops/nn.js';
 import { ValueError } from '../../errors.js';
 import type { NativeConfig } from './config.js';
 import {
-  NativeModel, attention, initializeWeights, keyPaddingBias, mergeHeads, positionIds, splitHeads, zerosLong,
+  NativeModel, attention, initializeWeights, keyPaddingBias, mergeHeads, positionIds, registerPositionBuffers, splitHeads, zerosLong,
   type EncoderInputs, type EncoderOutput, type NativeEncoder,
 } from './modules.js';
 
@@ -176,6 +176,7 @@ export class BertEmbeddings extends Module {
     this.token_type_embeddings = this.registerModule('token_type_embeddings', new Embedding(num(config, 'type_vocab_size'), width));
     this.LayerNorm = this.registerModule('LayerNorm', new LayerNorm(width, { eps: num(config, 'layer_norm_eps') }));
     this.dropout = this.registerModule('dropout', new Dropout(num(config, 'hidden_dropout_prob')));
+    registerPositionBuffers(this, num(config, 'max_position_embeddings'), true);
   }
 
   forward(inputs: EncoderInputs): Tensor {
@@ -207,6 +208,7 @@ export class RobertaEmbeddings extends Module {
     this.dropout = this.registerModule('dropout', new Dropout(num(config, 'hidden_dropout_prob')));
     this.position_embeddings = this.registerModule('position_embeddings',
       new Embedding(num(config, 'max_position_embeddings'), hidden, { paddingIdx: this.paddingIdx }));
+    registerPositionBuffers(this, num(config, 'max_position_embeddings'), true);
   }
 
   /** ``create_position_ids_from_input_ids`` / ``..._from_inputs_embeds``. */
@@ -337,6 +339,7 @@ class DistilEmbeddings extends Module {
     }
     this.LayerNorm = this.registerModule('LayerNorm', new LayerNorm(dim, { eps: 1e-12 }));
     this.dropout = this.registerModule('dropout', new Dropout(num(config, 'dropout')));
+    registerPositionBuffers(this, num(config, 'max_position_embeddings'), false);
   }
 
   forward(inputs: EncoderInputs): Tensor {

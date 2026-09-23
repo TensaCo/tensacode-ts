@@ -13,7 +13,10 @@
  * transformers (``defaults.generated.ts``).
  */
 import { ValueError } from '../../errors.js';
-import { deepCopy, isPlainObject, jsonEqual, type JsonObject, type JsonValue } from '../json.js';
+import {
+  deepCopy, float, isPlainObject, jsonEqual, mergeJson, orderedEntries, orderedKeys, orderedObject, transferPythonNumberKind,
+  type JsonObject, type JsonValue,
+} from '../json.js';
 import {
   ATTRIBUTE_MAPS, BASE_CONFIG_DEFAULTS, CLASS_CONFIG_DEFAULTS, GENERATION_CONFIG_DEFAULTS, TRANSFORMERS_VERSION,
 } from './defaults.generated.js';
@@ -31,8 +34,17 @@ const NESTED: Record<string, Record<string, string>> = {
   idefics3: { text_config: 'llama', vision_config: 'idefics3_vision' },
 };
 
-/** ``LlamaConfig.default_theta``. */
-const LLAMA_DEFAULT_THETA = 10000.0;
+/** ``LlamaConfig.default_theta`` (a Python float). */
+const LLAMA_DEFAULT_THETA = float(10000.0);
+
+/**
+ * ``target[targetKey] = copy(source[sourceKey])``, keeping the Python number
+ * kind the source recorded (a Python int in a float field stays an int).
+ */
+function put(target: JsonObject, targetKey: string, source: JsonObject, sourceKey: string = targetKey): void {
+  target[targetKey] = deepCopy(source[sourceKey] as JsonValue);
+  transferPythonNumberKind(target, targetKey, source, sourceKey);
+}
 
 /**
  * ``RotaryEmbeddingConfigMixin.convert_rope_params_to_dict`` (single global
@@ -47,13 +59,16 @@ function standardizeRope(values: JsonObject, input: JsonObject): void {
     : isPlainObject(supplied) ? deepCopy(supplied as JsonObject) : {};
   delete values.rope_scaling;
   delete values.rope_theta;
-  if (!('rope_theta' in parameters)) parameters.rope_theta = input.rope_theta !== undefined ? deepCopy(input.rope_theta as JsonValue) : LLAMA_DEFAULT_THETA;
+  if (!('rope_theta' in parameters)) {
+    if (input.rope_theta !== undefined) put(parameters, 'rope_theta', input);
+    else put(parameters, 'rope_theta', deepCopy<JsonObject>({ rope_theta: LLAMA_DEFAULT_THETA } as unknown as JsonObject));
+  }
   if (input.partial_rotary_factor !== undefined && input.partial_rotary_factor !== null && !('partial_rotary_factor' in parameters)) {
-    parameters.partial_rotary_factor = deepCopy(input.partial_rotary_factor as JsonValue);
+    put(parameters, 'partial_rotary_factor', input);
   }
   if (!('rope_type' in parameters)) parameters.rope_type = parameters.type !== undefined ? deepCopy(parameters.type as JsonValue) : 'default';
   if (['llama3', 'yarn', 'longrope'].includes(String(parameters.rope_type)) && !('original_max_position_embeddings' in parameters)) {
-    parameters.original_max_position_embeddings = values.max_position_embeddings!;
+    put(parameters, 'original_max_position_embeddings', values, 'max_position_embeddings');
   }
   values.rope_parameters = parameters;
 }
@@ -61,15 +76,15 @@ function standardizeRope(values: JsonObject, input: JsonObject): void {
 function labelMaps(values: JsonObject, input: JsonObject): void {
   if (input.id2label !== undefined && input.id2label !== null) {
     if (!isPlainObject(input.id2label)) throw new ValueError('id2label must be a mapping');
-    const id2label: JsonObject = {};
-    for (const [key, label] of Object.entries(input.id2label)) {
+    const entries = orderedEntries(input.id2label as JsonObject).map(([key, label]) => {
       const index = Number(key);
       if (!Number.isInteger(index)) throw new ValueError('id2label keys must be integers');
-      id2label[String(index)] = label as JsonValue;
-    }
+      return [String(index), deepCopy(label)] as const;
+    });
+    const id2label = orderedObject(entries);
     values.id2label = id2label;
     if (input.label2id === undefined || input.label2id === null) {
-      values.label2id = Object.fromEntries(Object.entries(id2label).map(([index, label]) => [String(label), Number(index)]));
+      values.label2id = orderedObject(entries.map(([index, label]) => [String(label), Number(index)] as const));
     }
   } else if (typeof input.num_labels === 'number') {
     const count = input.num_labels;
@@ -98,11 +113,11 @@ function normalize(modelType: string, input: JsonObject): JsonObject {
   const aliases = ATTRIBUTE_MAPS[modelType] ?? {};
   const values = deepCopy(defaults);
   const nested = NESTED[modelType] ?? {};
-  for (const [key, value] of Object.entries(input)) {
+  for (const key of orderedKeys(input)) {
     if (key === 'model_type' || key === 'transformers_version' || key in nested || key === 'torch_dtype') continue;
     if (LEGACY_GENERATION_KEYS.has(key)) continue;
     if (key.endsWith('_config_dict') && key.slice(0, -'_dict'.length) in nested) continue;
-    values[aliases[key] ?? key] = deepCopy(value as JsonValue);
+    put(values, aliases[key] ?? key, input, key);
   }
   // ``torch_dtype`` is the legacy spelling of ``dtype``.
   if (input.dtype === undefined && input.torch_dtype !== undefined) values.dtype = deepCopy(input.torch_dtype as JsonValue);
@@ -131,23 +146,25 @@ function normalize(modelType: string, input: JsonObject): JsonObject {
     if (isPlainObject(legacy)) {
       const complete = normalize(nestedType, legacy as JsonObject);
       delete complete.transformers_version;
-      childInput = { ...childInput, ...complete };
+      childInput = mergeJson(childInput, complete);
     }
     const child = normalize(nestedType, childInput);
     delete child.transformers_version;
     values[key] = child;
   }
   if (modelType === 'vit') {
-    const size = input.pooler_output_size;
-    values.pooler_output_size = size ? size as JsonValue : values.hidden_size!;
+    if (input.pooler_output_size) put(values, 'pooler_output_size', input);
+    else put(values, 'pooler_output_size', values, 'hidden_size');
   }
   if (modelType === 'deberta-v2') {
     if (typeof values.pos_att_type === 'string') values.pos_att_type = values.pos_att_type.toLowerCase().split('|').map((item) => item.trim());
-    values.pooler_hidden_size = input.pooler_hidden_size !== undefined ? input.pooler_hidden_size as JsonValue : values.hidden_size!;
+    if (input.pooler_hidden_size !== undefined) put(values, 'pooler_hidden_size', input);
+    else put(values, 'pooler_hidden_size', values, 'hidden_size');
   }
   if (modelType === 't5') {
     const decoderLayers = input.num_decoder_layers;
-    values.num_decoder_layers = decoderLayers === undefined || decoderLayers === null ? values.num_layers! : decoderLayers as JsonValue;
+    if (decoderLayers === undefined || decoderLayers === null) put(values, 'num_decoder_layers', values, 'num_layers');
+    else put(values, 'num_decoder_layers', input);
     const projection = String(values.feed_forward_proj);
     const parts = projection.split('-');
     if ((parts.length > 1 && parts[0] !== 'gated') || parts.length > 2) {
@@ -174,7 +191,7 @@ function diff(values: JsonObject, modelType: string): JsonObject {
       const childDefaults = CLASS_CONFIG_DEFAULTS[childType] ?? {};
       const child: JsonObject = {};
       for (const [childKey, childValue] of Object.entries(value)) {
-        if (!(childKey in BASE_CONFIG_DEFAULTS) || !jsonEqual(childValue, childDefaults[childKey])) child[childKey] = childValue as JsonValue;
+        if (!(childKey in BASE_CONFIG_DEFAULTS) || !jsonEqual(childValue, childDefaults[childKey])) put(child, childKey, value as JsonObject);
       }
       if ('model_type' in value) child.model_type = (value as JsonObject).model_type!;
       result[key] = child;
@@ -183,7 +200,7 @@ function diff(values: JsonObject, modelType: string): JsonObject {
     const inBase = key in BASE_CONFIG_DEFAULTS;
     if (!inBase || key === 'transformers_version' || key === 'vocab_file' || !jsonEqual(value, BASE_CONFIG_DEFAULTS[key])
       || (key in classDefaults && !jsonEqual(value, classDefaults[key]))) {
-      result[key] = value as JsonValue;
+      put(result, key, values);
     }
   }
   delete result._name_or_path;
@@ -213,9 +230,27 @@ export class NativeConfig {
     if (typeof input.transformers_version === 'string') {
       const values = normalize(modelType, input);
       // Normalized input: retain every supplied value (including derived fields).
-      for (const [key, value] of Object.entries(input)) if (!(key in (NESTED[modelType] ?? {}))) values[ATTRIBUTE_MAPS[modelType]?.[key] ?? key] = deepCopy(value as JsonValue);
+      for (const key of Object.keys(input)) if (!(key in (NESTED[modelType] ?? {}))) put(values, ATTRIBUTE_MAPS[modelType]?.[key] ?? key, input, key);
       return new NativeConfig(modelType, values, input);
     }
+    return new NativeConfig(modelType, normalize(modelType, input), null);
+  }
+
+  /**
+   * ``AutoConfig.for_model(model_type, **data)`` exactly as Python constructs
+   * a model from a saved configuration dictionary (for example
+   * ``Chatbot``'s ``foundation_config``): always normalized, a supplied
+   * ``transformers_version`` is re-stamped and derived fields are recomputed
+   * (T5 rewrites the legacy tie flag), so ``toDiffDict()`` equals
+   * ``json.loads(model.config.to_json_string())``. {@link fromDict} instead
+   * keeps an already-normalized configuration verbatim.
+   */
+  static forModel(data: unknown): NativeConfig {
+    if (!isPlainObject(data)) throw new ValueError('native configuration must be a JSON object');
+    const input = deepCopy(data as JsonObject);
+    const modelType = input.model_type;
+    if (typeof modelType !== 'string' || !modelType) throw new ValueError('native configuration requires model_type');
+    if (!CLASS_CONFIG_DEFAULTS[modelType]) throw new ValueError(`unsupported native model_type ${JSON.stringify(modelType)}`);
     return new NativeConfig(modelType, normalize(modelType, input), null);
   }
 
@@ -305,7 +340,7 @@ export class NativeConfig {
 
   /** A derived runtime configuration (for example a T5 decoder stack); never serialized. */
   derive(overrides: JsonObject): NativeConfig {
-    return new NativeConfig(this.modelType, { ...deepCopy(this.values as JsonObject), ...deepCopy(overrides) }, null);
+    return new NativeConfig(this.modelType, mergeJson(this.values, overrides), null);
   }
 
   /** Nested sub-configuration (CLIP ``text_config``/``vision_config``). */
@@ -313,7 +348,7 @@ export class NativeConfig {
     const nestedType = NESTED[this.modelType]?.[key];
     const value = this.values[key];
     if (!nestedType || !isPlainObject(value)) throw new ValueError(`native configuration has no nested ${key}`);
-    return new NativeConfig(nestedType, { ...normalize(nestedType, value as JsonObject), ...deepCopy(value as JsonObject) }, null);
+    return new NativeConfig(nestedType, mergeJson(normalize(nestedType, value as JsonObject), value as JsonObject), null);
   }
 }
 
@@ -326,7 +361,7 @@ export function nativeConfig(data: unknown): NativeConfig {
   if (config.isVerbatim) return config;
   const overrides: JsonObject = {};
   for (const name of ['tie_word_embeddings', 'scale_decoder_outputs']) {
-    if (name in (data as JsonObject)) overrides[name] = deepCopy((data as JsonObject)[name]!);
+    if (name in (data as JsonObject)) put(overrides, name, data as JsonObject);
   }
   return Object.keys(overrides).length ? config.derive(overrides) : config;
 }
@@ -340,7 +375,7 @@ export function generationConfigFromModel(config: NativeConfig): JsonObject {
   const result: JsonObject = { _from_model_config: true };
   for (const key of ['bos_token_id', 'decoder_start_token_id', 'eos_token_id', 'pad_token_id']) {
     const value = config.get(key);
-    if (value !== undefined && value !== null) result[key] = deepCopy(value);
+    if (value !== undefined && value !== null) put(result, key, config.values as JsonObject, ATTRIBUTE_MAPS[config.modelType]?.[key] ?? key);
   }
   result.output_attentions = config.get('output_attentions') === true;
   result.output_hidden_states = config.get('output_hidden_states') === true;
@@ -355,7 +390,7 @@ export function generationConfigFromFile(data: unknown): JsonObject {
   const result: JsonObject = {};
   for (const [key, value] of Object.entries(data as JsonObject)) {
     if (key === 'transformers_version') continue;
-    if (!(key in GENERATION_CONFIG_DEFAULTS) || !jsonEqual(value, GENERATION_CONFIG_DEFAULTS[key])) result[key] = deepCopy(value as JsonValue);
+    if (!(key in GENERATION_CONFIG_DEFAULTS) || !jsonEqual(value, GENERATION_CONFIG_DEFAULTS[key])) put(result, key, data as JsonObject);
   }
   result.transformers_version = TRANSFORMERS_VERSION;
   return result;
@@ -363,5 +398,5 @@ export function generationConfigFromFile(data: unknown): JsonObject {
 
 /** Effective generation settings: ``GenerationConfig`` defaults overlaid with a serialized config. */
 export function generationDefaults(serialized: JsonObject | null | undefined): JsonObject {
-  return { ...deepCopy(GENERATION_CONFIG_DEFAULTS), ...deepCopy(serialized ?? {}) };
+  return mergeJson(GENERATION_CONFIG_DEFAULTS, serialized ?? {});
 }

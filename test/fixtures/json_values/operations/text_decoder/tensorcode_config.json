@@ -1,0 +1,128 @@
+{
+  "config": {
+    "bridge": "linear",
+    "bridge_training": "untrained",
+    "foundation": {
+      "repo": "/home/brandonin/Documents/tensacode/tensacode/typescript/test/fixtures/json_values/foundations/t5",
+      "revision": null
+    },
+    "generation": {
+      "do_sample": false,
+      "max_new_tokens": 3,
+      "repetition_penalty": 1,
+      "temperature": 1
+    },
+    "input_space": {
+      "device": null,
+      "dimensions": 3,
+      "dtype": null,
+      "name": "arbitrary",
+      "organization": "sequence",
+      "version": "1"
+    },
+    "native_config": {
+      "architectures": [
+        "T5ForConditionalGeneration"
+      ],
+      "classifier_dropout": 0.0,
+      "custom_scale": 2.0,
+      "d_ff": 16,
+      "d_kv": 64,
+      "d_model": 8,
+      "decoder_start_token_id": 0,
+      "dense_act_fn": "relu",
+      "dropout_rate": 0,
+      "dtype": "float32",
+      "eos_token_id": 5,
+      "feed_forward_proj": "relu",
+      "initializer_factor": 1.0,
+      "is_decoder": false,
+      "is_encoder_decoder": true,
+      "is_gated_act": false,
+      "layer_norm_epsilon": 1e-06,
+      "model_type": "t5",
+      "num_decoder_layers": 1,
+      "num_heads": 2,
+      "num_layers": 1,
+      "pad_token_id": 0,
+      "relative_attention_max_distance": 128,
+      "relative_attention_num_buckets": 32,
+      "scale_decoder_outputs": true,
+      "tie_word_embeddings": true,
+      "transformers_version": "5.17.0",
+      "use_cache": true,
+      "vocab_size": 6
+    },
+    "native_generation_config": {
+      "_from_model_config": true,
+      "decoder_start_token_id": 0,
+      "eos_token_id": 5,
+      "output_attentions": false,
+      "output_hidden_states": false,
+      "pad_token_id": 0,
+      "transformers_version": "5.17.0",
+      "use_cache": true
+    },
+    "native_input_space": {
+      "device": null,
+      "dimensions": 8,
+      "dtype": null,
+      "name": "/home/brandonin/Documents/tensacode/tensacode/typescript/test/fixtures/json_values/foundations/t5:encoder:input_embeddings",
+      "organization": "sequence",
+      "version": "unversioned"
+    },
+    "native_parameter_aliases": {
+      "decoder.block.0.layer.0.SelfAttention.k.weight": "decoder.block.0.layer.0.SelfAttention.k.weight",
+      "decoder.block.0.layer.0.SelfAttention.o.weight": "decoder.block.0.layer.0.SelfAttention.o.weight",
+      "decoder.block.0.layer.0.SelfAttention.q.weight": "decoder.block.0.layer.0.SelfAttention.q.weight",
+      "decoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight": "decoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight",
+      "decoder.block.0.layer.0.SelfAttention.v.weight": "decoder.block.0.layer.0.SelfAttention.v.weight",
+      "decoder.block.0.layer.0.layer_norm.weight": "decoder.block.0.layer.0.layer_norm.weight",
+      "decoder.block.0.layer.1.EncDecAttention.k.weight": "decoder.block.0.layer.1.EncDecAttention.k.weight",
+      "decoder.block.0.layer.1.EncDecAttention.o.weight": "decoder.block.0.layer.1.EncDecAttention.o.weight",
+      "decoder.block.0.layer.1.EncDecAttention.q.weight": "decoder.block.0.layer.1.EncDecAttention.q.weight",
+      "decoder.block.0.layer.1.EncDecAttention.v.weight": "decoder.block.0.layer.1.EncDecAttention.v.weight",
+      "decoder.block.0.layer.1.layer_norm.weight": "decoder.block.0.layer.1.layer_norm.weight",
+      "decoder.block.0.layer.2.DenseReluDense.wi.weight": "decoder.block.0.layer.2.DenseReluDense.wi.weight",
+      "decoder.block.0.layer.2.DenseReluDense.wo.weight": "decoder.block.0.layer.2.DenseReluDense.wo.weight",
+      "decoder.block.0.layer.2.layer_norm.weight": "decoder.block.0.layer.2.layer_norm.weight",
+      "decoder.embed_tokens.weight": "shared.weight",
+      "decoder.final_layer_norm.weight": "decoder.final_layer_norm.weight",
+      "encoder.block.0.layer.0.SelfAttention.k.weight": "encoder.block.0.layer.0.SelfAttention.k.weight",
+      "encoder.block.0.layer.0.SelfAttention.o.weight": "encoder.block.0.layer.0.SelfAttention.o.weight",
+      "encoder.block.0.layer.0.SelfAttention.q.weight": "encoder.block.0.layer.0.SelfAttention.q.weight",
+      "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight": "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight",
+      "encoder.block.0.layer.0.SelfAttention.v.weight": "encoder.block.0.layer.0.SelfAttention.v.weight",
+      "encoder.block.0.layer.0.layer_norm.weight": "encoder.block.0.layer.0.layer_norm.weight",
+      "encoder.block.0.layer.1.DenseReluDense.wi.weight": "encoder.block.0.layer.1.DenseReluDense.wi.weight",
+      "encoder.block.0.layer.1.DenseReluDense.wo.weight": "encoder.block.0.layer.1.DenseReluDense.wo.weight",
+      "encoder.block.0.layer.1.layer_norm.weight": "encoder.block.0.layer.1.layer_norm.weight",
+      "encoder.embed_tokens.weight": "shared.weight",
+      "encoder.final_layer_norm.weight": "encoder.final_layer_norm.weight",
+      "lm_head.weight": "shared.weight",
+      "shared.weight": "shared.weight"
+    },
+    "tokenizer": {
+      "json": "{\"added_tokens\":[{\"content\":\"[PAD]\",\"id\":0,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"[UNK]\",\"id\":1,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true},{\"content\":\"</s>\",\"id\":5,\"lstrip\":false,\"normalized\":false,\"rstrip\":false,\"single_word\":false,\"special\":true}],\"decoder\":null,\"model\":{\"type\":\"WordLevel\",\"unk_token\":\"[UNK]\",\"vocab\":{\"</s>\":5,\"[PAD]\":0,\"[UNK]\":1,\"answer\":4,\"hello\":2,\"world\":3}},\"normalizer\":null,\"padding\":null,\"post_processor\":{\"pair\":[{\"Sequence\":{\"id\":\"A\",\"type_id\":0}},{\"Sequence\":{\"id\":\"B\",\"type_id\":1}}],\"single\":[{\"Sequence\":{\"id\":\"A\",\"type_id\":0}}],\"special_tokens\":{},\"type\":\"TemplateProcessing\"},\"pre_tokenizer\":{\"type\":\"Whitespace\"},\"truncation\":null,\"version\":\"1.0\"}",
+      "options": {
+        "clean_up_tokenization_spaces": false,
+        "model_input_names": [
+          "input_ids",
+          "attention_mask"
+        ],
+        "model_max_length": 1000000000000000019884624838656,
+        "split_special_tokens": false
+      },
+      "padding_side": "right",
+      "special_tokens": {
+        "eos_token": "</s>",
+        "pad_token": "[PAD]",
+        "unk_token": "[UNK]"
+      },
+      "truncation_side": "right"
+    }
+  },
+  "format": "tensorcode.pretrained",
+  "tool": "tensorcode.ops.vec.decode.TextDecoder",
+  "version": 1
+}

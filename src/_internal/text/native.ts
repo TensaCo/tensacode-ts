@@ -12,7 +12,7 @@ import { Module } from '../../nn/module.js';
 import { Tensor, tensor } from '../../nn/tensor.js';
 import { noGrad } from '../../nn/autograd.js';
 import { ValueError } from '../../errors.js';
-import { isPlainObject, pythonJsonDumps, deepCopy, type JsonObject, type JsonValue } from '../json.js';
+import { isPlainObject, mergeJson, pythonJsonDumps, pythonJsonLoads, deepCopy, type JsonObject, type JsonValue } from '../json.js';
 import { nativeConfig, generationConfigFromFile, generationConfigFromModel } from '../native/config.js';
 import { createNativeModel } from '../native/registry.js';
 import { parameterAliases, restoreParameterAliases } from '../native/modules.js';
@@ -107,7 +107,7 @@ export class NativeModel extends Module {
     this.tokenizer = FastTokenizer.fromConfiguration(config.tokenizer as JsonObject);
     const generation = config.generation ?? {};
     if (!isPlainObject(generation)) throw new ValueError('unsupported generation setting');
-    this.generation = { max_new_tokens: 32, do_sample: false, ...deepCopy(generation as JsonObject) };
+    this.generation = mergeJson({ max_new_tokens: 32, do_sample: false }, generation as JsonObject);
     const allowed = new Set<string>(GENERATION_KEYS);
     if (Object.keys(this.generation).some((key) => !allowed.has(key))) throw new ValueError('unsupported generation setting');
   }
@@ -168,7 +168,7 @@ export class NativeModel extends Module {
     if (request.responseSchema === null) return new ModelOutput({ text });
     let value: unknown;
     try {
-      value = JSON.parse(text);
+      value = pythonJsonLoads(text);
     } catch (error) {
       throw new InvalidModelOutput('Native model did not generate valid JSON', { cause: error });
     }

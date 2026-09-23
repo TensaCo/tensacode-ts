@@ -253,11 +253,25 @@ export function prepareCheckpoint(payload: Record<string, unknown>, options: Che
       || record.type !== optimizer.identity || !jsonEqualStructure(record.layout, optimizerLayout(optimizer, operations))) {
       throw new ValueError('Checkpoint optimizer type or parameter layout differs');
     }
-    const decoded = codec.decode(record.state);
+    const decoded = decimalStateKeys(codec.decode(record.state));
     validateOptimizerState(optimizer, decoded);
     optimizerState = decoded;
   }
   return { states, optimizerState };
+}
+
+/**
+ * A decoded Python optimizer state keeps its ``int`` parameter keys (a
+ * ``Map``); the optimizer's ``stateDict()`` spells them as decimal strings.
+ */
+function decimalStateKeys(decoded: unknown): unknown {
+  if (!isPlainObject(decoded) || !(decoded.state instanceof Map)) return decoded;
+  const state: Record<string, unknown> = {};
+  for (const [key, slots] of decoded.state) {
+    if (typeof key !== 'number' || !Number.isInteger(key)) return decoded;
+    state[String(key)] = slots;
+  }
+  return { ...decoded, state };
 }
 
 /** Apply prepared states inside the caller's rollback transaction. */

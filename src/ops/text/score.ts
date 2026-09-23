@@ -9,7 +9,7 @@ import {
 
 export interface ScoreFields {
   /** Per-level probabilities keyed by the rubric index (``'0'``, ``'1'``, ...). */
-  distribution?: Readonly<Record<string | number, number>> | null;
+  distribution?: Readonly<Record<string | number, number>> | ReadonlyMap<number, number> | null;
   confidence?: number | null;
   abstained?: boolean;
 }
@@ -18,6 +18,10 @@ export interface ScoreFields {
 export class ScoreResult {
   static readonly qualifiedName: string = 'tensorcode.ops.text.score.ScoreResult';
   static readonly recordFields = ['value', 'distribution', 'confidence', 'abstained'] as const;
+  /** Python ``float`` annotations (integral values persist as ``1.0``). */
+  static readonly recordFloatFields = ['value', 'distribution', 'confidence'] as const;
+  /** Python ``Mapping[int, ...]`` fields (persisted with int keys). */
+  static readonly recordIntKeyFields = ['distribution'] as const;
   readonly value: number | null;
   readonly distribution: ReadonlyMapping<number> | null;
   readonly confidence: number | null;
@@ -25,7 +29,7 @@ export class ScoreResult {
 
   constructor(value: number | null, fields: ScoreFields = {}) {
     this.value = value;
-    this.distribution = fields.distribution === null || fields.distribution === undefined ? null : frozenMapping({ ...fields.distribution });
+    this.distribution = fields.distribution === null || fields.distribution === undefined ? null : frozenMapping(fields.distribution);
     this.confidence = fields.confidence ?? null;
     this.abstained = fields.abstained ?? false;
     Object.freeze(this);

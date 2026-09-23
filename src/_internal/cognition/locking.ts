@@ -7,7 +7,7 @@
  * persistence uses {@link SerialQueue} where exclusive access matters.
  */
 import type { Module } from '../../nn/module.js';
-import { Tensor, arange, zeros } from '../../nn/tensor.js';
+import type { Tensor } from '../../nn/tensor.js';
 import { torchDTypeName } from '../../nn/dtype.js';
 import { tensorBytes } from '../../nn/safetensors.js';
 import { canonicalJson, sha256Hex } from '../json.js';
@@ -56,61 +56,6 @@ export function updateTensorDigest(digest: Sha256Accumulator, name: string, tens
   digest.update(tensorBytes(tensor));
 }
 
-/**
- * Python registers non-persistent ``position_ids``/``token_type_ids`` buffers
- * on BERT-family embeddings; they appear in ``named_buffers()`` (and therefore
- * in content fingerprints and tensor schemas) but never in state dicts. When
- * the TypeScript module does not register them, equivalent virtual buffers
- * keep fingerprints identical to Python's.
- */
-const VIRTUAL_BUFFERS: Record<string, readonly ('position_ids' | 'token_type_ids')[]> = {
-  AlbertEmbeddings: ['position_ids', 'token_type_ids'],
-  BertEmbeddings: ['position_ids', 'token_type_ids'],
-  RobertaEmbeddings: ['position_ids', 'token_type_ids'],
-  DistilEmbeddings: ['position_ids'],
-};
-const virtualCache = new WeakMap<Module, Map<string, Tensor>>();
-
-function virtualBuffers(module: Module): [string, Tensor][] {
-  const names = VIRTUAL_BUFFERS[module.constructor.name];
-  const positions = module.getModule('position_embeddings') as (Module & { numEmbeddings?: number; weight?: Tensor }) | null;
-  if (!names || !positions) return [];
-  const length = positions.weight?.shape[0];
-  if (length === undefined) return [];
-  let cache = virtualCache.get(module);
-  if (!cache) {
-    cache = new Map();
-    virtualCache.set(module, cache);
-  }
-  const result: [string, Tensor][] = [];
-  for (const name of names) {
-    if (module.getBuffer(name) !== null) continue;
-    let value = cache.get(name);
-    if (!value || value.shape[1] !== length) {
-      value = name === 'position_ids'
-        ? arange(0, length, 1, { dtype: 'int64' }).reshape(1, length)
-        : zeros([1, length], { dtype: 'int64' });
-      cache.set(name, value);
-    }
-    result.push([name, value]);
-  }
-  return result;
-}
-
-/** Python ``module.named_buffers()`` (including non-persistent buffers Python registers). */
-export function pythonNamedBuffers(root: Module): [string, Tensor][] {
-  const result: [string, Tensor][] = [];
-  const seen = new Set<Tensor>();
-  for (const [path, module] of root.namedModules()) {
-    for (const [name, buffer] of [...module.namedBuffers({ recurse: false }), ...virtualBuffers(module)]) {
-      if (seen.has(buffer)) continue;
-      seen.add(buffer);
-      result.push([path ? `${path}.${name}` : name, buffer]);
-    }
-  }
-  return result;
-}
-
 interface TensorKey {
   name: string;
   tensor: Tensor;
@@ -140,7 +85,7 @@ export class ModelFingerprint {
     const serialized = canonicalJson(config);
     const tensors: TensorKey[] = [];
     for (const [prefix, module] of modules) {
-      for (const [name, tensor] of [...module.namedParameters(), ...pythonNamedBuffers(module)] as [string, Tensor][]) {
+      for (const [name, tensor] of [...module.namedParameters(), ...module.namedBuffers()] as [string, Tensor][]) {
         tensors.push({ name: `${prefix}.${name}`, tensor, version: tensor.version, dtype: tensor.dtype, shape: pythonShape(tensor.shape) });
       }
     }

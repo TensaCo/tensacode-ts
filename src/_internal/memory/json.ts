@@ -9,7 +9,9 @@
  */
 import { readFile } from 'node:fs/promises';
 import { ValueError } from '../../errors.js';
-import { isPlainObject, jsonEqual, parseJsonStrict, pythonJsonDumps, validatedJson, type JsonValue } from '../json.js';
+import {
+  isPlainObject, jsonEqual, parseJsonStrict, pythonJsonDumps, shallowCopy, transferPythonNumberKind, validatedJson, type JsonValue,
+} from '../json.js';
 import { atomicWriteFile, pathExists } from '../files.js';
 
 /** One stored value and its stable source identity. */
@@ -28,7 +30,7 @@ export class MemoryRecord<V = unknown> {
     this.sourceId = sourceId;
     this.kind = kind;
     this.value = value;
-    this.metadata = Object.freeze({ ...metadata });
+    this.metadata = Object.freeze(shallowCopy(metadata));
     Object.freeze(this);
   }
 
@@ -37,7 +39,7 @@ export class MemoryRecord<V = unknown> {
   }
 
   toRecord(): Record<string, unknown> {
-    return { source_id: this.sourceId, kind: this.kind, value: this.value, metadata: { ...this.metadata } };
+    return { source_id: this.sourceId, kind: this.kind, value: this.value, metadata: shallowCopy(this.metadata) };
   }
 
   /** Python dataclass equality. */
@@ -61,6 +63,12 @@ function structurallyEqual(a: unknown, b: unknown): boolean {
       && keys.every((key) => structurallyEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]));
   }
   return false;
+}
+
+/** Keep the Python number kind of a scalar record value across a copy. */
+function keepValueKind<R extends MemoryRecord>(copy: R, source: MemoryRecord): R {
+  transferPythonNumberKind(copy, 'value', source, 'value', copy.value);
+  return copy;
 }
 
 /** Explicit operand passed to a caller-supplied retrieval policy. */
@@ -226,21 +234,23 @@ export class JsonMemory<V = unknown> {
     let value: JsonValue;
     let metadata: JsonValue;
     try {
-      value = validatedJson(this.encodeValue(record.value), 'memory value');
-      metadata = validatedJson({ ...record.metadata }, 'memory metadata');
+      const encoded = { value: this.encodeValue(record.value) };
+      transferPythonNumberKind(encoded, 'value', record, 'value', record.value);
+      value = validatedJson<Record<string, JsonValue>>(encoded, 'memory value').value!;
+      metadata = validatedJson(shallowCopy(record.metadata), 'memory metadata');
     } catch (error) {
       if (error instanceof TypeError || error instanceof ValueError) throw error;
       throw new TypeError('memory value and metadata must be JSON serializable', { cause: error });
     }
-    return new MemoryRecord(record.sourceId, record.kind, this.decodeValue(value), metadata as Record<string, unknown>);
+    return keepValueKind(new MemoryRecord(record.sourceId, record.kind, this.decodeValue(value), metadata as Record<string, unknown>), record);
   }
 
   /** @internal persisted record payload. */
   encodeRecord(record: MemoryRecord<V>): Record<string, JsonValue> {
     try {
-      return validatedJson({
-        source_id: record.sourceId, kind: record.kind, value: this.encodeValue(record.value), metadata: { ...record.metadata },
-      }, 'memory record');
+      const payload = { source_id: record.sourceId, kind: record.kind, value: this.encodeValue(record.value), metadata: shallowCopy(record.metadata) };
+      transferPythonNumberKind(payload, 'value', record, 'value', record.value);
+      return validatedJson(payload, 'memory record');
     } catch (error) {
       throw new TypeError('memory value and metadata must be JSON serializable', { cause: error });
     }
@@ -252,7 +262,8 @@ export class JsonMemory<V = unknown> {
       format: JsonMemory.FORMAT, version: JsonMemory.VERSION, next_id: nextId,
       records: records.map((record) => this.encodeRecord(record)),
     };
-    await atomicWriteFile(this.path, pythonJsonDumps(payload, { allowNan: false, separators: [',', ':'] }));
+    // Python ``json.dump``: caller data has no float schema; recorded kinds are kept.
+    await atomicWriteFile(this.path, pythonJsonDumps(payload, { allowNan: false, separators: [',', ':'], floatKeys: new Set() }));
   }
 
   private async load(): Promise<void> {
@@ -267,7 +278,9 @@ export class JsonMemory<V = unknown> {
         throw new ValueError('malformed memory record');
       }
       if (!isPlainObject(item.metadata)) throw new TypeError('metadata must be a mapping');
-      return new MemoryRecord(item.source_id as string, item.kind as string, this.decodeValue(item.value), item.metadata as Record<string, unknown>);
+      const record = new MemoryRecord(item.source_id as string, item.kind as string, this.decodeValue(item.value), item.metadata as Record<string, unknown>);
+      transferPythonNumberKind(record, 'value', item, 'value', record.value);
+      return record;
     });
     if (new Set(records.map((record) => record.sourceId)).size !== records.length) throw new ValueError('duplicate memory source_id in file');
     this.committed = Object.freeze(records);

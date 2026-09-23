@@ -272,9 +272,16 @@ export abstract class OwnedTextOperation<O> extends Operation<readonly Message[]
     let target: string;
     if (request.responseSchema !== null) {
       if (!isPlainObject(targets)) throw new ValueError('structured targets must be an explicit JSON mapping');
-      validateStructured(targets, request.responseSchema);
-      this._parse(targets);
-      target = sortedJsonDumps(targets, { allowNan: false });
+      // ``float()``/``int()`` markers become numbers whose Python kind the target text keeps.
+      let plain: Record<string, unknown> = targets;
+      try {
+        plain = validatedJson<Record<string, unknown>>(targets);
+      } catch {
+        // Non-JSON targets are rejected by the schema validation below.
+      }
+      validateStructured(plain, request.responseSchema);
+      this._parse(plain);
+      target = sortedJsonDumps(plain, { allowNan: false });
     } else {
       if (typeof targets !== 'string') throw new ValueError('text targets must be a string');
       target = targets;

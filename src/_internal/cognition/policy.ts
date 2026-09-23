@@ -31,6 +31,8 @@ function isInteger(value: unknown): value is number {
 export class SelectionPolicy {
   static readonly qualifiedName: string = 'tensorcode._internal.cognition.policy.SelectionPolicy';
   static readonly recordFields = ['min_support', 'max_contradiction', 'max_unknown'] as const;
+  /** Python ``float`` annotations (integral values persist as ``1.0``). */
+  static readonly recordFloatFields = ['min_support', 'max_contradiction', 'max_unknown'] as const;
   readonly minSupport: number;
   readonly maxContradiction: number;
   readonly maxUnknown: number;

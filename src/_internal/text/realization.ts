@@ -8,7 +8,6 @@ import { generateSeq2Seq, type GenerationSettings } from '../native/generation.j
 import { generationDefaults } from '../native/config.js';
 import type { T5ForConditionalGeneration } from '../native/t5.js';
 import type { JsonObject } from '../json.js';
-import { configJsonString } from '../vec/sequence.js';
 
 export interface DecoderMemory {
   /** ``[batch, positions, d_model]`` decoder memory (encoder outputs). */
@@ -62,7 +61,7 @@ export class SequenceDecoder extends Operation<DecoderMemory, Tensor | DecoderLo
   configuration(): JsonObject {
     return {
       operation: 'tensorcode.tools.chatbot.Chatbot.decoder', memory: 'explicit-sequence-v1',
-      model: configJsonString(this.model.config),
+      model: this.model.config.toDiffDict(),
       generation: generationDefaults(this.generationConfig()),
     };
   }

@@ -14,7 +14,9 @@ import { Operation, ModuleOperation } from '../ops/base.js';
 import { atomicWriteFile, isSymlink } from './files.js';
 import { resolveArtifactDirectory, type HubOptions } from './hub.js';
 import { qualifiedName } from './identity.js';
-import { deepCopy, isPlainObject, jsonEqual, parseJsonStrict, pythonJsonDumps, validatedJson, type JsonObject } from './json.js';
+import {
+  deepCopy, isPlainObject, jsonEqual, mergeJson, parseJsonStrict, pythonJsonDumps, validatedJson, type JsonObject,
+} from './json.js';
 
 export const OPERATION_ARTIFACT_FORMAT = 'tensorcode.operation';
 
@@ -26,9 +28,10 @@ export function validatedConfig(
   config: unknown, keys: Iterable<string>, defaults: JsonObject = {},
 ): JsonObject {
   const source = config === null || config === undefined ? {} : config;
-  if (!isPlainObject(source)) throw new TypeError('Operation config must be a JSON object');
+  if (!isPlainObject(source) && !(source instanceof Map)) throw new TypeError('Operation config must be a JSON object');
   const allowed = new Set(keys);
-  const unknown = Object.keys(source).filter((key) => !allowed.has(key)).sort();
+  const names = source instanceof Map ? [...source.keys()].map(String) : Object.keys(source);
+  const unknown = names.filter((key) => !allowed.has(key)).sort();
   if (unknown.length) throw new ValueError(`Unknown configuration fields: ${JSON.stringify(unknown)}`);
   let copied: JsonObject;
   try {
@@ -37,7 +40,7 @@ export function validatedConfig(
     throw new ValueError('Configuration must contain finite JSON data', { cause: error });
   }
   if (!jsonEqual(copied, source)) throw new ValueError('Configuration must use JSON types');
-  return { ...deepCopy(defaults), ...copied };
+  return mergeJson(defaults, copied);
 }
 
 /** Reject any key outside ``allowed`` (for configs validated field by field). */
