@@ -264,7 +264,10 @@ others with `ValueError`.
   `tokenizer_json`, generic fast tokenizers), TypeScript reproduces the Rust
   `serde_json` float parsing, which can move Unigram scores by one ULP
   (`rustJsonF64`). Class-specific transformers tokenizers (T5, DeBERTa-v2,
-  ALBERT, ...) rebuild their vocabulary exactly and are loaded exactly. Embedded
+  ALBERT, ...) rebuild their vocabulary exactly and are loaded exactly; for
+  `T5Tokenizer`, `DebertaV2Tokenizer` and `AlbertTokenizer` the pipeline that
+  transformers 5 rebuilds from `tokenizer_config.json` flags is reproduced as
+  well (`src/_internal/tokenizers/serialization.ts`). Embedded
   tokenizer JSON, configurations and fingerprints of real foundations (for
   example `google/flan-t5-small`) therefore equal Python's.
 - **Python examples/research scripts** are not ported beyond the quickstart,

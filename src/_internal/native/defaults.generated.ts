@@ -26,6 +26,46 @@ export const BASE_CONFIG_DEFAULTS: JsonObject = {
 };
 
 export const CLASS_CONFIG_DEFAULTS: Record<string, JsonObject> = {
+  "albert": {
+    "_name_or_path": "",
+    "architectures": null,
+    "attention_probs_dropout_prob": 0.0,
+    "bos_token_id": 2,
+    "chunk_size_feed_forward": 0,
+    "classifier_dropout_prob": 0.1,
+    "dtype": null,
+    "embedding_size": 128,
+    "eos_token_id": 3,
+    "hidden_act": "gelu_new",
+    "hidden_dropout_prob": 0.0,
+    "hidden_size": 4096,
+    "id2label": {
+      "0": "LABEL_0",
+      "1": "LABEL_1"
+    },
+    "initializer_range": 0.02,
+    "inner_group_num": 1,
+    "intermediate_size": 16384,
+    "is_encoder_decoder": false,
+    "label2id": {
+      "LABEL_0": 0,
+      "LABEL_1": 1
+    },
+    "layer_norm_eps": 1e-12,
+    "max_position_embeddings": 512,
+    "model_type": "albert",
+    "num_attention_heads": 64,
+    "num_hidden_groups": 1,
+    "num_hidden_layers": 12,
+    "output_attentions": false,
+    "output_hidden_states": false,
+    "pad_token_id": 0,
+    "problem_type": null,
+    "return_dict": true,
+    "tie_word_embeddings": true,
+    "type_vocab_size": 2,
+    "vocab_size": 30000
+  },
   "bert": {
     "_name_or_path": "",
     "add_cross_attention": false,
@@ -472,6 +512,7 @@ export const CLASS_CONFIG_DEFAULTS: Record<string, JsonObject> = {
 };
 
 export const ATTRIBUTE_MAPS: Record<string, Record<string, string>> = {
+  "albert": {},
   "bert": {},
   "clip": {},
   "clip_text_model": {},

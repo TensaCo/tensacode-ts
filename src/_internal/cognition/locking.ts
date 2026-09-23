@@ -64,6 +64,7 @@ export function updateTensorDigest(digest: Sha256Accumulator, name: string, tens
  * keep fingerprints identical to Python's.
  */
 const VIRTUAL_BUFFERS: Record<string, readonly ('position_ids' | 'token_type_ids')[]> = {
+  AlbertEmbeddings: ['position_ids', 'token_type_ids'],
   BertEmbeddings: ['position_ids', 'token_type_ids'],
   RobertaEmbeddings: ['position_ids', 'token_type_ids'],
   DistilEmbeddings: ['position_ids'],

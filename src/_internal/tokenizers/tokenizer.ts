@@ -267,15 +267,19 @@ export interface TensorBatch {
 }
 
 /** transformers tokenizer classes whose default ``model_input_names`` include token type ids. */
-const TOKEN_TYPE_CLASSES = new Set([
-  'BertTokenizer', 'BertTokenizerFast', 'ElectraTokenizer', 'ElectraTokenizerFast', 'DebertaV2Tokenizer',
-  'DebertaV2TokenizerFast', 'DebertaTokenizer', 'DebertaTokenizerFast', 'AlbertTokenizer', 'AlbertTokenizerFast',
-]);
+/** Class ``model_input_names`` other than ``['input_ids', 'attention_mask']`` (transformers 5). */
+const CLASS_INPUT_NAMES: Record<string, string[]> = {
+  BertTokenizer: ['input_ids', 'token_type_ids', 'attention_mask'],
+  ElectraTokenizer: ['input_ids', 'token_type_ids', 'attention_mask'],
+  DebertaV2Tokenizer: ['input_ids', 'attention_mask', 'token_type_ids'],
+  DebertaTokenizer: ['input_ids', 'attention_mask', 'token_type_ids'],
+};
 
 /** transformers 5 tokenizer class chosen from ``config.json`` ``model_type`` when ``tokenizer_class`` is absent. */
 const MODEL_TYPE_TOKENIZERS: Record<string, string> = {
   bert: 'BertTokenizer', electra: 'BertTokenizer', distilbert: 'DistilBertTokenizer', roberta: 'RobertaTokenizer',
   t5: 'T5Tokenizer', mt5: 'T5Tokenizer', clip: 'CLIPTokenizer', clip_text_model: 'CLIPTokenizer', vit: 'BertTokenizer',
+  albert: 'AlbertTokenizer', 'deberta-v2': 'DebertaV2Tokenizer',
 };
 
 /** Class-default special tokens (transformers 5 ``__init__`` defaults). */
@@ -285,6 +289,8 @@ const CLASS_SPECIAL_TOKENS: Record<string, Record<string, string>> = {
   ElectraTokenizer: { unk_token: '[UNK]', sep_token: '[SEP]', pad_token: '[PAD]', cls_token: '[CLS]', mask_token: '[MASK]' },
   RobertaTokenizer: { bos_token: '<s>', eos_token: '</s>', unk_token: '<unk>', sep_token: '</s>', pad_token: '<pad>', cls_token: '<s>', mask_token: '<mask>' },
   T5Tokenizer: { eos_token: '</s>', unk_token: '<unk>', pad_token: '<pad>' },
+  DebertaV2Tokenizer: { bos_token: '[CLS]', eos_token: '[SEP]', unk_token: '[UNK]', sep_token: '[SEP]', pad_token: '[PAD]', cls_token: '[CLS]', mask_token: '[MASK]' },
+  AlbertTokenizer: { bos_token: '[CLS]', eos_token: '[SEP]', unk_token: '<unk>', sep_token: '[SEP]', pad_token: '<pad>', cls_token: '[CLS]', mask_token: '[MASK]' },
   CLIPTokenizer: { bos_token: '<|startoftext|>', eos_token: '<|endoftext|>', unk_token: '<|endoftext|>', pad_token: '<|endoftext|>' },
 };
 
@@ -301,8 +307,10 @@ function cleanUpTokenization(text: string): string {
 }
 
 /** Canonical backend JSON (``json.dumps(json.loads(to_str()), sort_keys, compact)`` with padding/truncation reset). */
-export function canonicalTokenizerJson(text: string, tokenizerClass: string | null = null, rustParsed = false): string {
-  return canonicalBackendJson(text, { tokenizerClass, rustParsed });
+export function canonicalTokenizerJson(
+  text: string, tokenizerClass: string | null = null, rustParsed = false, flags: Record<string, unknown> = {},
+): string {
+  return canonicalBackendJson(text, { tokenizerClass, rustParsed, flags });
 }
 
 export class FastTokenizer {
@@ -331,12 +339,14 @@ export class FastTokenizer {
       rustParsed?: boolean;
       /** transformers tokenizer class whose pipeline construction is emulated. */
       tokenizerClass?: string | null;
+      /** ``tokenizer_config.json`` (construction flags of rebuilt tokenizer classes). */
+      flags?: Record<string, unknown>;
     } = {},
   ) {
     if (settings.canonical) {
       this.jsonText = settings.rustParsed ? canonicalBackendJson(jsonText, { rustParsed: true }) : jsonText;
     } else {
-      this.jsonText = canonicalTokenizerJson(jsonText, settings.tokenizerClass ?? null, settings.rustParsed ?? false);
+      this.jsonText = canonicalTokenizerJson(jsonText, settings.tokenizerClass ?? null, settings.rustParsed ?? false, settings.flags ?? {});
     }
     this.backend = Tokenizer.fromString(this.jsonText);
     const options = settings.options ?? {};
@@ -417,15 +427,15 @@ export class FastTokenizer {
     if (typeof config.clean_up_tokenization_spaces === 'boolean') options.clean_up_tokenization_spaces = config.clean_up_tokenization_spaces;
     if (typeof config.model_max_length === 'number') options.model_max_length = config.model_max_length;
     if (Array.isArray(config.model_input_names)) options.model_input_names = config.model_input_names as string[];
-    else if (tokenizerClass && TOKEN_TYPE_CLASSES.has(tokenizerClass)) {
-      options.model_input_names = ['input_ids', 'token_type_ids', 'attention_mask'];
+    else if (tokenizerClass && CLASS_INPUT_NAMES[tokenizerClass]) {
+      options.model_input_names = [...CLASS_INPUT_NAMES[tokenizerClass]!];
     }
     if (typeof config.split_special_tokens === 'boolean') options.split_special_tokens = config.split_special_tokens;
     const side = (value: unknown): 'left' | 'right' | undefined => (value === 'left' || value === 'right' ? value : undefined);
     const paddingSide = side(config.padding_side);
     const truncationSide = side(config.truncation_side);
     return new FastTokenizer(json, {
-      specialTokens, options, tokenizerClass, rustParsed: loadsThroughRust(tokenizerClass),
+      specialTokens, options, tokenizerClass, rustParsed: loadsThroughRust(tokenizerClass), flags: config,
       ...(paddingSide ? { paddingSide } : {}),
       ...(truncationSide ? { truncationSide } : {}),
     });

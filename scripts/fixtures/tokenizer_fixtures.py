@@ -117,7 +117,10 @@ def synthetic():
 def cached():
     repos = {'google/electra-small-discriminator': ('hello [SEP] world', True),
              'google/flan-t5-small': ('Translate </s> to German: <extra_id_0> house', False),
-             'openai/clip-vit-base-patch32': ('a photo of a <|endoftext|> cat', False)}
+             'openai/clip-vit-base-patch32': ('a photo of a <|endoftext|> cat', False),
+             # transformers 5 rebuilds these pipelines from tokenizer_config.json flags.
+             'cross-encoder/nli-deberta-v3-small': ('premise [SEP] hypothesis', True),
+             'albert/albert-base-v2': ('hello [SEP] world', True)}
     from huggingface_hub.constants import HF_HUB_CACHE
     result = {}
     for repo, (inline, pairs) in repos.items():

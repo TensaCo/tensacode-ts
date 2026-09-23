@@ -124,7 +124,7 @@ network returns a `Promise`. Pure computation is synchronous.
 | `Scene` ranking mode | Yes | CLIP bootstrap via `Scene.fromFoundation` |
 | `Scene` language mode (Idefics3) | No | Throws `NotImplementedError` |
 | `Trainer`, checkpoints | Yes | SGD, Adam, AdamW. Python directory checkpoints load in TS, but their PyTorch/CPython RNG states are ignored. TS directory checkpoints store the TensorCode RNG and do not load in Python. Standalone checkpoint files are interchangeable |
-| Native architectures | BERT, RoBERTa, Electra, DistilBERT, DeBERTa-v2, T5, ViT, CLIP | transformers 5.17 parameter names; safetensors weights only |
+| Native architectures | ALBERT, BERT, RoBERTa, Electra, DistilBERT, DeBERTa-v2, T5, ViT, CLIP | transformers 5.17 parameter names; safetensors weights only. Python loads any transformers `AutoModel` for text foundations; TypeScript implements these |
 | Tokenizers | `tokenizer.json` runtime | WordPiece, BPE, Unigram, WordLevel |
 | Integrations | OpenAI-compatible, Jev, Transformers.js `LocalModel` | No implicit retries or redirects |
 | Compute | CPU, pure JavaScript | Random streams differ from PyTorch, so fresh initializations differ; loaded weights are identical |

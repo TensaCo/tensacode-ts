@@ -601,3 +601,178 @@ export class DistilBertForSequenceClassification extends NativeModel implements 
     return { logits: this.classifier.forward(this.dropout.forward(pooled)), lastHiddenState: hidden };
   }
 }
+
+// ---------------------------------------------------------------------------
+// ALBERT.
+// ---------------------------------------------------------------------------
+
+/** ``AlbertEmbeddings``: BERT embeddings at the factorized ``embedding_size``. */
+export class AlbertEmbeddings extends BertEmbeddings {
+  constructor(config: NativeConfig) {
+    super(config, num(config, 'embedding_size'));
+  }
+}
+
+class AlbertAttention extends Module {
+  readonly heads: number;
+  readonly headDim: number;
+  readonly attention_dropout: Dropout;
+  readonly output_dropout: Dropout;
+  readonly query: Linear;
+  readonly key: Linear;
+  readonly value: Linear;
+  readonly dense: Linear;
+  readonly LayerNorm: LayerNorm;
+
+  constructor(config: NativeConfig) {
+    super();
+    const hidden = num(config, 'hidden_size');
+    this.heads = num(config, 'num_attention_heads');
+    this.headDim = Math.floor(hidden / this.heads);
+    const all = this.heads * this.headDim;
+    this.attention_dropout = this.registerModule('attention_dropout', new Dropout(num(config, 'attention_probs_dropout_prob')));
+    this.output_dropout = this.registerModule('output_dropout', new Dropout(num(config, 'hidden_dropout_prob')));
+    this.query = this.registerModule('query', new Linear(hidden, all));
+    this.key = this.registerModule('key', new Linear(hidden, all));
+    this.value = this.registerModule('value', new Linear(hidden, all));
+    this.dense = this.registerModule('dense', new Linear(hidden, hidden));
+    this.LayerNorm = this.registerModule('LayerNorm', new LayerNorm(hidden, { eps: num(config, 'layer_norm_eps') }));
+  }
+
+  forward(hidden: Tensor, bias: Tensor | null): Tensor {
+    const q = splitHeads(this.query.forward(hidden), this.heads);
+    const k = splitHeads(this.key.forward(hidden), this.heads);
+    const v = splitHeads(this.value.forward(hidden), this.heads);
+    const attended = mergeHeads(attention(q, k, v, {
+      scale: this.headDim ** -0.5, bias, dropout: this.attention_dropout.p, training: this.training,
+    }));
+    return this.LayerNorm.forward(hidden.add(this.output_dropout.forward(this.dense.forward(attended))));
+  }
+}
+
+class AlbertLayer extends Module {
+  readonly full_layer_layer_norm: LayerNorm;
+  readonly attention: AlbertAttention;
+  readonly ffn: Linear;
+  readonly ffn_output: Linear;
+  readonly activation: ActivationModule;
+  /** Registered like transformers' ``AlbertLayer.dropout``, which its forward never applies. */
+  readonly dropout: Dropout;
+
+  constructor(config: NativeConfig) {
+    super();
+    const hidden = num(config, 'hidden_size');
+    this.full_layer_layer_norm = this.registerModule('full_layer_layer_norm', new LayerNorm(hidden, { eps: num(config, 'layer_norm_eps') }));
+    this.attention = this.registerModule('attention', new AlbertAttention(config));
+    this.ffn = this.registerModule('ffn', new Linear(hidden, num(config, 'intermediate_size')));
+    this.ffn_output = this.registerModule('ffn_output', new Linear(num(config, 'intermediate_size'), hidden));
+    this.activation = this.registerModule('activation', activationModule(config.string('hidden_act')));
+    this.dropout = this.registerModule('dropout', new Dropout(num(config, 'hidden_dropout_prob')));
+  }
+
+  forward(hidden: Tensor, bias: Tensor | null): Tensor {
+    const attended = this.attention.forward(hidden, bias);
+    const feedForward = this.ffn_output.forward(this.activation.forward(this.ffn.forward(attended)));
+    return this.full_layer_layer_norm.forward(feedForward.add(attended));
+  }
+}
+
+class AlbertLayerGroup extends Module {
+  readonly albert_layers: ModuleList<AlbertLayer>;
+
+  constructor(config: NativeConfig) {
+    super();
+    this.albert_layers = this.registerModule('albert_layers', new ModuleList(
+      Array.from({ length: num(config, 'inner_group_num') }, () => new AlbertLayer(config)),
+    ));
+  }
+
+  forward(hidden: Tensor, bias: Tensor | null): Tensor {
+    let state = hidden;
+    for (const layer of this.albert_layers) state = layer.forward(state, bias);
+    return state;
+  }
+}
+
+/** ``AlbertTransformer``: shared layer groups applied ``num_hidden_layers`` times. */
+class AlbertTransformer extends Module {
+  readonly embedding_hidden_mapping_in: Linear;
+  readonly albert_layer_groups: ModuleList<AlbertLayerGroup>;
+  readonly layers: number;
+  readonly groups: number;
+
+  constructor(config: NativeConfig) {
+    super();
+    this.layers = num(config, 'num_hidden_layers');
+    this.groups = num(config, 'num_hidden_groups');
+    this.embedding_hidden_mapping_in = this.registerModule('embedding_hidden_mapping_in',
+      new Linear(num(config, 'embedding_size'), num(config, 'hidden_size')));
+    this.albert_layer_groups = this.registerModule('albert_layer_groups', new ModuleList(
+      Array.from({ length: this.groups }, () => new AlbertLayerGroup(config)),
+    ));
+  }
+
+  forward(hidden: Tensor, bias: Tensor | null): Tensor {
+    let state = this.embedding_hidden_mapping_in.forward(hidden);
+    for (let index = 0; index < this.layers; index += 1) {
+      const group = Math.trunc(index / (this.layers / this.groups));
+      state = this.albert_layer_groups.at(group).forward(state, bias);
+    }
+    return state;
+  }
+}
+
+/** ``AlbertModel`` (``AutoModel`` for ``model_type='albert'``). */
+export class AlbertModel extends NativeModel implements NativeEncoder {
+  readonly embeddings: AlbertEmbeddings;
+  readonly encoder: AlbertTransformer;
+  readonly pooler: Linear | null;
+  readonly pooler_activation: ActivationModule | null;
+
+  constructor(config: NativeConfig, options: BertModelOptions = {}) {
+    super(config);
+    this.embeddings = this.registerModule('embeddings', new AlbertEmbeddings(config));
+    this.encoder = this.registerModule('encoder', new AlbertTransformer(config));
+    const pooling = options.addPoolingLayer !== false;
+    const hidden = num(config, 'hidden_size');
+    this.pooler = pooling ? this.registerModule('pooler', new Linear(hidden, hidden)) : null;
+    this.pooler_activation = pooling ? this.registerModule('pooler_activation', activationModule('tanh')) : null;
+    initializeWeights(this, num(config, 'initializer_range'));
+  }
+
+  getInputEmbeddings(): Embedding {
+    return this.embeddings.word_embeddings;
+  }
+
+  forward(inputs: EncoderInputs): EncoderOutput {
+    const embedded = this.embeddings.forward(inputs);
+    const lastHiddenState = this.encoder.forward(embedded, keyPaddingBias(inputs.attentionMask, embedded.dtype));
+    const poolerOutput = this.pooler && this.pooler_activation
+      ? this.pooler_activation.forward(this.pooler.forward(lastHiddenState.select(1, 0)))
+      : null;
+    return { lastHiddenState, poolerOutput };
+  }
+}
+
+/** ``AlbertForSequenceClassification`` (pooler → dropout → classifier). */
+export class AlbertForSequenceClassification extends NativeModel implements NativeSequenceClassifier {
+  readonly albert: AlbertModel;
+  readonly dropout: Dropout;
+  readonly classifier: Linear;
+
+  constructor(config: NativeConfig) {
+    super(config);
+    this.albert = this.registerModule('albert', new AlbertModel(config));
+    this.dropout = this.registerModule('dropout', new Dropout(num(config, 'classifier_dropout_prob')));
+    this.classifier = this.registerModule('classifier', new Linear(num(config, 'hidden_size'), config.numLabels));
+    initializeWeights(this.classifier, num(config, 'initializer_range'));
+  }
+
+  get base(): NativeEncoder { return this.albert; }
+  getInputEmbeddings(): Embedding { return this.albert.getInputEmbeddings(); }
+
+  forward(inputs: EncoderInputs): ClassifierOutput {
+    const output = this.albert.forward(inputs);
+    return { logits: this.classifier.forward(this.dropout.forward(output.poolerOutput!)), lastHiddenState: output.lastHiddenState };
+  }
+}

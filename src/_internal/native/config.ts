@@ -23,7 +23,7 @@ export { TRANSFORMERS_VERSION } from './defaults.generated.js';
 
 
 /** Model types whose architectures are implemented natively in TypeScript. */
-export const SUPPORTED_MODEL_TYPES = ['bert', 'roberta', 'electra', 'distilbert', 't5', 'vit', 'clip', 'deberta-v2'] as const;
+export const SUPPORTED_MODEL_TYPES = ['albert', 'bert', 'roberta', 'electra', 'distilbert', 't5', 'vit', 'clip', 'deberta-v2'] as const;
 export type SupportedModelType = (typeof SUPPORTED_MODEL_TYPES)[number];
 
 const NESTED: Record<string, Record<string, string>> = {

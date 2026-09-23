@@ -20,6 +20,8 @@ SMALL = dict(hidden_size=16, num_hidden_layers=1, num_attention_heads=2, interme
              max_position_embeddings=32)
 T5 = dict(model_type='t5', vocab_size=20, d_model=16, d_ff=32, num_layers=1, num_heads=2, d_kv=8)
 CASES = {
+    'albert': ('base', dict(model_type='albert', embedding_size=4, num_hidden_groups=2, inner_group_num=2, num_hidden_layers=4,
+                            **{k: v for k, v in SMALL.items() if k != 'num_hidden_layers'})),
     'bert': ('base', dict(model_type='bert', **SMALL)),
     'roberta': ('base', dict(model_type='roberta', **SMALL)),
     'electra': ('base', dict(model_type='electra', embedding_size=8, **SMALL)),
@@ -37,7 +39,7 @@ CASES = {
                           vision_config=dict(hidden_size=16, num_hidden_layers=1, num_attention_heads=2,
                                              intermediate_size=32, image_size=8, patch_size=4))),
 }
-for _name in ['bert', 'roberta', 'electra', 'distilbert', 'deberta-v2']:
+for _name in ['albert', 'bert', 'roberta', 'electra', 'distilbert', 'deberta-v2']:
     CASES[f'{_name}-classifier'] = ('sequence-classification', CASES[_name][1])
 
 
@@ -77,6 +79,11 @@ def chatbot_checkpoint():
 
 
 def generate():
+    modules()
+    chatbot_checkpoint()
+
+
+def modules():
     cases = {}
     for name, (head, data) in CASES.items():
         config = AutoConfig.for_model(**data)
@@ -85,4 +92,3 @@ def generate():
                        'modules': [path for path, _ in model.named_modules()],
                        'parameters': list(model.state_dict().keys())}
     write_json('native_modules.json', cases)
-    chatbot_checkpoint()

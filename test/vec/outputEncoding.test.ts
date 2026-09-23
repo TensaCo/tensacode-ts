@@ -1,4 +1,4 @@
-/** Port of ``tests/models/test_output_encoding.py`` (ALBERT is not a supported native architecture in TypeScript). */
+/** Port of ``tests/models/test_output_encoding.py``. */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,15 +16,17 @@ function close(a: Tensor, b: Tensor, atol = 1e-5): void {
   expectClose(a.data, b.data, atol, 1e-5);
 }
 
-async function textEncoder(kind: 'bert' | 't5' | 'roberta'): Promise<TextEncoder> {
+async function textEncoder(kind: 'bert' | 't5' | 'roberta' | 'albert'): Promise<TextEncoder> {
   const path = fixturePath(`${kind}_foundation`);
-  const encoder = await TextEncoder.fromFoundation(path, { readout: 'output_encoding', contextSpace: new Space('context', 8, { organization: 'sequence' }) });
+  // The context space has the native input-embedding width (ALBERT factorizes it).
+  const width = kind === 'albert' ? 4 : 8;
+  const encoder = await TextEncoder.fromFoundation(path, { readout: 'output_encoding', contextSpace: new Space('context', width, { organization: 'sequence' }) });
   expect(encoder.parameters().every((parameter) => parameter.numel > 0)).toBe(true);
   return encoder;
 }
 
 describe('OUTPUT_ENCODING readout (tests/models/test_output_encoding.py)', () => {
-  it.each(['bert', 't5', 'roberta'] as const)('text native readout, padding, context, gradients and artifact (%s)', async (kind) => {
+  it.each(['bert', 't5', 'roberta', 'albert'] as const)('text native readout, padding, context, gradients and artifact (%s)', async (kind) => {
     const encoder = await textEncoder(kind);
     const native = encoder.model.config.isEncoderDecoder ? encoder.model.getEncoder!() : (encoder.model as any);
     const width = native.getInputEmbeddings().weight.shape[1];
@@ -55,7 +57,7 @@ describe('OUTPUT_ENCODING readout (tests/models/test_output_encoding.py)', () =>
     expect(result.metadata.readout_initialization).toBe('untrained');
   });
 
-  it.each(['bert', 't5', 'roberta'] as const)('text position limit and output space (%s)', async (kind) => {
+  it.each(['bert', 't5', 'roberta', 'albert'] as const)('text position limit and output space (%s)', async (kind) => {
     const encoder = await textEncoder(kind);
     const bad = encoder.configuration();
     (bad.output_space as any).organization = 'sequence';

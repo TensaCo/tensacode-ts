@@ -3,16 +3,16 @@
  *
  * | head                      | architectures                                              |
  * |---------------------------|------------------------------------------------------------|
- * | ``base``                  | bert, roberta, electra, distilbert, deberta-v2, vit, clip  |
+ * | ``base``                  | albert, bert, roberta, electra, distilbert, deberta-v2, vit, clip |
  * | ``seq2seq``               | t5 (``AutoModelForSeq2SeqLM``)                             |
  * | ``encoder``               | t5 (``T5EncoderModel``)                                    |
- * | ``sequence-classification`` | bert, roberta, electra, distilbert, deberta-v2           |
+ * | ``sequence-classification`` | albert, bert, roberta, electra, distilbert, deberta-v2   |
  */
 import { ValueError } from '../../errors.js';
 import type { NativeConfig } from './config.js';
 import type { NativeModel } from './modules.js';
 import {
-  BertForSequenceClassification, BertModel, DistilBertForSequenceClassification, DistilBertModel,
+  AlbertForSequenceClassification, AlbertModel, BertForSequenceClassification, BertModel, DistilBertForSequenceClassification, DistilBertModel,
   ElectraForSequenceClassification, ElectraModel, RobertaForSequenceClassification, RobertaModel,
 } from './bert.js';
 import { T5EncoderModel, T5ForConditionalGeneration } from './t5.js';
@@ -29,7 +29,7 @@ export interface CreateOptions {
 
 /** ``base_model_prefix`` of the architecture's pretrained head models. */
 export const BASE_MODEL_PREFIX: Record<string, string> = {
-  bert: 'bert', roberta: 'roberta', electra: 'electra', distilbert: 'distilbert', 'deberta-v2': 'deberta',
+  albert: 'albert', bert: 'bert', roberta: 'roberta', electra: 'electra', distilbert: 'distilbert', 'deberta-v2': 'deberta',
   t5: 'transformer', vit: 'vit', clip: 'clip',
 };
 
@@ -45,6 +45,7 @@ export function createNativeModel(config: NativeConfig, head: NativeHead = 'base
   }
   if (head === 'sequence-classification') {
     switch (type) {
+      case 'albert': return new AlbertForSequenceClassification(config);
       case 'bert': return new BertForSequenceClassification(config);
       case 'roberta': return new RobertaForSequenceClassification(config);
       case 'electra': return new ElectraForSequenceClassification(config);
@@ -54,6 +55,7 @@ export function createNativeModel(config: NativeConfig, head: NativeHead = 'base
     }
   }
   switch (type) {
+    case 'albert': return new AlbertModel(config, { addPoolingLayer: options.addPoolingLayer ?? true });
     case 'bert': return new BertModel(config, { addPoolingLayer: options.addPoolingLayer ?? true });
     case 'roberta': return new RobertaModel(config, { addPoolingLayer: options.addPoolingLayer ?? true });
     case 'electra': return new ElectraModel(config);

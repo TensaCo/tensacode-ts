@@ -149,7 +149,143 @@ function normalizeModel(model: RawNode | undefined): void {
       });
     }
   }
+  if (!type && rawGet(model, 'vocab')?.t === 'a') {
+    // Older files omit the model type; Rust's untagged model enum reads a
+    // list vocabulary as Unigram.
+    type = 'Unigram';
+    model.entries.unshift(['type', rawFromValue('Unigram')]);
+  }
   if (type === 'Unigram' && !rawGet(model, 'byte_fallback')) rawSet(model, 'byte_fallback', rawFromValue(false));
+}
+
+type TokenizerFlags = Record<string, unknown>;
+
+function flag(flags: TokenizerFlags, key: string, fallback: boolean): boolean {
+  return typeof flags[key] === 'boolean' ? flags[key] as boolean : fallback;
+}
+
+function metaspace(prependScheme: string): unknown {
+  return { type: 'Metaspace', replacement: '▁', prepend_scheme: prependScheme, split: true };
+}
+
+/** ``[CLS] $A [SEP]`` / ``[CLS] $A [SEP] $B [SEP]`` template (transformers class post-processors). */
+function clsSepTemplate(cls: string, clsId: number, sep: string, sepId: number): unknown {
+  return {
+    type: 'TemplateProcessing',
+    single: [{ SpecialToken: { id: cls, type_id: 0 } }, { Sequence: { id: 'A', type_id: 0 } }, { SpecialToken: { id: sep, type_id: 0 } }],
+    pair: [
+      { SpecialToken: { id: cls, type_id: 0 } }, { Sequence: { id: 'A', type_id: 0 } }, { SpecialToken: { id: sep, type_id: 0 } },
+      { Sequence: { id: 'B', type_id: 1 } }, { SpecialToken: { id: sep, type_id: 1 } },
+    ],
+    special_tokens: { [cls]: { id: cls, ids: [clsId], tokens: [cls] }, [sep]: { id: sep, ids: [sepId], tokens: [sep] } },
+  };
+}
+
+function unigramPieces(root: RawNode): string[] {
+  const vocab = rawGet(rawGet(root, 'model'), 'vocab');
+  if (vocab?.t !== 'a') return [];
+  return vocab.items.map((entry) => (entry.t === 'a' ? rawString(entry.items[0]) ?? '' : ''));
+}
+
+function tokenId(root: RawNode, token: string): number {
+  const index = unigramPieces(root).indexOf(token);
+  if (index >= 0) return index;
+  const added = rawGet(root, 'added_tokens');
+  if (added?.t === 'a') {
+    for (const entry of added.items) {
+      if (rawString(rawGet(entry, 'content')) === token) {
+        const id = rawGet(entry, 'id');
+        if (id?.t === 'n') return Number(id.raw);
+      }
+    }
+  }
+  return 0;
+}
+
+function setUnigram(root: RawNode, unkId: number | null): void {
+  const model = rawGet(root, 'model');
+  if (!model || model.t !== 'o') return;
+  rawSet(model, 'type', rawFromValue('Unigram'));
+  if (unkId !== null) rawSet(model, 'unk_id', rawFromValue(unkId));
+  rawSet(model, 'byte_fallback', rawFromValue(false));
+}
+
+function text(flags: TokenizerFlags, key: string, fallback: string): string {
+  const value = flags[key];
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && typeof (value as { content?: unknown }).content === 'string') return (value as { content: string }).content;
+  return fallback;
+}
+
+/**
+ * transformers 5 ``DebertaV2Tokenizer.__init__``: the Unigram vocabulary is
+ * kept and the pipeline rebuilt from its flags (the SentencePiece charsmap is
+ * dropped). Its own ``[CLS]``/``[SEP]`` template replaces the file's.
+ */
+function rebuildDebertaV2(root: RawNode, flags: TokenizerFlags): void {
+  const unk = text(flags, 'unk_token', '[UNK]');
+  const pieces = unigramPieces(root);
+  const scores = rawGet(rawGet(root, 'model'), 'vocab');
+  // ``vocab.index((unk_token, 0.0))`` when present, else the ``unk_id`` argument.
+  let unkId = typeof flags.unk_id === 'number' ? flags.unk_id : 1;
+  if (scores?.t === 'a') {
+    const index = pieces.indexOf(unk);
+    const entry = index >= 0 ? scores.items[index] : undefined;
+    const score = entry?.t === 'a' ? entry.items[1] : undefined;
+    if (score?.t === 'n' && Number(score.raw) === 0) unkId = index;
+  }
+  setUnigram(root, unkId);
+  const normalizers: unknown[] = [];
+  if (flag(flags, 'do_lower_case', false)) normalizers.push({ type: 'Lowercase' });
+  normalizers.push(
+    { type: 'Replace', pattern: { Regex: '\\s{2,}|[\\n\\r\\t]' }, content: ' ' },
+    { type: 'NFC' },
+    { type: 'Strip', strip_left: false, strip_right: true },
+  );
+  rawSet(root, 'normalizer', rawFromValue({ type: 'Sequence', normalizers }));
+  const scheme = flag(flags, 'add_prefix_space', true) ? 'always' : 'first';
+  const pretokenizers: unknown[] = [];
+  if (flag(flags, 'split_by_punct', false)) pretokenizers.push({ type: 'Punctuation', behavior: 'Isolated' });
+  pretokenizers.push(metaspace(scheme));
+  rawSet(root, 'pre_tokenizer', rawFromValue({ type: 'Sequence', pretokenizers }));
+  rawSet(root, 'decoder', rawFromValue(metaspace(scheme)));
+  const cls = text(flags, 'cls_token', '[CLS]');
+  const sep = text(flags, 'sep_token', '[SEP]');
+  rawSet(root, 'post_processor', rawFromValue(clsSepTemplate(cls, tokenId(root, cls), sep, tokenId(root, sep))));
+}
+
+/**
+ * transformers 5 ``AlbertTokenizer.__init__``: the Unigram vocabulary (unk id
+ * 1) and the file's SentencePiece charsmap and post-processor are kept; the
+ * normalizers, pre-tokenizer and decoder are rebuilt from its flags.
+ */
+function rebuildAlbert(root: RawNode, flags: TokenizerFlags): void {
+  setUnigram(root, 1);
+  let charsmap: RawNode | undefined;
+  const findCharsmap = (node: RawNode | undefined): void => {
+    if (!node || node.t !== 'o' || charsmap) return;
+    if (rawString(rawGet(node, 'type')) === 'Precompiled') charsmap = rawGet(node, 'precompiled_charsmap');
+    const children = rawGet(node, 'normalizers');
+    if (children?.t === 'a') children.items.forEach(findCharsmap);
+  };
+  findCharsmap(rawGet(root, 'normalizer'));
+  const normalizers: RawNode[] = [
+    rawFromValue({ type: 'Replace', pattern: { String: '``' }, content: '"' }),
+    rawFromValue({ type: 'Replace', pattern: { String: "''" }, content: '"' }),
+  ];
+  if (!flag(flags, 'keep_accents', false)) normalizers.push(rawFromValue({ type: 'NFKD' }), rawFromValue({ type: 'StripAccents' }));
+  if (flag(flags, 'do_lower_case', true)) normalizers.push(rawFromValue({ type: 'Lowercase' }));
+  if (charsmap) normalizers.push({ t: 'o', entries: [['type', rawFromValue('Precompiled')], ['precompiled_charsmap', charsmap]] });
+  rawSet(root, 'normalizer', { t: 'o', entries: [['type', rawFromValue('Sequence')], ['normalizers', { t: 'a', items: normalizers }]] });
+  const scheme = flag(flags, 'add_prefix_space', true) ? 'always' : 'never';
+  rawSet(root, 'pre_tokenizer', rawFromValue({ type: 'Sequence', pretokenizers: [{ type: 'WhitespaceSplit' }, metaspace(scheme)] }));
+  rawSet(root, 'decoder', rawFromValue(metaspace(scheme)));
+  const post = rawGet(root, 'post_processor');
+  if (!post || post.t === 'l') {
+    const cls = text(flags, 'cls_token', '[CLS]');
+    const sep = text(flags, 'sep_token', '[SEP]');
+    rawSet(root, 'post_processor', rawFromValue(clsSepTemplate('[CLS]', tokenId(root, cls), '[SEP]', tokenId(root, sep))));
+  }
 }
 
 /** transformers 5 ``T5Tokenizer``: Precompiled only, WhitespaceSplit + Metaspace. */
@@ -177,7 +313,9 @@ function rebuildT5(root: RawNode): void {
 }
 
 /** Tokenizer classes whose transformers 5 construction is emulated. */
-export const REBUILT_TOKENIZER_CLASSES = new Set(['T5Tokenizer', 'T5TokenizerFast']);
+export const REBUILT_TOKENIZER_CLASSES = new Set([
+  'T5Tokenizer', 'T5TokenizerFast', 'DebertaV2Tokenizer', 'DebertaV2TokenizerFast', 'AlbertTokenizer', 'AlbertTokenizerFast',
+]);
 
 /**
  * transformers classes that rebuild their backend from the tokenizer.json
@@ -192,15 +330,18 @@ export function loadsThroughRust(tokenizerClass: string | null): boolean {
 }
 
 export function canonicalBackendJson(
-  text: string, options: { tokenizerClass?: string | null; rustParsed?: boolean } = {},
+  text: string, options: { tokenizerClass?: string | null; rustParsed?: boolean; flags?: TokenizerFlags } = {},
 ): string {
   const root = parseJsonRaw(text);
   if (root.t !== 'o') throw new TypeError('tokenizer.json must contain an object');
   if (options.rustParsed) applyRustFloatParsing(root);
   rawSet(root, 'padding', rawFromValue(null));
   rawSet(root, 'truncation', rawFromValue(null));
-  if (options.tokenizerClass && REBUILT_TOKENIZER_CLASSES.has(options.tokenizerClass)) rebuildT5(root);
   normalizeModel(rawGet(root, 'model'));
+  const base = options.tokenizerClass?.replace(/Fast$/, '') ?? null;
+  if (base === 'T5Tokenizer') rebuildT5(root);
+  else if (base === 'DebertaV2Tokenizer') rebuildDebertaV2(root, options.flags ?? {});
+  else if (base === 'AlbertTokenizer') rebuildAlbert(root, options.flags ?? {});
   for (const key of ['normalizer', 'pre_tokenizer', 'post_processor', 'decoder']) normalizeComponent(rawGet(root, key));
   return emitJsonRaw(root, { sortKeys: true, separators: [',', ':'] });
 }
