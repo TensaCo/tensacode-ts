@@ -215,9 +215,7 @@ export class ImageDecoder extends LatentOperation<Latent, Tensor> {
   ): Promise<T> {
     const { inputSpace, bridge = 'linear', numInferenceSteps = 20, ...hub } = options;
     const revision = hub.revision ?? null;
-    const { path } = await resolveArtifactDirectory(repoIdOrPath, {
-      ...hub, allowPatterns: ['unet/*', 'vae/*', 'scheduler/*', 'model_index.json'],
-    });
+    const { path } = await resolveArtifactDirectory(repoIdOrPath, { ...hub, allowPatterns: DIFFUSERS_FOUNDATION_FILES });
     const unetConfig = await readComponentConfig(path, 'unet', 'config.json');
     const vaeConfig = await readComponentConfig(path, 'vae', 'config.json');
     const schedulerConfig = await readComponentConfig(path, 'scheduler', 'scheduler_config.json');
@@ -364,6 +362,21 @@ async function readComponentConfig(root: string, subfolder: string, name: string
 }
 
 /** diffusers ``from_pretrained(use_safetensors=True)`` weight loading with strict key checks. */
+/**
+ * Hub files ``ImageDecoder.fromFoundation`` downloads: exactly what diffusers'
+ * ``from_pretrained(subfolder=..., use_safetensors=True)`` and
+ * ``load_config(subfolder='scheduler')`` fetch, i.e. component configurations
+ * and the non-variant (float32) safetensors, single or sharded.
+ */
+export const DIFFUSERS_FOUNDATION_FILES: readonly string[] = Object.freeze([
+  ...['unet', 'vae'].flatMap((component) => [
+    `${component}/config.json`, `${component}/diffusion_pytorch_model.safetensors`,
+    `${component}/diffusion_pytorch_model.safetensors.index.json`,
+    `${component}/diffusion_pytorch_model-[0-9]*-of-[0-9]*.safetensors`,
+  ]),
+  'scheduler/scheduler_config.json',
+]);
+
 async function loadComponentWeights(module: Module, directory: string, subfolder: string): Promise<void> {
   const single = join(directory, 'diffusion_pytorch_model.safetensors');
   const index = join(directory, 'diffusion_pytorch_model.safetensors.index.json');

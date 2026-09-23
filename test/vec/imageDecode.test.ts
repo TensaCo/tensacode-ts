@@ -11,6 +11,8 @@ import {
 } from '../../src/nn/index.js';
 import { ImageDecoder, Latent, Space } from '../../src/ops/vec/index.js';
 import { DDIMScheduler } from '../../src/_internal/native/diffusers.js';
+import { DIFFUSERS_FOUNDATION_FILES } from '../../src/_internal/vec/diffusion.js';
+import { globMatch } from '../../src/_internal/hub.js';
 import { bindingRecords } from '../../src/_internal/fingerprint.js';
 import { Trainer, loadExperience } from '../../src/training/index.js';
 import { expectClose } from '../helpers/gradcheck.js';
@@ -278,5 +280,20 @@ describe('ImageDecoder (tests/vec/test_image_decode.py)', () => {
     expect(() => new ImageDecoder({ ...config, bridge: 'identity' })).toThrow(/native/);
     const { bridge: _bridge, ...old } = config;
     expect(() => new ImageDecoder({ ...old, conditioning_projection: 'identity' })).toThrow(/bridge/);
+  });
+});
+
+describe('ImageDecoder foundation downloads', () => {
+  it('fetch only the files diffusers loads (no fp16 variants, ONNX or other components)', () => {
+    const wanted = (name: string): boolean => DIFFUSERS_FOUNDATION_FILES.some((pattern) => globMatch(pattern, name));
+    for (const name of [
+      'unet/config.json', 'unet/diffusion_pytorch_model.safetensors', 'vae/diffusion_pytorch_model.safetensors',
+      'unet/diffusion_pytorch_model.safetensors.index.json', 'unet/diffusion_pytorch_model-00001-of-00002.safetensors',
+      'scheduler/scheduler_config.json',
+    ]) expect(wanted(name), name).toBe(true);
+    for (const name of [
+      'unet/diffusion_pytorch_model.fp16.safetensors', 'unet/diffusion_pytorch_model.fp16-00001-of-00002.safetensors',
+      'unet/diffusion_pytorch_model.bin', 'unet/model.onnx', 'text_encoder/model.safetensors', 'model_index.json',
+    ]) expect(wanted(name), name).toBe(false);
   });
 });
