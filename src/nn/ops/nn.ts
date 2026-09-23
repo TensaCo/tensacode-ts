@@ -1,14 +1,17 @@
 /** Neural-network primitives: activations, normalization, lookup, convolution and losses. */
-import { allocate, isFloatingDType, type DType } from '../dtype.js';
-import { getDefaultGenerator, type Generator } from '../random.js';
+import { allocate, isFloatingDType, roundToDType, usesFloat32Storage, type DType, type Storage } from '../dtype.js';
+import { fillBernoulli, getDefaultGenerator, type Generator } from '../random.js';
 import { formatShape, shapesEqual } from '../shape.js';
 import { Tensor, attachGrad, fromStorage, tensor } from '../tensor.js';
 import {
-  abs, add, cast, clamp, div, erfValue, exp, log, mapUnary, maximum, mul, neg, relu, sigmoid, sqrt, sub, tanh,
+  roundHalf, abs, add, cast, clamp, div, erfValue, exp, log, mapUnary, maximum, mul, neg, relu, sigmoid, sqrt, sub, tanh,
 } from './elementwise.js';
 import { gather, transpose, unsqueeze, squeeze } from './shape.js';
 import { logSoftmax, mean, softmax, sum } from './reduce.js';
 import { matmul } from './linalg.js';
+import { isGradEnabled } from '../autograd.js';
+import * as wasm from '../backend/kernels.js';
+import { attentionForward, type AttentionBias } from '../backend/kernels.js';
 
 const SQRT_2_OVER_PI = 0.7978845608028654;
 const INV_SQRT_2 = 0.7071067811865476;
@@ -20,9 +23,10 @@ const INV_SQRT_2PI = 0.3989422804014327;
 export function gelu(x: Tensor, approximate: 'none' | 'tanh' = 'none'): Tensor {
   const floatX = isFloatingDType(x.dtype) ? x : cast(x, 'float32');
   if (approximate === 'tanh') {
-    const result = mapUnary(floatX, (v) => 0.5 * v * (1 + Math.tanh(SQRT_2_OVER_PI * (v + 0.044715 * v * v * v))));
+    const result = activationKernel(floatX, wasm.UnaryOp.GeluTanh)
+      ?? mapUnary(floatX, (v) => 0.5 * v * (1 + Math.tanh(SQRT_2_OVER_PI * (v + 0.044715 * v * v * v))));
     return attachGrad(result, [floatX], (grad) => [
-      mul(grad, mapUnary(floatX, (v) => {
+      mul(grad, (grad.dtype === 'float32' ? activationKernel(floatX, wasm.UnaryOp.GeluTanhDerivative) : null) ?? mapUnary(floatX, (v) => {
         const inner = SQRT_2_OVER_PI * (v + 0.044715 * v * v * v);
         const t = Math.tanh(inner);
         const derivative = SQRT_2_OVER_PI * (1 + 3 * 0.044715 * v * v);
@@ -30,13 +34,28 @@ export function gelu(x: Tensor, approximate: 'none' | 'tanh' = 'none'): Tensor {
       }, grad.dtype)),
     ], 'gelu_tanh');
   }
-  const result = mapUnary(floatX, (v) => 0.5 * v * (1 + erfValue(v * INV_SQRT_2)));
+  const result = activationKernel(floatX, wasm.UnaryOp.GeluErf) ?? mapUnary(floatX, (v) => 0.5 * v * (1 + erfValue(v * INV_SQRT_2)));
   return attachGrad(result, [floatX], (grad) => [
-    mul(grad, mapUnary(floatX, (v) => 0.5 * (1 + erfValue(v * INV_SQRT_2)) + v * INV_SQRT_2PI * Math.exp(-0.5 * v * v), grad.dtype)),
+    mul(grad, (grad.dtype === 'float32' ? activationKernel(floatX, wasm.UnaryOp.GeluErfDerivative) : null)
+      ?? mapUnary(floatX, (v) => 0.5 * (1 + erfValue(v * INV_SQRT_2)) + v * INV_SQRT_2PI * Math.exp(-0.5 * v * v), grad.dtype)),
   ], 'gelu');
 }
 
+/**
+ * Float32 activations on the WebAssembly kernels, bit-identical to the
+ * JavaScript formulas (``null``: use them).
+ */
+function activationKernel(x: Tensor, op: wasm.UnaryOp): Tensor | null {
+  if (x.dtype !== 'float32' || !(x.data instanceof Float32Array) || x.numel < 4096) return null;
+  const out = wasm.unary(op, x.data);
+  return out ? fromStorage(out, x.shape, 'float32') : null;
+}
+
 export function silu(x: Tensor): Tensor {
+  if (!(isGradEnabled() && x.requiresGrad)) {
+    const fused = activationKernel(x, wasm.UnaryOp.Silu);
+    if (fused) return fused;
+  }
   return mul(x, sigmoid(x));
 }
 
@@ -78,10 +97,14 @@ export function dropout(x: Tensor, p: number, training: boolean, generator: Gene
   if (!(p >= 0 && p <= 1)) throw new RangeError('dropout probability must be in [0, 1]');
   if (!training || p === 0) return x;
   if (p === 1) return mul(x, 0);
-  const scale = 1 / (1 - p);
-  const maskData = allocate(x.dtype, x.numel);
-  for (let index = 0; index < maskData.length; index += 1) maskData[index] = generator.random() >= p ? scale : 0;
-  const mask = fromStorage(maskData, x.shape, x.dtype);
+  // ATen ``_dropout``: noise = empty_like(x).bernoulli_(1 - p); noise.div_(1 - p); x * noise.
+  const keep = 1 - p;
+  const dtype = isFloatingDType(x.dtype) ? x.dtype : 'float32';
+  const maskData = allocate(dtype, x.numel);
+  fillBernoulli(maskData, dtype, keep, generator);
+  const scale = dtype === 'float64' ? 1 / keep : roundToDType(dtype, Math.fround(1 / Math.fround(keep)));
+  for (let index = 0; index < maskData.length; index += 1) if (maskData[index]) maskData[index] = scale;
+  const mask = fromStorage(maskData, x.shape, dtype);
   return mul(x, mask);
 }
 
@@ -94,8 +117,15 @@ export function layerNorm(x: Tensor, weight: Tensor | null, bias: Tensor | null,
   const dtype: DType = isFloatingDType(x.dtype) ? x.dtype : 'float32';
   const rows = x.numel / width;
   const data = x.data;
-  const normalized = new Float64Array(x.numel);
-  const inverse = new Float64Array(rows);
+  // The float64 normalized values are only kept when a gradient will need them.
+  const tracked = isGradEnabled() && (x.requiresGrad || !!weight?.requiresGrad || !!bias?.requiresGrad);
+  if (!tracked && dtype === 'float32' && data instanceof Float32Array && x.numel >= 4096
+    && (!weight || weight.data instanceof Float32Array) && (!bias || bias.data instanceof Float32Array)) {
+    const fast = wasm.layerNormRows(data, rows, width, (weight?.data ?? null) as Float32Array | null, (bias?.data ?? null) as Float32Array | null, eps);
+    if (fast) return fromStorage(fast, x.shape, dtype);
+  }
+  const normalized = tracked ? new Float64Array(x.numel) : null;
+  const inverse = tracked ? new Float64Array(rows) : null;
   const out = allocate(dtype, x.numel);
   const w = weight?.data;
   const b = bias?.data;
@@ -110,14 +140,15 @@ export function layerNorm(x: Tensor, weight: Tensor | null, bias: Tensor | null,
       squares += centered * centered;
     }
     const inv = 1 / Math.sqrt(squares / width + eps);
-    inverse[r] = inv;
+    if (inverse) inverse[r] = inv;
     for (let i = 0; i < width; i += 1) {
       const value = (data[base + i]! - average) * inv;
-      normalized[base + i] = value;
+      if (normalized) normalized[base + i] = value;
       out[base + i] = value * (w ? w[i]! : 1) + (b ? b[i]! : 0);
     }
   }
-  const result = fromStorage(out, x.shape, dtype);
+  const result = fromStorage(roundHalf(dtype, out), x.shape, dtype);
+  if (!normalized || !inverse) return result;
   return attachGrad(result, [x, weight, bias], (grad) => {
     const g = grad.data;
     let gradX: Tensor | null = null;
@@ -138,7 +169,7 @@ export function layerNorm(x: Tensor, weight: Tensor | null, bias: Tensor | null,
           gx[base + i] = (inv / width) * (width * gi - sumG - normalized[base + i]! * sumGX);
         }
       }
-      gradX = fromStorage(gx, x.shape, grad.dtype);
+      gradX = fromStorage(roundHalf(grad.dtype, gx), x.shape, grad.dtype);
     }
     let gradW: Tensor | null = null;
     let gradB: Tensor | null = null;
@@ -147,14 +178,14 @@ export function layerNorm(x: Tensor, weight: Tensor | null, bias: Tensor | null,
       for (let r = 0; r < rows; r += 1) for (let i = 0; i < width; i += 1) gw[i]! += g[r * width + i]! * normalized[r * width + i]!;
       const storage = allocate(weight.dtype, width);
       storage.set(gw);
-      gradW = fromStorage(storage, weight.shape, weight.dtype);
+      gradW = fromStorage(roundHalf(weight.dtype, storage), weight.shape, weight.dtype);
     }
     if (bias?.requiresGrad) {
       const gb = new Float64Array(width);
       for (let r = 0; r < rows; r += 1) for (let i = 0; i < width; i += 1) gb[i]! += g[r * width + i]!;
       const storage = allocate(bias.dtype, width);
       storage.set(gb);
-      gradB = fromStorage(storage, bias.shape, bias.dtype);
+      gradB = fromStorage(roundHalf(bias.dtype, storage), bias.shape, bias.dtype);
     }
     return [gradX, gradW, gradB];
   }, 'layerNorm');
@@ -309,26 +340,47 @@ export function conv2d(x: Tensor, weight: Tensor, bias: Tensor | null = null, op
   const wd = weight.data;
   const bd = bias?.data;
   const imageSize = channels * height * width;
-  const out = allocate(dtype, batch * outChannels * positions);
-  const column = new Float64Array(patch);
-  for (let n = 0; n < batch; n += 1) {
-    const imageBase = n * imageSize;
-    for (let position = 0; position < positions; position += 1) {
-      for (let p = 0; p < patch; p += 1) {
-        const source = sourceIndex[position * patch + p]!;
-        column[p] = source < 0 ? 0 : xd[imageBase + source]!;
-      }
-      for (let o = 0; o < outChannels; o += 1) {
-        let acc = bd ? bd[o]! : 0;
-        const wBase = o * patch;
-        for (let p = 0; p < patch; p += 1) acc += wd[wBase + p]! * column[p]!;
-        out[(n * outChannels + o) * positions + position] = acc;
+  const float32 = usesFloat32Storage(dtype) && xd instanceof Float32Array && wd instanceof Float32Array
+    && (!bd || bd instanceof Float32Array);
+  // Float32: im2col columns [batch, positions, patch] and one batched product
+  // weight [O, patch] @ columns^T on the WebAssembly kernels.
+  let columns: Float32Array | null = null;
+  let out: Storage | null = null;
+  if (float32) {
+    columns = new Float32Array(batch * positions * patch);
+    for (let n = 0; n < batch; n += 1) {
+      const imageBase = n * imageSize;
+      const columnBase = n * positions * patch;
+      for (let index = 0; index < positions * patch; index += 1) {
+        const source = sourceIndex[index]!;
+        columns[columnBase + index] = source < 0 ? 0 : xd[imageBase + source]!;
       }
     }
+    out = wasm.batchedMatmul(
+      { data: wd as Float32Array, count: 1, rows: outChannels, cols: patch, transposed: false, index: new Int32Array(batch) },
+      { data: columns, count: batch, rows: positions, cols: patch, transposed: true, index: identityIndex(batch) },
+      batch,
+    );
+    if (out && bd) {
+      for (let n = 0; n < batch; n += 1) {
+        for (let o = 0; o < outChannels; o += 1) {
+          const value = bd[o]!;
+          const base = (n * outChannels + o) * positions;
+          for (let position = 0; position < positions; position += 1) out[base + position]! += value;
+        }
+      }
+    }
+    if (!out) columns = null;
   }
-  const result = fromStorage(out, [batch, outChannels, outH, outW], dtype);
+  if (!out) out = conv2dKernel(xd, wd, bd ?? null, sourceIndex, batch, imageSize, outChannels, positions, patch, dtype);
+  const result = fromStorage(roundHalf(dtype, out), [batch, outChannels, outH, outW], dtype);
   return attachGrad(result, [x, weight, bias], (grad) => {
     const g = grad.data;
+    if (columns && g instanceof Float32Array) {
+      const fast = conv2dBackwardProducts(g, columns, wd as Float32Array, x, weight, bias, sourceIndex, batch, imageSize, outChannels, positions, patch);
+      if (fast) return fast;
+    }
+    const column = new Float64Array(patch);
     const gx = x.requiresGrad ? new Float64Array(x.numel) : null;
     const gw = weight.requiresGrad ? new Float64Array(weight.numel) : null;
     const gb = bias?.requiresGrad ? new Float64Array(outChannels) : null;
@@ -354,14 +406,106 @@ export function conv2d(x: Tensor, weight: Tensor, bias: Tensor | null = null, op
         }
       }
     }
-    const pack = (values: Float64Array | null, like: Tensor | null): Tensor | null => {
-      if (!values || !like) return null;
-      const storage = allocate(like.dtype, values.length);
-      storage.set(values);
-      return fromStorage(storage, like.shape, like.dtype);
-    };
     return [pack(gx, x), pack(gw, weight), pack(gb, bias)];
   }, 'conv2d');
+}
+
+function identityIndex(count: number): Int32Array {
+  const index = new Int32Array(count);
+  for (let position = 0; position < count; position += 1) index[position] = position;
+  return index;
+}
+
+function pack(values: Float64Array | Float32Array | null, like: Tensor | null): Tensor | null {
+  if (!values || !like) return null;
+  const storage = allocate(like.dtype, values.length);
+  storage.set(values);
+  return fromStorage(roundHalf(like.dtype, storage), like.shape, like.dtype);
+}
+
+/** JavaScript convolution over precomputed im2col source indices (float64 accumulation). */
+function conv2dKernel(
+  xd: Storage, wd: Storage, bd: Storage | null, sourceIndex: Int32Array,
+  batch: number, imageSize: number, outChannels: number, positions: number, patch: number, dtype: DType,
+): Storage {
+  const out = allocate(dtype, batch * outChannels * positions);
+  const column = new Float64Array(patch);
+  for (let n = 0; n < batch; n += 1) {
+    const imageBase = n * imageSize;
+    for (let position = 0; position < positions; position += 1) {
+      for (let p = 0; p < patch; p += 1) {
+        const source = sourceIndex[position * patch + p]!;
+        column[p] = source < 0 ? 0 : xd[imageBase + source]!;
+      }
+      for (let o = 0; o < outChannels; o += 1) {
+        let acc = bd ? bd[o]! : 0;
+        const wBase = o * patch;
+        for (let p = 0; p < patch; p += 1) acc += wd[wBase + p]! * column[p]!;
+        out[(n * outChannels + o) * positions + position] = acc;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Convolution gradients as products on the WebAssembly kernels: the weight
+ * gradient ``G [O, batch * positions] @ columns [batch * positions, patch]``
+ * and the input gradient ``G_n^T @ W`` scattered back through im2col.
+ */
+function conv2dBackwardProducts(
+  g: Float32Array, columns: Float32Array, wd: Float32Array, x: Tensor, weight: Tensor, bias: Tensor | null,
+  sourceIndex: Int32Array, batch: number, imageSize: number, outChannels: number, positions: number, patch: number,
+): (Tensor | null)[] | null {
+  let gradX: Tensor | null = null;
+  let gradW: Tensor | null = null;
+  let gradB: Tensor | null = null;
+  if (weight.requiresGrad) {
+    const grouped = new Float32Array(outChannels * batch * positions);
+    for (let n = 0; n < batch; n += 1) {
+      for (let o = 0; o < outChannels; o += 1) {
+        grouped.set(g.subarray((n * outChannels + o) * positions, (n * outChannels + o + 1) * positions), (o * batch + n) * positions);
+      }
+    }
+    const gw = wasm.batchedMatmul(
+      { data: grouped, count: 1, rows: outChannels, cols: batch * positions, transposed: false, index: [0] },
+      { data: columns, count: 1, rows: batch * positions, cols: patch, transposed: false, index: [0] },
+      1,
+    );
+    if (!gw) return null;
+    gradW = pack(gw, weight);
+  }
+  if (x.requiresGrad) {
+    const gradColumns = wasm.batchedMatmul(
+      { data: g, count: batch, rows: outChannels, cols: positions, transposed: true, index: identityIndex(batch) },
+      { data: wd, count: 1, rows: outChannels, cols: patch, transposed: false, index: new Int32Array(batch) },
+      batch,
+    );
+    if (!gradColumns) return null;
+    const gx = new Float64Array(x.numel);
+    for (let n = 0; n < batch; n += 1) {
+      const imageBase = n * imageSize;
+      const columnBase = n * positions * patch;
+      for (let index = 0; index < positions * patch; index += 1) {
+        const source = sourceIndex[index]!;
+        if (source >= 0) gx[imageBase + source]! += gradColumns[columnBase + index]!;
+      }
+    }
+    gradX = pack(gx, x);
+  }
+  if (bias?.requiresGrad) {
+    const gb = new Float64Array(outChannels);
+    for (let n = 0; n < batch; n += 1) {
+      for (let o = 0; o < outChannels; o += 1) {
+        const base = (n * outChannels + o) * positions;
+        let total = 0;
+        for (let position = 0; position < positions; position += 1) total += g[base + position]!;
+        gb[o]! += total;
+      }
+    }
+    gradB = pack(gb, bias);
+  }
+  return [gradX, gradW, gradB];
 }
 
 // ------------------------------------------------------------------ losses
@@ -448,17 +592,96 @@ function reduce(losses: Tensor, reduction: Reduction): Tensor {
   return mean(losses);
 }
 
-/** Scaled dot-product attention: ``softmax(q k^T * scale + bias) v``. */
+/**
+ * Scaled dot-product attention: ``softmax(q k^T * scale + bias) v``.
+ *
+ * Without gradients or dropout, float32 attention over ``[B, H, L, D]`` (or
+ * ``[B, L, D]``) runs as one fused WebAssembly kernel that never materializes
+ * the attention matrix; ``weights`` is then computed on first access.
+ */
 export function scaledDotProductAttention(
   query: Tensor, key: Tensor, value: Tensor,
-  options: { bias?: Tensor | null; scale?: number; dropout?: number; training?: boolean } = {},
+  options: { bias?: Tensor | null; scale?: number; dropout?: number; training?: boolean; enableGqa?: boolean } = {},
 ): { output: Tensor; weights: Tensor } {
   const scale = options.scale ?? 1 / Math.sqrt(query.shape[query.ndim - 1]!);
+  if (!(options.dropout && options.training)) {
+    const fused = fusedAttention(query, key, value, options.bias ?? null, scale, options.enableGqa === true);
+    if (fused) return fused;
+  }
+  if (options.enableGqa && query.ndim >= 3 && key.ndim >= 3) {
+    // ``enable_gqa``: each group of query heads shares one key/value head.
+    const heads = query.shape[query.ndim - 3]!;
+    const kvHeads = key.shape[key.ndim - 3]!;
+    if (heads !== kvHeads) {
+      if (heads % kvHeads !== 0 || value.shape[value.ndim - 3] !== kvHeads) {
+        throw new RangeError(`enable_gqa: ${heads} query heads are not a multiple of ${kvHeads} key/value heads`);
+      }
+      key = repeatHeads(key, heads / kvHeads);
+      value = repeatHeads(value, heads / kvHeads);
+    }
+  }
   let scores = mul(queryKey(query, key), scale);
   if (options.bias) scores = add(scores, options.bias);
   let weights = softmaxLast(scores);
   if (options.dropout && options.training) weights = dropout(weights, options.dropout, true);
   return { output: attend(weights, value), weights };
+}
+
+/** ``repeat_interleave(groups, dim=-3)``. */
+function repeatHeads(x: Tensor, groups: number): Tensor {
+  const shape = [...x.shape];
+  const axis = x.ndim - 3;
+  const expanded = unsqueeze(x, axis + 1).expand([...shape.slice(0, axis + 1), groups, ...shape.slice(axis + 1)]);
+  return expanded.reshape([...shape.slice(0, axis), shape[axis]! * groups, ...shape.slice(axis + 1)]);
+}
+
+function fusedAttention(
+  query: Tensor, key: Tensor, value: Tensor, bias: Tensor | null, scale: number, gqa: boolean,
+): { output: Tensor; weights: Tensor } | null {
+  const inputs = bias ? [query, key, value, bias] : [query, key, value];
+  if (inputs.some((input) => input.dtype !== 'float32' || !(input.data instanceof Float32Array))) return null;
+  if (isGradEnabled() && inputs.some((input) => input.requiresGrad)) return null;
+  const rank = query.ndim;
+  if ((rank !== 3 && rank !== 4) || key.ndim !== rank || value.ndim !== rank) return null;
+  if (key.shape[0] !== query.shape[0] || value.shape[0] !== query.shape[0]) return null;
+  const batch = query.shape[0]!;
+  const heads = rank === 4 ? query.shape[1]! : 1;
+  const kvHeads = rank === 4 ? key.shape[1]! : 1;
+  if (value.shape[rank - 3] !== key.shape[rank - 3]) return null;
+  if (kvHeads !== heads && !(gqa && heads % kvHeads === 0)) return null;
+  const queries = query.shape[rank - 2]!;
+  const dim = query.shape[rank - 1]!;
+  const keys = key.shape[rank - 2]!;
+  const valueDim = value.shape[rank - 1]!;
+  if (key.shape[rank - 1] !== dim || value.shape[rank - 2] !== keys) return null;
+  let strides: AttentionBias | null = null;
+  if (bias) {
+    if (bias.ndim > rank || bias.shape[bias.ndim - 1] !== keys) return null;
+    const padded = [...new Array<number>(rank - bias.ndim).fill(1), ...bias.shape];
+    const [bb, bh, bq] = rank === 4 ? [padded[0]!, padded[1]!, padded[2]!] : [padded[0]!, 1, padded[1]!];
+    if ((bb !== 1 && bb !== batch) || (bh !== 1 && bh !== heads) || (bq !== 1 && bq !== queries)) return null;
+    strides = {
+      data: bias.data as Float32Array,
+      queryStride: bq === 1 ? 0 : keys,
+      headStride: bh === 1 ? 0 : bq * keys,
+      batchStride: bb === 1 ? 0 : bh * bq * keys,
+    };
+  }
+  const out = attentionForward(
+    query.data as Float32Array, key.data as Float32Array, value.data as Float32Array,
+    batch, heads, kvHeads, queries, keys, dim, valueDim, scale, strides,
+  );
+  if (!out) return null;
+  const output = fromStorage(out, [...query.shape.slice(0, -1), valueDim], 'float32');
+  let weights: Tensor | null = null;
+  return {
+    output,
+    get weights(): Tensor {
+      const fullKey = kvHeads === heads ? key : repeatHeads(key, heads / kvHeads);
+      weights ??= softmaxLast(bias ? add(mul(queryKey(query, fullKey), scale), bias) : mul(queryKey(query, fullKey), scale));
+      return weights;
+    },
+  };
 }
 
 function queryKey(query: Tensor, key: Tensor): Tensor {

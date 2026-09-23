@@ -1,145 +1,598 @@
 /**
- * Seedable pseudo-random numbers for initialization, dropout and sampling.
+ * PyTorch's CPU random number generator, reproduced exactly.
  *
- * The generator is xoshiro128** seeded through splitmix32. Its complete state is
- * a small JSON-safe object so training checkpoints can restore exact streams.
- * Streams are deterministic within this library; they do not reproduce PyTorch's
- * random sequences.
+ * ``Generator`` is ``at::CPUGeneratorImpl``: a 32-bit Mersenne Twister
+ * (``at::mt19937``) seeded like ``torch.manual_seed``, with the same cached
+ * normal samples and the same 5056-byte state layout as
+ * ``torch.get_rng_state()``. The sampling kernels below follow ATen's CPU
+ * kernels (``uniform_``, ``normal_`` including the 16-wide Box-Muller fill,
+ * ``bernoulli_``, ``random_``, ``exponential_``, ``randperm`` and
+ * ``multinomial``), so ``manualSeed(n)`` followed by the same calls produces
+ * bitwise-identical tensors to ``torch.manual_seed(n)`` in Python.
+ *
+ * Transcendental functions come from ``randomMath.ts``, which ports the C
+ * library of the reference platform (glibc 2.39, AArch64). PyTorch on x86-64
+ * with AVX2 uses a different vectorized ``normal_`` fill, so Python itself
+ * produces different normal samples there.
  */
+import { roundToDType, type DType } from './dtype.js';
+import { cos, fma, fmaf, log, log1p, logf, sin, sincosfPair, sincosfResult } from './randomMath.js';
 
-export interface GeneratorState {
-  readonly algorithm: 'xoshiro128**';
-  readonly words: readonly [number, number, number, number];
-  readonly spareNormal: number | null;
+const MERSENNE_STATE_N = 624;
+const MERSENNE_STATE_M = 397;
+const MATRIX_A = 0x9908b0df;
+const UMASK = 0x80000000;
+const LMASK = 0x7fffffff;
+
+/** ``default_rng_seed_val``: the seed of a newly constructed ``torch.Generator()``. */
+export const DEFAULT_RNG_SEED = 67280421310721n;
+
+/** Byte size of ``torch.get_rng_state()`` (``CPUGeneratorImplState``). */
+export const RNG_STATE_SIZE = 5056;
+
+const TWO_PI = 2 * Math.PI;
+const FLOAT_MASK = 0xffffff;
+const FLOAT_DIVISOR = 2 ** -24;
+const DOUBLE_DIVISOR = 2 ** -53;
+const UINT64_MASK = (1n << 64n) - 1n;
+
+/** A seed accepted by ``manualSeed``: an integer (negative values wrap like PyTorch). */
+export type Seed = number | bigint;
+
+function seedToUint64(seed: Seed): bigint {
+  let value: bigint;
+  if (typeof seed === 'bigint') {
+    value = seed;
+  } else {
+    if (typeof seed !== 'number' || !Number.isFinite(seed) || !Number.isInteger(seed)) {
+      throw new TypeError('seed must be an integer');
+    }
+    if (!Number.isSafeInteger(seed)) throw new RangeError('seed must be a safe integer; pass a bigint for larger seeds');
+    value = BigInt(seed);
+  }
+  if (value < -(1n << 63n) || value > UINT64_MASK) {
+    throw new RangeError('Overflow when unpacking long');
+  }
+  return value & UINT64_MASK;
 }
 
-function splitmix32(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x9e3779b9) >>> 0;
-    let z = state;
-    z = Math.imul(z ^ (z >>> 16), 0x85ebca6b) >>> 0;
-    z = Math.imul(z ^ (z >>> 13), 0xc2b2ae35) >>> 0;
-    return (z ^ (z >>> 16)) >>> 0;
-  };
+function nondeterministicSeed(): bigint {
+  const words = new Uint32Array(2);
+  globalThis.crypto.getRandomValues(words);
+  return (BigInt(words[0]!) << 32n) | BigInt(words[1]!);
 }
 
-function rotl(x: number, k: number): number {
-  return ((x << k) | (x >>> (32 - k))) >>> 0;
+function isStateTensor(value: unknown): value is { data: ArrayLike<number>; dtype: string; numel: number } {
+  return typeof value === 'object' && value !== null && 'data' in value && 'dtype' in value;
 }
 
+/**
+ * ``torch.Generator`` for the CPU: the Mersenne Twister engine plus the cached
+ * second Box-Muller samples.
+ */
 export class Generator {
-  private s0 = 0;
-  private s1 = 0;
-  private s2 = 0;
-  private s3 = 0;
-  private spare: number | null = null;
+  private readonly state = new Uint32Array(MERSENNE_STATE_N);
+  private left = 1;
+  private next = 0;
+  private seedValue = DEFAULT_RNG_SEED;
+  /** Cached ``normal_distribution<double>`` sample. */
+  nextDoubleNormalSample: number | null = null;
+  /** Cached ``normal_distribution<float>`` sample. */
+  nextFloatNormalSample: number | null = null;
 
-  constructor(seed = 0x5eed) {
+  constructor(seed: Seed = DEFAULT_RNG_SEED) {
     this.manualSeed(seed);
   }
 
-  manualSeed(seed: number): this {
-    if (!Number.isFinite(seed)) throw new RangeError('seed must be a finite number');
-    // Mix both halves of large integer seeds.
-    const low = Math.trunc(seed) >>> 0;
-    const high = Math.trunc(seed / 2 ** 32) >>> 0;
-    const next = splitmix32(low ^ Math.imul(high, 0x9e3779b1));
-    this.s0 = next();
-    this.s1 = next();
-    this.s2 = next();
-    this.s3 = next();
-    if ((this.s0 | this.s1 | this.s2 | this.s3) === 0) this.s0 = 1;
-    this.spare = null;
+  /** Seed the engine (``Generator.manual_seed``); clears cached normal samples. */
+  manualSeed(seed: Seed): this {
+    const value = seedToUint64(seed);
+    this.nextFloatNormalSample = null;
+    this.nextDoubleNormalSample = null;
+    this.seedValue = value;
+    const state = this.state;
+    state[0] = Number(value & 0xffffffffn);
+    for (let j = 1; j < MERSENNE_STATE_N; j += 1) {
+      const previous = state[j - 1]!;
+      state[j] = (Math.imul(1812433253, (previous ^ (previous >>> 30)) >>> 0) + j) >>> 0;
+    }
+    this.left = 1;
+    this.next = 0;
     return this;
   }
 
-  /** Next unsigned 32-bit integer. */
-  nextUint32(): number {
-    const result = Math.imul(rotl(Math.imul(this.s1, 5) >>> 0, 7), 9) >>> 0;
-    const t = (this.s1 << 9) >>> 0;
-    this.s2 = (this.s2 ^ this.s0) >>> 0;
-    this.s3 = (this.s3 ^ this.s1) >>> 0;
-    this.s1 = (this.s1 ^ this.s2) >>> 0;
-    this.s0 = (this.s0 ^ this.s3) >>> 0;
-    this.s2 = (this.s2 ^ t) >>> 0;
-    this.s3 = rotl(this.s3, 11);
-    return result;
+  /** Reseed from a nondeterministic source and return the seed (``Generator.seed``). */
+  seed(): bigint {
+    const value = nondeterministicSeed();
+    this.manualSeed(value);
+    return value;
   }
 
-  /** Uniform double in [0, 1) with 53 random bits. */
+  /** The seed last used to initialize the engine (``Generator.initial_seed``). */
+  initialSeed(): bigint {
+    return this.seedValue;
+  }
+
+  private nextState(): void {
+    const state = this.state;
+    this.left = MERSENNE_STATE_N;
+    this.next = 0;
+    let p = 0;
+    for (let j = MERSENNE_STATE_N - MERSENNE_STATE_M + 1; --j; p += 1) {
+      const u = state[p]!;
+      const v = state[p + 1]!;
+      const mixed = ((u & UMASK) | (v & LMASK)) >>> 0;
+      state[p] = (state[p + MERSENNE_STATE_M]! ^ (mixed >>> 1) ^ (v & 1 ? MATRIX_A : 0)) >>> 0;
+    }
+    for (let j = MERSENNE_STATE_M; --j; p += 1) {
+      const u = state[p]!;
+      const v = state[p + 1]!;
+      const mixed = ((u & UMASK) | (v & LMASK)) >>> 0;
+      state[p] = (state[p + MERSENNE_STATE_M - MERSENNE_STATE_N]! ^ (mixed >>> 1) ^ (v & 1 ? MATRIX_A : 0)) >>> 0;
+    }
+    const u = state[p]!;
+    const v = state[0]!;
+    const mixed = ((u & UMASK) | (v & LMASK)) >>> 0;
+    state[p] = (state[p + MERSENNE_STATE_M - MERSENNE_STATE_N]! ^ (mixed >>> 1) ^ (v & 1 ? MATRIX_A : 0)) >>> 0;
+  }
+
+  /** Next tempered 32-bit output (``CPUGeneratorImpl::random``). */
+  randomUint32(): number {
+    this.left -= 1;
+    if (this.left === 0) this.nextState();
+    let y = this.state[this.next]!;
+    this.next += 1;
+    y ^= y >>> 11;
+    y ^= (y << 7) & 0x9d2c5680;
+    y ^= (y << 15) & 0xefc60000;
+    y ^= y >>> 18;
+    return y >>> 0;
+  }
+
+  /** Next 64-bit output (``CPUGeneratorImpl::random64``): the first 32-bit draw is the high word. */
+  random64(): bigint {
+    const high = this.randomUint32();
+    const low = this.randomUint32();
+    return (BigInt(high) << 32n) | BigInt(low);
+  }
+
+  /** ``uniform_real_distribution<float>(0, 1)``: 24 random bits. */
+  uniformFloat(): number {
+    return (this.randomUint32() & FLOAT_MASK) * FLOAT_DIVISOR;
+  }
+
+  /** ``uniform_real_distribution<double>(0, 1)``: 53 random bits of ``random64``. */
+  uniformDouble(): number {
+    const high = this.randomUint32();
+    const low = this.randomUint32();
+    return ((high & 0x1fffff) * 4294967296 + low) * DOUBLE_DIVISOR;
+  }
+
+  /** A uniform double in [0, 1) (``uniform_real_distribution<double>``). */
   random(): number {
-    const high = this.nextUint32() >>> 5; // 27 bits
-    const low = this.nextUint32() >>> 6; // 26 bits
-    return (high * 67108864 + low) / 9007199254740992;
+    return this.uniformDouble();
   }
 
-  /** Standard normal sample (Box-Muller with a cached spare value). */
+  /** ``normal_distribution<double>(mean, std)`` with the cached second sample. */
+  normalDouble(mean = 0, std = 1): number {
+    const cached = this.nextDoubleNormalSample;
+    if (cached !== null) {
+      this.nextDoubleNormalSample = null;
+      return fma(cached, std, mean);
+    }
+    const u1 = this.uniformDouble();
+    const u2 = this.uniformDouble();
+    const r = Math.sqrt(-2 * log1p(-u2));
+    const theta = TWO_PI * u1;
+    this.nextDoubleNormalSample = r * sin(theta);
+    return fma(r * cos(theta), std, mean);
+  }
+
+  /** A standard normal double (``normal_distribution<double>(0, 1)``). */
   normal(): number {
-    if (this.spare !== null) {
-      const value = this.spare;
-      this.spare = null;
-      return value;
-    }
-    let u = 0;
-    while (u <= Number.MIN_VALUE) u = this.random();
-    const v = this.random();
-    const radius = Math.sqrt(-2 * Math.log(u));
-    const angle = 2 * Math.PI * v;
-    this.spare = radius * Math.sin(angle);
-    return radius * Math.cos(angle);
+    return this.normalDouble(0, 1);
   }
 
-  /** Uniform integer in [low, high). */
+  /** A uniform integer in [low, high) (``random_(low, high)``). */
   integer(low: number, high: number): number {
-    if (!(high > low)) throw new RangeError('integer range must be nonempty');
-    return low + Math.floor(this.random() * (high - low));
+    if (!(high > low)) throw new RangeError('random_ expects \'from\' to be less than \'to\'');
+    return randomFromTo(this, high - low, low);
   }
 
-  getState(): GeneratorState {
-    return {
-      algorithm: 'xoshiro128**',
-      words: [this.s0, this.s1, this.s2, this.s3],
-      spareNormal: this.spare,
-    };
-  }
-
-  setState(state: GeneratorState): this {
-    if (
-      !state || state.algorithm !== 'xoshiro128**' || !Array.isArray(state.words) || state.words.length !== 4
-      || state.words.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffffffff)
-      || (state.spareNormal !== null && !Number.isFinite(state.spareNormal))
-    ) {
-      throw new TypeError('Invalid generator state');
+  /** The engine state as ``torch.Generator.get_state()`` bytes. */
+  getState(): Uint8Array {
+    const bytes = new Uint8Array(RNG_STATE_SIZE);
+    const view = new DataView(bytes.buffer);
+    view.setBigUint64(0, this.seedValue, true);
+    view.setInt32(8, this.left, true);
+    view.setInt32(12, 1, true);
+    view.setBigUint64(16, BigInt(this.next), true);
+    for (let index = 0; index < MERSENNE_STATE_N; index += 1) {
+      view.setUint32(24 + 8 * index, this.state[index]!, true);
     }
-    [this.s0, this.s1, this.s2, this.s3] = state.words as [number, number, number, number];
-    this.spare = state.spareNormal;
+    // normal_x (5016) and normal_rho (5032) are unused and stay zero.
+    if (this.nextDoubleNormalSample !== null) {
+      view.setFloat64(5024, this.nextDoubleNormalSample, true);
+      view.setInt32(5040, 1, true);
+    }
+    if (this.nextFloatNormalSample !== null) {
+      view.setFloat32(5048, this.nextFloatNormalSample, true);
+      bytes[5052] = 1;
+    }
+    return bytes;
+  }
+
+  /**
+   * Restore ``torch.Generator.get_state()`` bytes (a ``uint8`` tensor or a
+   * ``Uint8Array`` of 5056 bytes), validated like ``set_state``.
+   */
+  setState(state: Uint8Array | { data: ArrayLike<number>; dtype: string; numel: number }): this {
+    let bytes: Uint8Array;
+    if (state instanceof Uint8Array) {
+      bytes = state;
+    } else if (isStateTensor(state)) {
+      if (state.dtype !== 'uint8') {
+        throw new TypeError(`expected a torch.ByteTensor, but got ${state.dtype}`);
+      }
+      bytes = Uint8Array.from(state.data as ArrayLike<number>);
+    } else {
+      throw new TypeError('RNG state must be a torch.ByteTensor');
+    }
+    if (bytes.length !== RNG_STATE_SIZE) {
+      throw new RangeError(`Expected a CPUGeneratorImplState of size ${RNG_STATE_SIZE} but found the input RNG state size to be ${bytes.length}`);
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const seeded = view.getInt32(12, true) !== 0;
+    const left = view.getInt32(8, true);
+    const next = Number(view.getBigUint64(16, true) & 0xffffffffn);
+    if (!seeded || !(left > 0 && left <= MERSENNE_STATE_N) || next > MERSENNE_STATE_N) {
+      throw new RangeError('Invalid mt19937 state');
+    }
+    for (let index = 0; index < MERSENNE_STATE_N; index += 1) {
+      this.state[index] = view.getUint32(24 + 8 * index, true);
+    }
+    this.seedValue = view.getBigUint64(0, true);
+    this.left = left;
+    this.next = next;
+    this.nextDoubleNormalSample = view.getInt32(5040, true) !== 0 ? view.getFloat64(5024, true) : null;
+    this.nextFloatNormalSample = bytes[5052] !== 0 ? view.getFloat32(5048, true) : null;
     return this;
+  }
+
+  /** An independent copy with the same state (``Generator.clone_state``). */
+  clone(): Generator {
+    return new Generator().setState(this.getState());
   }
 }
 
-let defaultGenerator = new Generator();
+let defaultGenerator = new Generator(nondeterministicSeed());
 
-/** The process-wide generator used when no explicit generator is supplied. */
+/** The process-wide generator used when no explicit generator is supplied (``torch.default_generator``). */
 export function getDefaultGenerator(): Generator {
   return defaultGenerator;
 }
 
-/** Seed the default generator (like ``torch.manual_seed``). */
-export function manualSeed(seed: number): Generator {
+/** Seed the default generator (``torch.manual_seed``). */
+export function manualSeed(seed: Seed): Generator {
   defaultGenerator.manualSeed(seed);
   return defaultGenerator;
 }
 
-export function getRngState(): GeneratorState {
-  return defaultGenerator.getState();
+/** Reseed the default generator nondeterministically and return the seed (``torch.seed``). */
+export function seed(): bigint {
+  return defaultGenerator.seed();
 }
 
-export function setRngState(state: GeneratorState): void {
-  defaultGenerator.setState(state);
+/** The default generator's initial seed (``torch.initial_seed``). */
+export function initialSeed(): bigint {
+  return defaultGenerator.initialSeed();
 }
 
 /** Replace the default generator (primarily for tests). */
 export function setDefaultGenerator(generator: Generator): void {
   defaultGenerator = generator;
+}
+
+// ---------------------------------------------------------------------------
+// Construction without random draws (``torch.device('meta')``).
+// ---------------------------------------------------------------------------
+
+let suppressedInit = 0;
+
+/**
+ * Run ``build`` with random initialization suppressed, like constructing
+ * modules under ``torch.device('meta')`` in Python: ``normal_``/``uniform_``
+ * leave tensors unchanged and draw nothing, so the generator state is the same
+ * as Python's after a meta-device construction. Use it for objects whose
+ * weights are replaced by loaded or supplied tensors.
+ */
+export function withoutRandomInit<T>(build: () => T): T {
+  suppressedInit += 1;
+  try {
+    return build();
+  } finally {
+    suppressedInit -= 1;
+  }
+}
+
+/** Whether random initialization is currently suppressed (see {@link withoutRandomInit}). */
+export function randomInitSuppressed(): boolean {
+  return suppressedInit > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Sampling kernels (ATen ``native/cpu/DistributionTemplates.h``).
+// ---------------------------------------------------------------------------
+
+type FloatData = Float32Array | Float64Array;
+
+function requireFloating(dtype: DType, operation: string): void {
+  if (dtype !== 'float32' && dtype !== 'float64' && dtype !== 'float16' && dtype !== 'bfloat16') {
+    throw new TypeError(`"${operation}" not implemented for '${dtype}'`);
+  }
+}
+
+/** Round a float32 value to ``dtype`` (float32 storage already holds float32 values). */
+function narrow(dtype: DType, value: number): number {
+  return dtype === 'float16' || dtype === 'bfloat16' ? roundToDType(dtype, value) : value;
+}
+
+/** ``uniform_(from, to)`` over contiguous storage. */
+export function fillUniform(data: FloatData, dtype: DType, from: number, to: number, generator: Generator): void {
+  requireFloating(dtype, 'uniform_kernel_cpu');
+  if (!(from <= to)) throw new RangeError(`uniform_ expects to return a [from, to) range, but found from=${from} > to=${to}`);
+  if (suppressedInit > 0) return;
+  if (dtype === 'float64') {
+    const range = to - from;
+    for (let index = 0; index < data.length; index += 1) {
+      const value = fma(generator.uniformDouble(), range, from);
+      data[index] = value === to ? from : value;
+    }
+    return;
+  }
+  const low = Math.fround(from);
+  const high = Math.fround(to);
+  const range = Math.fround(high - low);
+  const lowScalar = narrow(dtype, low);
+  const highScalar = narrow(dtype, high);
+  for (let index = 0; index < data.length; index += 1) {
+    const value = narrow(dtype, fmaf(generator.uniformFloat(), range, low));
+    data[index] = value === highScalar ? lowScalar : value;
+  }
+}
+
+function normalFill16Float(buffer: Float64Array, offset: number, mean: number, std: number): void {
+  const identity = std === 1 && mean === 0;
+  for (let j = 0; j < 8; j += 1) {
+    const u1 = Math.fround(1 - buffer[offset + j]!);
+    const u2 = buffer[offset + j + 8]!;
+    const radius = Math.fround(Math.sqrt(Math.fround(-2 * logf(u1))));
+    sincosfPair(Math.fround(TWO_PI * u2));
+    const first = Math.fround(radius * sincosfResult.cos);
+    const second = Math.fround(radius * sincosfResult.sin);
+    buffer[offset + j] = identity ? first : fmaf(first, std, mean);
+    buffer[offset + j + 8] = identity ? second : fmaf(second, std, mean);
+  }
+}
+
+function normalFill16Double(buffer: Float64Array, offset: number, mean: number, std: number): void {
+  for (let j = 0; j < 8; j += 1) {
+    const u1 = 1 - buffer[offset + j]!;
+    const u2 = buffer[offset + j + 8]!;
+    const radius = Math.sqrt(-2 * log(u1));
+    const theta = TWO_PI * u2;
+    buffer[offset + j] = fma(radius * cos(theta), std, mean);
+    buffer[offset + j + 8] = fma(radius * sin(theta), std, mean);
+  }
+}
+
+/**
+ * ``normal_(mean, std)`` over storage. Contiguous tensors with at least 16
+ * elements use ATen's vectorized Box-Muller fill; smaller or strided tensors
+ * draw from ``normal_distribution<double>`` one element at a time.
+ */
+export function fillNormal(
+  data: FloatData, dtype: DType, mean: number, std: number, generator: Generator, contiguous = true,
+): void {
+  requireFloating(dtype, 'normal_kernel_cpu');
+  if (!(std >= 0)) throw new RangeError(`normal expects std >= 0.0, but found std ${std}`);
+  if (suppressedInit > 0) return;
+  const size = data.length;
+  if (size >= 16 && contiguous) {
+    const double = dtype === 'float64';
+    const fill = double ? normalFill16Double : normalFill16Float;
+    const draw = double ? () => generator.uniformDouble() : () => generator.uniformFloat();
+    const opMean = double ? mean : Math.fround(mean);
+    const opStd = double ? std : Math.fround(std);
+    const buffer = new Float64Array(size);
+    if (dtype === 'float32' || dtype === 'float64') {
+      // Uniforms for the whole tensor first, then Box-Muller in place.
+      if (double) for (let index = 0; index < size; index += 1) buffer[index] = generator.uniformDouble();
+      else for (let index = 0; index < size; index += 1) buffer[index] = generator.uniformFloat();
+      for (let index = 0; index + 16 <= size; index += 16) fill(buffer, index, opMean, opStd);
+    } else {
+      // Reduced precision: each block of 16 draws its uniforms just before its transform.
+      for (let index = 0; index + 16 <= size; index += 16) {
+        for (let j = 0; j < 16; j += 1) buffer[index + j] = draw();
+        fill(buffer, index, opMean, opStd);
+      }
+    }
+    if (size % 16 !== 0) {
+      // Recompute the last 16 values from fresh uniforms.
+      const offset = size - 16;
+      for (let index = 0; index < 16; index += 1) buffer[offset + index] = draw();
+      fill(buffer, offset, opMean, opStd);
+    }
+    if (dtype === 'float16' || dtype === 'bfloat16') {
+      for (let index = 0; index < size; index += 1) data[index] = roundToDType(dtype, buffer[index]!);
+    } else {
+      data.set(buffer);
+    }
+    return;
+  }
+  for (let index = 0; index < size; index += 1) {
+    const value = generator.normalDouble(mean, std);
+    data[index] = dtype === 'float64' ? value : narrow(dtype, Math.fround(value));
+  }
+}
+
+/** ``bernoulli_(p)`` with a scalar probability (``bernoulli_distribution<double>``). */
+export function fillBernoulli(data: FloatData, dtype: DType, p: number, generator: Generator): void {
+  if (!(p >= 0 && p <= 1)) throw new RangeError(`bernoulli_ expects p to be in [0, 1], but got p=${p}`);
+  for (let index = 0; index < data.length; index += 1) {
+    data[index] = generator.uniformDouble() < p ? 1 : 0;
+  }
+  void dtype;
+}
+
+/**
+ * ``bernoulli_(p)`` with a probability tensor of the same size. Float64
+ * probabilities draw doubles; other floating probabilities draw floats.
+ */
+export function fillBernoulliTensor(
+  data: FloatData, probabilities: ArrayLike<number>, probabilityDType: DType, generator: Generator,
+): void {
+  requireFloating(probabilityDType, 'bernoulli_tensor_cpu_p_');
+  const double = probabilityDType === 'float64';
+  for (let index = 0; index < data.length; index += 1) {
+    const p = probabilities[index]!;
+    if (!(p >= 0 && p <= 1)) throw new RangeError('Expected p_in >= 0 && p_in <= 1 to be true');
+    data[index] = (double ? generator.uniformDouble() : generator.uniformFloat()) < p ? 1 : 0;
+  }
+}
+
+/** One ``uniform_int_from_to_distribution`` draw in ``[base, base + range)``. */
+export function randomFromTo(generator: Generator, range: number, base: number): number {
+  if (range >= 2 ** 28) {
+    return Number(generator.random64() % BigInt(range)) + base;
+  }
+  return (generator.randomUint32() % range) + base;
+}
+
+/** ``random_(from, to)`` over storage. */
+export function fillRandomFromTo(data: FloatData, from: number, to: number, generator: Generator): void {
+  if (!(from < to)) throw new RangeError(`random_ expects 'from' to be less than 'to', but got from=${from} >= to=${to}`);
+  const range = to - from;
+  for (let index = 0; index < data.length; index += 1) data[index] = randomFromTo(generator, range, from);
+}
+
+/** ``exponential_(lambd)`` over storage (``exponential_distribution<double>``). */
+export function fillExponential(data: FloatData, dtype: DType, lambd: number, generator: Generator): void {
+  requireFloating(dtype, 'exponential_cpu');
+  if (!(lambd > 0)) throw new RangeError(`exponential_ expects lambda > 0.0, but found lambda=${lambd}`);
+  const scale = -1 / lambd;
+  for (let index = 0; index < data.length; index += 1) {
+    const value = scale * log1p(-generator.uniformDouble());
+    data[index] = dtype === 'float64' ? value : narrow(dtype, Math.fround(value));
+  }
+}
+
+/** ``torch.randperm(n)`` values (``randperm_cpu``). */
+export function randpermValues(n: number, generator: Generator): Float64Array {
+  if (!Number.isInteger(n) || n < 0) throw new RangeError(`n must be non-negative, got${n}`);
+  const result = new Float64Array(n);
+  if (n < Math.floor(0xffffffff / 20)) {
+    for (let index = 0; index < n; index += 1) result[index] = index;
+    for (let index = 0; index < n - 1; index += 1) {
+      const z = generator.randomUint32() % (n - index);
+      const save = result[index]!;
+      result[index] = result[z + index]!;
+      result[z + index] = save;
+    }
+    return result;
+  }
+  for (let index = 0; index < n; index += 1) {
+    const z = Number(generator.random64() % BigInt(index + 1));
+    result[index] = result[z]!;
+    result[z] = index;
+  }
+  return result;
+}
+
+/**
+ * ``torch.multinomial`` over rows of ``probabilities`` (``rows x categories``).
+ * Without replacement, or for a single sample, it takes the top ``samples`` of
+ * ``p / q`` with ``q ~ Exp(1)`` (drawn for the whole input first); with
+ * replacement it inverts the normalized cumulative distribution.
+ */
+export function multinomialValues(
+  probabilities: ArrayLike<number>, dtype: DType, rows: number, categories: number, samples: number,
+  replacement: boolean, generator: Generator,
+): Float64Array {
+  requireFloating(dtype, 'multinomial');
+  if (!(samples > 0)) throw new RangeError('cannot sample n_sample <= 0 samples');
+  if (!replacement && samples > categories) {
+    throw new RangeError('cannot sample n_sample > prob_dist.size(-1) samples without replacement');
+  }
+  if (categories > 2 ** 24) throw new RangeError('number of categories cannot exceed 2^24');
+  const result = new Float64Array(rows * samples);
+  const double = dtype === 'float64';
+  const round = (value: number) => (double ? value : narrow(dtype, Math.fround(value)));
+  if (!replacement || samples === 1) {
+    for (let row = 0; row < rows; row += 1) {
+      let sum = 0;
+      for (let column = 0; column < categories; column += 1) {
+        const value = probabilities[row * categories + column]!;
+        if (!(value >= 0) || value === Infinity) {
+          throw new RangeError('probability tensor contains either `inf`, `nan` or element < 0');
+        }
+        sum += value;
+      }
+      if (sum === 0) throw new RangeError('invalid multinomial distribution (sum of probabilities <= 0)');
+    }
+    const q = new Float64Array(rows * categories);
+    const scale = -1;
+    for (let index = 0; index < q.length; index += 1) q[index] = round(scale * log1p(-generator.uniformDouble()));
+    for (let index = 0; index < q.length; index += 1) q[index] = round(probabilities[index]! / q[index]!);
+    for (let row = 0; row < rows; row += 1) {
+      const offset = row * categories;
+      if (samples === 1) {
+        let best = 0;
+        let bestValue = q[offset]!;
+        for (let column = 1; column < categories; column += 1) {
+          const value = q[offset + column]!;
+          if (value > bestValue || (Number.isNaN(value) && !Number.isNaN(bestValue))) {
+            best = column;
+            bestValue = value;
+          }
+        }
+        result[row] = best;
+      } else {
+        const order = Array.from({ length: categories }, (_, column) => column);
+        order.sort((a, b) => (q[offset + b]! - q[offset + a]!) || a - b);
+        for (let sample = 0; sample < samples; sample += 1) result[row * samples + sample] = order[sample]!;
+      }
+    }
+    return result;
+  }
+  const cumulative = new Float64Array(categories);
+  for (let row = 0; row < rows; row += 1) {
+    let sum = 0;
+    for (let column = 0; column < categories; column += 1) {
+      const value = probabilities[row * categories + column]!;
+      if (!(value >= 0)) throw new RangeError('invalid multinomial distribution (encountering probability entry < 0)');
+      if (!Number.isFinite(value)) {
+        throw new RangeError('invalid multinomial distribution (encountering probability entry = infinity or NaN)');
+      }
+      sum = double ? sum + value : Math.fround(sum + value);
+      cumulative[column] = sum;
+    }
+    if (!(sum > 0)) throw new RangeError('invalid multinomial distribution (sum of probabilities <= 0)');
+    for (let column = 0; column < categories; column += 1) {
+      cumulative[column] = double ? cumulative[column]! / sum : Math.fround(cumulative[column]! / sum);
+    }
+    for (let sample = 0; sample < samples; sample += 1) {
+      const uniform = generator.uniformDouble();
+      let left = 0;
+      let right = categories;
+      cumulative[categories - 1] = 1;
+      while (right - left > 0) {
+        const middle = left + Math.floor((right - left) / 2);
+        if (cumulative[middle]! < uniform) left = middle + 1;
+        else right = middle;
+      }
+      result[row * samples + sample] = left;
+    }
+  }
+  return result;
 }

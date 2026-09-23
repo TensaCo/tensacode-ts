@@ -196,7 +196,8 @@ export class Chatbot extends PretrainedModule<unknown, string> {
     if (value.memory_mode !== 'contextualized_evidence' && value.memory_mode !== 'slots') throw new ValueError('Unknown memory_mode');
     super(value);
     if (!isPlainObject(value.foundation_config)) throw new ValueError('foundation_config must be a native configuration object');
-    const nativeConfig = NativeConfig.fromDict(value.foundation_config);
+    // Python: ``AutoConfig.for_model(model_type, **foundation_config)``.
+    const nativeConfig = NativeConfig.forModel(value.foundation_config);
     const foundation = this.registerModule('foundation', createNativeModel(nativeConfig, 'seq2seq') as T5ForConditionalGeneration);
     if (value.untied_lm_head === true) {
       foundation.setParameterAt('lm_head.weight', new Parameter(foundation.lm_head.weight.detach().clone()));
@@ -346,7 +347,7 @@ export class Chatbot extends PretrainedModule<unknown, string> {
     this: new (config: JsonObject) => T, repo: string, options: ChatbotFoundationOptions = {},
   ): Promise<T> {
     const { options: extra, ...load } = options;
-    const loaded = await loadNativeFoundation(repo, { ...load, head: 'seq2seq' });
+    const loaded = await loadNativeFoundation(repo, { ...load, head: 'seq2seq', initializeMissing: true });
     if (!loaded.tokenizer) throw new ValueError('Foundation requires a serializable fast tokenizer');
     const resolved = loaded.commitHash ?? load.revision ?? null;
     if (!(await isDirectory(repo)) && !resolved) throw new ValueError('Foundation provenance requires a resolved Hub revision');

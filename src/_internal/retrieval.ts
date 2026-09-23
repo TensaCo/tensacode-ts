@@ -21,7 +21,6 @@ import { qualifiedName } from './identity.js';
 import { FastTokenizer } from './tokenizers/index.js';
 import { loadNativeFoundation, type FoundationOptions } from './native/foundation.js';
 import { withEvalModes } from './memory/learned.js';
-import { pythonNamedBuffers } from './cognition/locking.js';
 
 /**
  * Private tensor execution with an explicit native-model identity: its
@@ -38,7 +37,7 @@ export class RetrievalTransform extends Transform<FoundationEncoding> {
       parameters: this.namedParameters().map(([name, value]) => ({
         name, shape: [...value.shape], dtype: torchDTypeName(value.dtype), requires_grad: value.requiresGrad,
       })),
-      buffers: pythonNamedBuffers(this).map(([name, value]) => ({ name, shape: [...value.shape], dtype: torchDTypeName(value.dtype) })),
+      buffers: this.namedBuffers().map(([name, value]) => ({ name, shape: [...value.shape], dtype: torchDTypeName(value.dtype) })),
     };
   }
 }
@@ -174,7 +173,7 @@ export class RetrievalEncoder extends PretrainedModule<readonly string[], Tensor
   static async fromFoundation(repo: string, options: RetrievalFoundationOptions): Promise<RetrievalEncoder> {
     const { pooling, normalize: normalizeOption, maxTokens = 256, freezeFoundation = false, ...load } = options;
     if (pooling !== 'masked_mean' || normalizeOption !== true) throw new ValueError('only masked_mean followed by L2 normalization is supported');
-    const loaded = await loadNativeFoundation(repo, { ...load, head: 'base' });
+    const loaded = await loadNativeFoundation(repo, { ...load, head: 'base', initializeMissing: true });
     if (!loaded.tokenizer) throw new ValueError('retrieval foundation requires a serializable fast tokenizer');
     const resolved = loaded.commitHash ?? load.revision ?? null;
     if (!(await isDirectory(repo)) && !resolved) throw new ValueError('retrieval foundation provenance requires a resolved revision');

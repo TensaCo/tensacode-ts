@@ -1,14 +1,14 @@
 /** ``ViTModel`` with transformers 5.17 parameter names (``layers.N.attention.q_proj`` ...). */
 import { activationModule, type ActivationModule } from './activations.js';
 import { Module } from '../../nn/module.js';
-import { Parameter, Tensor } from '../../nn/tensor.js';
+import { Parameter, Tensor, randn } from '../../nn/tensor.js';
 import { Conv2d, Dropout, Embedding, LayerNorm, Linear, ModuleList } from '../../nn/layers.js';
 import { cat } from '../../nn/ops/shape.js';
-import { noGrad } from '../../nn/autograd.js';
 import * as init from '../../nn/init.js';
 import { ValueError } from '../../errors.js';
 import type { NativeConfig } from './config.js';
-import { NativeModel, attention, mergeHeads, splitHeads, newParameter } from './modules.js';
+import { NativeModel, attention, mergeHeads, splitHeads } from './modules.js';
+import { baseInitWeights, initializerStd, postInit, type InitWeights } from './hfInit.js';
 
 export class ViTPatchEmbeddings extends Module {
   readonly projection: Conv2d;
@@ -34,6 +34,19 @@ export class ViTPatchEmbeddings extends Module {
   }
 }
 
+/** ``ViTPreTrainedModel._init_weights``: the base initialization plus truncated-normal position and CLS tokens. */
+function vitInitWeights(config: NativeConfig): InitWeights {
+  const std = initializerStd(config);
+  const range = config.number('initializer_range');
+  return (module) => {
+    baseInitWeights(module, std);
+    if (module instanceof ViTEmbeddings) {
+      init.truncNormal_(module.position_embeddings, 0, range);
+      init.truncNormal_(module.cls_token, 0, range);
+    }
+  };
+}
+
 export class ViTEmbeddings extends Module {
   readonly cls_token: Parameter;
   readonly position_embeddings: Parameter;
@@ -43,11 +56,10 @@ export class ViTEmbeddings extends Module {
   constructor(config: NativeConfig) {
     super();
     const hidden = config.number('hidden_size');
-    const std = config.number('initializer_range');
-    this.cls_token = this.registerParameter('cls_token', newParameter([1, 1, hidden], (value) => init.truncatedNormal_(value, 0, std)));
+    // Construction draws like transformers: ``torch.randn`` tokens around the patch projection.
+    this.cls_token = this.registerParameter('cls_token', new Parameter(randn([1, 1, hidden])));
     const patches = new ViTPatchEmbeddings(config);
-    this.position_embeddings = this.registerParameter('position_embeddings',
-      newParameter([1, patches.numPatches + 1, hidden], (value) => init.truncatedNormal_(value, 0, std)));
+    this.position_embeddings = this.registerParameter('position_embeddings', new Parameter(randn([1, patches.numPatches + 1, hidden])));
     this.patch_embeddings = this.registerModule('patch_embeddings', patches);
     this.dropout = this.registerModule('dropout', new Dropout(config.number('hidden_dropout_prob')));
   }
@@ -173,18 +185,7 @@ export class ViTModel extends NativeModel {
     this.layers = this.registerModule('layers', new ModuleList(Array.from({ length: config.number('num_hidden_layers') }, () => new ViTLayer(config))));
     this.layernorm = this.registerModule('layernorm', new LayerNorm(config.number('hidden_size'), { eps: config.number('layer_norm_eps') }));
     this.pooler = options.addPoolingLayer === false ? null : this.registerModule('pooler', new ViTPooler(config));
-    const std = config.number('initializer_range');
-    noGrad(() => {
-      for (const module of this.modules()) {
-        if (module instanceof Linear || module instanceof Conv2d) {
-          init.truncatedNormal_(module.weight, 0, std);
-          if (module.bias) module.bias.zero_();
-        } else if (module instanceof LayerNorm) {
-          module.weight?.fill_(1);
-          module.bias?.zero_();
-        }
-      }
-    });
+    postInit(this, vitInitWeights(config));
   }
 
   /** ViT has no token embedding table; exposes the patch projection instead. */

@@ -12,7 +12,9 @@ import {
   type DType, type Storage,
 } from './dtype.js';
 import { isGradEnabled, noGrad, type GradNode } from './autograd.js';
-import { getDefaultGenerator, type Generator } from './random.js';
+import {
+  fillNormal, fillRandomFromTo, fillUniform, getDefaultGenerator, type Generator,
+} from './random.js';
 import {
   formatShape, inferShape, normalizeDim, numelOf, shapesEqual, validateShape, type Shape,
 } from './shape.js';
@@ -324,21 +326,24 @@ export class Tensor {
     return this.bump();
   }
 
+  /** ``Tensor.normal_``: PyTorch's CPU sampler, bitwise identical for the same generator state. */
   normal_(mean = 0, std = 1, generator: Generator = getDefaultGenerator()): this {
     this.checkInPlace();
-    const target = this.data;
-    for (let index = 0; index < target.length; index += 1) {
-      target[index] = roundToDType(this.dtype, mean + std * generator.normal());
-    }
+    fillNormal(this.data, this.dtype, mean, std, generator);
     return this.bump();
   }
 
+  /** ``Tensor.uniform_``: PyTorch's CPU sampler, bitwise identical for the same generator state. */
   uniform_(low = 0, high = 1, generator: Generator = getDefaultGenerator()): this {
     this.checkInPlace();
-    const target = this.data;
-    for (let index = 0; index < target.length; index += 1) {
-      target[index] = roundToDType(this.dtype, low + (high - low) * generator.random());
-    }
+    fillUniform(this.data, this.dtype, low, high, generator);
+    return this.bump();
+  }
+
+  /** ``Tensor.random_(from, to)``: uniform integers in ``[from, to)``. */
+  random_(from: number, to: number, generator: Generator = getDefaultGenerator()): this {
+    this.checkInPlace();
+    fillRandomFromTo(this.data, from, to, generator);
     return this.bump();
   }
 
@@ -724,13 +729,12 @@ export function rand(shape: Shape, options: RandomOptions = {}): Tensor {
   return result;
 }
 
-/** Uniform integers in [low, high). */
+/** Uniform integers in [low, high) (``torch.randint``). */
 export function randint(low: number, high: number, shape: Shape, options: RandomOptions = {}): Tensor {
   const generator = options.generator ?? getDefaultGenerator();
   const dtype = options.dtype ?? 'int64';
   const result = zeros(shape, { dtype });
-  const data = result.data;
-  for (let index = 0; index < data.length; index += 1) data[index] = generator.integer(low, high);
+  fillRandomFromTo(result.data, low, high, generator);
   return result;
 }
 

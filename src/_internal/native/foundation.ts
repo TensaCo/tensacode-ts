@@ -13,6 +13,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Parameter, Tensor } from '../../nn/tensor.js';
 import { noGrad } from '../../nn/autograd.js';
+import { withoutRandomInit } from '../../nn/random.js';
 import { deserializeSafetensors } from '../../nn/safetensors.js';
 import { isDType, isFloatingDType, roundToDType, type DType } from '../../nn/dtype.js';
 import { ValueError } from '../../errors.js';
@@ -22,6 +23,7 @@ import { pathExists } from '../files.js';
 import { FastTokenizer } from '../tokenizers/index.js';
 import { NativeConfig, generationConfigFromFile, generationConfigFromModel } from './config.js';
 import { BASE_MODEL_PREFIX, createNativeModel, type NativeHead } from './registry.js';
+import { baseInitWeights, initializeMissingWeights, initializerStd } from './hfInit.js';
 import type { NativeModel } from './modules.js';
 
 export const FOUNDATION_FILES = [
@@ -47,6 +49,12 @@ export interface FoundationOptions extends Omit<HubOptions, 'allowPatterns'> {
    * first floating-point checkpoint tensor.
    */
   dtype?: DType | 'auto';
+  /**
+   * Initialize weights the checkpoint lacks, as ``from_pretrained`` does
+   * (default false: missing weights raise, like the Python flows that check
+   * ``missing_keys``).
+   */
+  initializeMissing?: boolean;
 }
 
 export interface LoadedFoundation<T extends NativeModel = NativeModel> {
@@ -126,7 +134,9 @@ function mapCheckpoint(model: NativeModel, tensors: Map<string, Tensor>): { mapp
  * values are untied (transformers "will NOT tie them"); absent aliases share
  * the stored tensor; missing or mismatched weights raise.
  */
-export function loadCheckpointState(model: NativeModel, tensors: Map<string, Tensor>): { unexpected: string[] } {
+export function loadCheckpointState(
+  model: NativeModel, tensors: Map<string, Tensor>, options: { initializeMissing?: boolean } = {},
+): { unexpected: string[]; missing: string[] } {
   const { mapped, unexpected } = mapCheckpoint(model, tensors);
   const groups = new Map<Parameter, string[]>();
   for (const [name, parameter] of model.namedParameters({ removeDuplicate: false })) {
@@ -164,7 +174,7 @@ export function loadCheckpointState(model: NativeModel, tensors: Map<string, Ten
     }
     if (source.shape.length !== value.shape.length || source.shape.some((size, index) => size !== value.shape[index])) mismatched.push(name);
   }
-  if (missing.length || mismatched.length) {
+  if ((missing.length && !options.initializeMissing) || mismatched.length) {
     throw new ValueError(`foundation has missing or incompatible weights: ${JSON.stringify({ missing_keys: missing, mismatched_keys: mismatched })}`);
   }
   noGrad(() => {
@@ -181,7 +191,12 @@ export function loadCheckpointState(model: NativeModel, tensors: Map<string, Ten
       value._storage.version += 1;
     }
   });
-  return { unexpected };
+  if (missing.length) {
+    // transformers initializes only the weights the checkpoint lacks (``_initialize_missing_keys``).
+    const std = initializerStd(model.config);
+    initializeMissingWeights(model, covered, (module) => baseInitWeights(module, std));
+  }
+  return { unexpected, missing };
 }
 
 /** transformers ``_get_dtype``: an explicit dtype, else ``config.json``, else the checkpoint's first float tensor. */
@@ -203,7 +218,10 @@ function resolveDtype(requested: DType | 'auto', rawConfig: JsonObject, weights:
 
 /** ``AutoModel*.from_pretrained(source)`` for supported native architectures. */
 export async function loadNativeFoundation(source: string, options: FoundationOptions = {}): Promise<LoadedFoundation> {
-  const { head = 'base', addPoolingLayer, tokenizer: wantTokenizer, restoreRawTieFlags, configOverrides, dtype: requested = 'auto', ...hub } = options;
+  const {
+    head = 'base', addPoolingLayer, tokenizer: wantTokenizer, restoreRawTieFlags, configOverrides, dtype: requested = 'auto', initializeMissing = false,
+    ...hub
+  } = options;
   const { path, remote } = await resolveArtifactDirectory(source, { ...hub, allowPatterns: FOUNDATION_FILES });
   const rawConfig = parseJsonStrict(await readFile(join(path, 'config.json'), 'utf8')) as JsonObject;
   let weightsPath = path;
@@ -219,9 +237,10 @@ export async function loadNativeFoundation(source: string, options: FoundationOp
   const weights = await readWeights(weightsPath);
   const dtype = resolveDtype(requested, rawConfig, weights);
   let config = NativeConfig.fromPretrainedDict({ ...rawConfig, ...(configOverrides ?? {}) }, source, dtype);
-  const model = createNativeModel(config, head, addPoolingLayer === undefined ? {} : { addPoolingLayer });
+  // transformers builds on the meta device and loads every weight, so loading draws no random numbers.
+  const model = withoutRandomInit(() => createNativeModel(config, head, addPoolingLayer === undefined ? {} : { addPoolingLayer }));
   if (dtype !== 'float32') model.to(dtype);
-  const { unexpected } = loadCheckpointState(model, weights);
+  const { unexpected } = loadCheckpointState(model, weights, { initializeMissing });
   model.eval();
   if (restoreRawTieFlags) {
     const overrides: JsonObject = {};

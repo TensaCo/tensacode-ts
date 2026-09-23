@@ -565,8 +565,16 @@ export class MultiheadAttention extends Module {
     this.in_proj_weight = this.registerParameter('in_proj_weight', new Parameter(empty([3 * embedDim, embedDim])));
     this.in_proj_bias = this.registerParameter('in_proj_bias', bias ? new Parameter(zeros([3 * embedDim])) : null);
     this.out_proj = this.registerModule('out_proj', new NonDynamicallyQuantizableLinear(embedDim, embedDim, { bias }));
+    this.resetParameters();
+  }
+
+  /** ``MultiheadAttention._reset_parameters``. */
+  resetParameters(): void {
     init.xavierUniform_(this.in_proj_weight);
-    if (this.out_proj.bias) init.zeros_(this.out_proj.bias);
+    if (this.in_proj_bias) {
+      init.constant_(this.in_proj_bias, 0);
+      if (this.out_proj.bias) init.constant_(this.out_proj.bias, 0);
+    }
   }
 
   protected override onRegistryChange(): void {

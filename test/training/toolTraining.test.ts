@@ -83,14 +83,27 @@ describe('tool training', () => {
     await first.saveCheckpoint(directory);
     const path = join(directory, 'training.json');
     const payload = readJson(path);
-    payload.state.rng = 0;
+    const original = JSON.parse(JSON.stringify(payload.state.python_rng));
+    payload.state.python_rng = 0;
     writeFileSync(path, JSON.stringify(payload));
     const before = first.parameters[0]!.detach().clone();
     await expect(first.loadCheckpoint(directory)).rejects.toThrow();
     expect(before.equal(first.parameters[0]!)).toBe(true);
-    payload.state.rng = { algorithm: 'xoshiro128**', words: [1, 2, 3, -4], spare_normal: null };
+    payload.state.python_rng = { ...original, items: [4, original.items[1], null] };
     writeFileSync(path, JSON.stringify(payload));
-    await expect(first.loadCheckpoint(directory)).rejects.toThrow(/generator state/);
+    await expect(first.loadCheckpoint(directory)).rejects.toThrow(/version 4/);
+    payload.state.python_rng = { ...original, items: [3, { type: 'list', items: original.items[1].items }, null] };
+    writeFileSync(path, JSON.stringify(payload));
+    await expect(first.loadCheckpoint(directory)).rejects.toThrow(/must be a tuple/);
+    payload.state.python_rng = original;
+    payload.state.cuda_rng = { type: 'list', items: [0] };
+    writeFileSync(path, JSON.stringify(payload));
+    await expect(first.loadCheckpoint(directory)).rejects.toThrow(/CUDA device topology/);
+    payload.state.cuda_rng = { type: 'list', items: [] };
+    payload.state.rng = 0;
+    writeFileSync(path, JSON.stringify(payload));
+    await expect(first.loadCheckpoint(directory)).rejects.toThrow(/Malformed training progress/);
+    expect(before.equal(first.parameters[0]!)).toBe(true);
   });
 
   it('requires a feedback source and supports the trainingLoss protocol', () => {
@@ -347,8 +360,8 @@ describe('tool training', () => {
     const payload = readJson(join(directory, 'training.json'));
     expect(Object.keys(payload.model.operations)).toEqual(['tool']);
     expect(payload.model.operations.tool.configuration.type).toBe('tests.training.DropoutTool');
-    expect(Object.keys(payload.state).sort()).toEqual(['modes', 'progress', 'rng', 'runtime', 'steps']);
-    expect(payload.state.runtime).toBe('typescript');
+    expect(Object.keys(payload.state).sort()).toEqual(['cuda_rng', 'modes', 'progress', 'python_rng', 'steps', 'torch_rng']);
+    expect(payload.state.cuda_rng).toEqual({ type: 'list', items: [] });
     expect(new Sequential(new Linear(1, 1)).length).toBe(1);
   });
 });

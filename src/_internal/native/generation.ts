@@ -1,14 +1,15 @@
 /**
  * Encoder-decoder generation following transformers 5.17 semantics: greedy
- * decoding, multinomial sampling (temperature/top-k/top-p warpers, using the
- * TensorCode generator rather than PyTorch's RNG) and vectorized beam search
+ * decoding, multinomial sampling (temperature/top-k/top-p warpers, drawn with
+ * ``torch.multinomial``'s sampler on the PyTorch-compatible generator) and
+ * vectorized beam search (beam sampling included)
  * with length penalty and early stopping. Logits processors: repetition
  * penalty and minimum new tokens. Settings use GenerationConfig's snake_case
  * keys so persisted ``generation`` configurations apply directly.
  */
 import { Tensor, tensor } from '../../nn/tensor.js';
 import { noGrad } from '../../nn/autograd.js';
-import { getDefaultGenerator, type Generator } from '../../nn/random.js';
+import { getDefaultGenerator, multinomialValues, type Generator } from '../../nn/random.js';
 import { ValueError } from '../../errors.js';
 import type { JsonObject } from '../json.js';
 import { generationDefaults } from './config.js';
@@ -144,21 +145,24 @@ function warp(scores: Float32Array, resolved: Resolved, minKeep = 1): void {
   }
 }
 
-function sample(scores: Float32Array, generator: Generator): number {
+/** ``nn.functional.softmax(scores, dim=-1)`` in float32. */
+function softmaxF32(scores: Float32Array): Float32Array {
   let max = -Infinity;
   for (const value of scores) if (value > max) max = value;
+  const probabilities = new Float32Array(scores.length);
   let total = 0;
-  const weights = new Float64Array(scores.length);
   for (let index = 0; index < scores.length; index += 1) {
-    weights[index] = Math.exp(scores[index]! - max);
-    total += weights[index]!;
+    probabilities[index] = Math.exp(Math.fround(scores[index]! - max));
+    total += probabilities[index]!;
   }
-  let draw = generator.random() * total;
-  for (let index = 0; index < weights.length; index += 1) {
-    draw -= weights[index]!;
-    if (draw < 0) return index;
-  }
-  return weights.length - 1;
+  const sum = Math.fround(total);
+  for (let index = 0; index < probabilities.length; index += 1) probabilities[index] = probabilities[index]! / sum;
+  return probabilities;
+}
+
+/** ``torch.multinomial(softmax(scores), 1)``: PyTorch's exponential-race sampler on the shared generator. */
+function sample(scores: Float32Array, generator: Generator): number {
+  return multinomialValues(softmaxF32(scores), 'float32', 1, scores.length, 1, false, generator)[0]!;
 }
 
 function argmax(scores: Float32Array): number {
@@ -304,14 +308,9 @@ function beamSearch(model: T5ForConditionalGeneration, encoder: Tensor, mask: Te
       }
       let top: Candidate[];
       if (resolved.doSample) {
-        const pool = [...candidates];
-        top = [];
-        for (let pick = 0; pick < keep; pick += 1) {
-          const weights = Float32Array.from(pool, (item) => item.score);
-          const chosen = sample(weights, generator);
-          top.push(pool[chosen]!);
-          pool.splice(chosen, 1);
-        }
+        // ``torch.multinomial(softmax(accumulated_log_probs), num_samples=beams_to_keep)``.
+        const probabilities = softmaxF32(Float32Array.from(candidates, (item) => item.score));
+        top = Array.from(multinomialValues(probabilities, 'float32', 1, candidates.length, keep, false, generator), (index) => candidates[index]!);
       } else top = topK(candidates, keep);
       const hits = top.map((item) => resolved.eos.includes(item.token) || curLen + 1 >= resolved.maxLength);
       if (!hits.every(Boolean)) allHit = false;

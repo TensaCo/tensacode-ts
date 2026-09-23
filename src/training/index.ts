@@ -143,8 +143,8 @@ export class Trainer {
   /**
    * Restore complete directories, or standalone model/optimizer checkpoint
    * files. Standalone files leave RNG, modes, steps and progress unchanged.
-   * Python directory checkpoints restore everything except their PyTorch and
-   * CPython random generator states, which TypeScript cannot reproduce.
+   * Directory checkpoints from either language restore everything, including
+   * the PyTorch and CPython random generator states.
    */
   loadCheckpoint(path: string): Promise<Record<string, unknown>> {
     return this.engine.loadCheckpoint(path);

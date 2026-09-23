@@ -5,7 +5,10 @@
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Adam, Dropout, Linear, Sequential, Tensor, getRngState, tensor, ones, zeros } from '../../src/nn/index.js';
+import {
+  Adam, Dropout, F, Linear, Sequential, Tensor, deserializeSafetensors, getRngState, manualSeed, ones, pythonRandom, rand, randn, tensor,
+  zeros,
+} from '../../src/nn/index.js';
 import { Operation, type Context } from '../../src/ops/base.js';
 import { trace } from '../../src/_internal/tracing.js';
 import { Trainer, loadExperience } from '../../src/training/index.js';
@@ -106,14 +109,33 @@ describe('Python interoperability', () => {
     expectClose(head.module.bias!.data, expected.next.bias.data, 1e-6, 1e-6);
   });
 
-  it('restores a Python training directory, ignoring foreign RNG state', async () => {
+  it('restores a Python training directory, including its PyTorch and CPython RNG states', async () => {
     const expected = interop.resume;
     const head = transform(new Sequential(new Linear(2, 2), new Dropout(0.4)));
     const learner = Trainer.fromOps({ head }, { optimizer: (params) => new Adam(params, { lr: 0.01 }) });
     expect(head.training).toBe(true);
-    const rng = getRngState();
+    manualSeed(1);
+    pythonRandom.seed(1);
     expect(await learner.loadCheckpoint(join(fixtures, 'python_resume'))).toEqual({ cursor: 3, note: 'python' });
-    expect(getRngState()).toEqual(rng);
+    const saved = JSON.parse(readFileSync(join(fixtures, 'python_resume', 'training.json'), 'utf8'));
+    const tensors = deserializeSafetensors(readFileSync(join(fixtures, 'python_resume', saved.tensors.file))).tensors;
+    const torchState = tensors.get(saved.state.torch_rng.key)!;
+    expect(Array.from(getRngState())).toEqual(Array.from(torchState.data));
+    const pythonState = saved.state.python_rng.items;
+    const [version, internal, gaussNext] = pythonRandom.getstate();
+    expect([version, [...internal], gaussNext]).toEqual([pythonState[0], pythonState[1].items, pythonState[2]]);
+    // The next draws equal the ones Python makes after restoring the same checkpoint.
+    const state = getRngState();
+    const pythonSnapshot = pythonRandom.getstate();
+    expect(Array.from(rand([4]).data)).toEqual(expected.after_restore.torch_rand);
+    expect(Array.from(randn([20]).data)).toEqual(expected.after_restore.torch_randn);
+    expect(Array.from(F.dropout(ones([12]), 0.4, true).data)).toEqual(expected.after_restore.dropout);
+    expect([pythonRandom.random(), pythonRandom.random(), pythonRandom.random()]).toEqual(expected.after_restore.python_random);
+    manualSeed(0);
+    pythonRandom.seed(0);
+    await learner.loadCheckpoint(join(fixtures, 'python_resume'));
+    expect(getRngState()).toEqual(state);
+    expect(pythonRandom.getstate()).toEqual(pythonSnapshot);
     expect(learner.steps).toBe(1);
     expect(head.namedModules().map(([, module]) => module.training)).toEqual([false, false, false, false]);
     for (const [key, value] of head.stateDict()) expectClose(value.data, expected.state[key].data, 0, 0);
@@ -139,8 +161,16 @@ describe('Python interoperability', () => {
     expect(ours.model.aliases).toEqual(python.model.aliases);
     expect(ours.model.optimizer.layout).toEqual(python.model.optimizer.layout);
     expect(ours.state.modes).toEqual({ head: { '': true, module: true, 'module.0': true, 'module.1': true } });
-    expect(ours.state.runtime).toBe('typescript');
-    expect(Object.keys(ours.state.rng).sort()).toEqual(['algorithm', 'spare_normal', 'words']);
+    expect(Object.keys(ours.state).sort()).toEqual(Object.keys(python.state).sort());
+    expect(ours.state.torch_rng).toEqual({ type: 'tensor_ref', key: 'tensor_0', shape: [5056], dtype: 'uint8' });
+    expect(ours.state.cuda_rng).toEqual({ type: 'list', items: [] });
+    expect(ours.state.python_rng.type).toBe('tuple');
+    expect(ours.state.python_rng.items[0]).toBe(3);
+    expect(ours.state.python_rng.items[1].type).toBe('tuple');
+    expect(ours.state.python_rng.items[1].items).toHaveLength(625);
+    expect(Array.from(getRngState())).toEqual(Array.from(
+      deserializeSafetensors(readFileSync(join(path, ours.tensors.file))).tensors.get('tensor_0')!.data,
+    ));
     expect(ours.tensors.file).toMatch(/^tensors-[0-9a-f]{32}\.safetensors$/);
   });
 });

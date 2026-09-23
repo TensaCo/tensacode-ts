@@ -10,8 +10,13 @@ the TypeScript tests check numerical parity without Python at test time.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
+
+# Fixtures are CPU references. Hiding CUDA keeps CUDA generator states out of
+# saved training checkpoints (a CPU-only runtime cannot restore them).
+os.environ.setdefault('CUDA_VISIBLE_DEVICES', '')
 
 import torch
 

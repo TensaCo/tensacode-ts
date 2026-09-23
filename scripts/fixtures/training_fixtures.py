@@ -91,7 +91,9 @@ def standalone_checkpoint():
 
 
 def directory_checkpoint():
+    import random
     torch.manual_seed(13)
+    random.seed(13)
     head = TensorAdapter(torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Dropout(.4)))
     head.eval()
     trainer = training.Trainer.from_ops({'head': head}, optimizer=lambda ps: torch.optim.Adam(ps, lr=.01))
@@ -103,9 +105,16 @@ def directory_checkpoint():
     target = ROOT / 'python_resume'
     shutil.rmtree(target, ignore_errors=True)
     trainer.save_checkpoint(target, progress={'cursor': 3, 'note': 'python'})
+    # Draws a resumed run makes first; both generators then return to the saved state.
+    torch_state, python_state = torch.get_rng_state(), random.getstate()
+    after_restore = {'torch_rand': torch.rand(4).tolist(), 'torch_randn': torch.randn(20).tolist(),
+                     'dropout': torch.nn.functional.dropout(torch.ones(12), .4).tolist(),
+                     'python_random': [random.random() for _ in range(3)]}
+    torch.set_rng_state(torch_state)
+    random.setstate(python_state)
     state = {key: tensor_json(value) for key, value in head.state_dict().items()}
     loss = trainer.step(session)
-    return {'state': state, 'next_loss': loss,
+    return {'state': state, 'next_loss': loss, 'after_restore': after_restore,
             'next': {key: tensor_json(value) for key, value in head.state_dict().items()}}
 
 

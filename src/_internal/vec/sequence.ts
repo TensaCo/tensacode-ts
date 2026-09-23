@@ -10,19 +10,6 @@ import {
 } from '../json.js';
 import type { FastTokenizer } from '../tokenizers/index.js';
 import type { T5ForConditionalGeneration } from '../native/t5.js';
-import { NativeConfig } from '../native/config.js';
-
-/**
- * Python ``json.loads(model.config.to_json_string())``: the diff against
- * transformers defaults, even when the configuration was supplied already
- * normalized (``NativeConfig`` keeps such configurations verbatim).
- */
-export function configJsonString(config: NativeConfig): JsonObject {
-  if (!config.isVerbatim) return config.toDiffDict();
-  const data = config.toDict();
-  delete data.transformers_version;
-  return NativeConfig.fromDict(data).toDiffDict();
-}
 
 export interface SequenceEncoding {
   /** ``[batch, tokens, d_model]`` encoder states. */
@@ -124,7 +111,7 @@ export class SequenceEncoder extends Operation<readonly string[], SequenceEncodi
     return {
       operation: 'tensorcode._internal.vec.sequence.SequenceEncoder',
       max_tokens: this.maxTokens,
-      model: configJsonString(this.model.config),
+      model: this.model.config.toDiffDict(),
       tokenizer_sha256: this.tokenizerSha256,
       special_tokens: this.tokenizer.specialTokensMap as JsonObject,
     };

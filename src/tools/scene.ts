@@ -578,7 +578,7 @@ export class Scene extends PretrainedModule<SceneInputs | SceneLanguageInputs, S
   /** Explicitly import pinned pretrained CLIP perception; ranking starts random. */
   static async fromFoundation(repoId = 'openai/clip-vit-base-patch32', options: SceneFoundationOptions): Promise<Scene> {
     const { revision, dimensions = 32, slots = 4, steps = 2, ...hub } = options;
-    const loaded = await loadNativeFoundation(repoId, { ...hub, revision, head: 'base' });
+    const loaded = await loadNativeFoundation(repoId, { ...hub, revision, head: 'base', initializeMissing: true });
     if (!(loaded.model instanceof CLIPModel)) throw new ValueError('Scene foundation must be a CLIP checkpoint');
     if (!loaded.tokenizer) throw new ValueError('Scene foundation requires a tokenizer.json');
     const processor = parseJsonStrict(await readFile(join(loaded.directory, 'preprocessor_config.json'), 'utf8'));

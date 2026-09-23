@@ -10,10 +10,10 @@ import { Dropout, Embedding, Linear, ModuleList } from '../../nn/layers.js';
 import { crossEntropy } from '../../nn/ops/nn.js';
 import { cat } from '../../nn/ops/shape.js';
 import { Parameter } from '../../nn/tensor.js';
-import { noGrad } from '../../nn/autograd.js';
 import * as init from '../../nn/init.js';
 import { ValueError } from '../../errors.js';
 import type { NativeConfig } from './config.js';
+import { baseInitWeights, initializerStd, postInit, type InitWeights } from './hfInit.js';
 import {
   NativeModel, attention, causalBias, combineBias, keyPaddingBias, mergeHeads, splitHeads,
   type EncoderInputs, type EncoderOutput, type NativeEncoder,
@@ -288,6 +288,8 @@ export class T5Stack extends Module {
     this.block = this.registerModule('block', new ModuleList(Array.from({ length: layers }, (_, index) => new T5Block(config, index === 0, isDecoder))));
     this.final_layer_norm = this.registerModule('final_layer_norm', new T5LayerNorm(config.number('d_model'), config.number('layer_norm_epsilon')));
     this.dropout = this.registerModule('dropout', new Dropout(config.number('dropout_rate')));
+    // ``T5Stack`` is a ``T5PreTrainedModel``: its ``post_init`` runs as it is constructed.
+    postInit(this, t5InitWeights(config));
   }
 
   getInputEmbeddings(): Embedding {
@@ -360,35 +362,40 @@ export interface Seq2SeqOutput {
   encoderLastHiddenState: Tensor;
 }
 
-function initializeT5(model: Module, config: NativeConfig): void {
+/**
+ * ``T5PreTrainedModel._init_weights``: the base Hugging Face initialization
+ * (``std = initializer_factor``) followed by T5's own scaled normals.
+ */
+function t5InitWeights(config: NativeConfig): InitWeights {
   const factor = config.number('initializer_factor');
   const dModel = config.number('d_model');
   const dFf = config.number('d_ff');
   const dKv = config.number('d_kv');
   const heads = config.number('num_heads');
-  noGrad(() => {
-    for (const [name, module] of model.namedModules()) {
-      if (module instanceof T5LayerNorm) module.weight.fill_(factor);
-      else if (module instanceof T5DenseActDense) {
-        init.normal_(module.wi.weight, 0, factor * dModel ** -0.5);
-        init.normal_(module.wo.weight, 0, factor * dFf ** -0.5);
-      } else if (module instanceof T5DenseGatedActDense) {
-        init.normal_(module.wi_0.weight, 0, factor * dModel ** -0.5);
-        init.normal_(module.wi_1.weight, 0, factor * dModel ** -0.5);
-        init.normal_(module.wo.weight, 0, factor * dFf ** -0.5);
-      } else if (module instanceof T5Attention) {
-        init.normal_(module.q.weight, 0, factor * (dModel * dKv) ** -0.5);
-        init.normal_(module.k.weight, 0, factor * dModel ** -0.5);
-        init.normal_(module.v.weight, 0, factor * dModel ** -0.5);
-        init.normal_(module.o.weight, 0, factor * (heads * dKv) ** -0.5);
-        if (module.relative_attention_bias) init.normal_(module.relative_attention_bias.weight, 0, factor * dModel ** -0.5);
-      } else if (name === 'shared' && module instanceof Embedding) {
-        init.normal_(module.weight, 0, factor);
-      } else if (name === 'lm_head' && module instanceof Linear) {
-        init.normal_(module.weight, 0, factor);
-      }
+  const std = initializerStd(config);
+  const tied = config.get('tie_word_embeddings') !== false;
+  return (module) => {
+    baseInitWeights(module, std);
+    if (module instanceof T5LayerNorm) {
+      init.constant_(module.weight, factor * 1.0);
+    } else if (module instanceof T5ForConditionalGeneration || module instanceof T5EncoderModel) {
+      init.normal_(module.shared.weight, 0, factor * 1.0);
+      if (module instanceof T5ForConditionalGeneration && !tied) init.normal_(module.lm_head.weight, 0, factor * 1.0);
+    } else if (module instanceof T5DenseActDense) {
+      init.normal_(module.wi.weight, 0, factor * dModel ** -0.5);
+      init.normal_(module.wo.weight, 0, factor * dFf ** -0.5);
+    } else if (module instanceof T5DenseGatedActDense) {
+      init.normal_(module.wi_0.weight, 0, factor * dModel ** -0.5);
+      init.normal_(module.wi_1.weight, 0, factor * dModel ** -0.5);
+      init.normal_(module.wo.weight, 0, factor * dFf ** -0.5);
+    } else if (module instanceof T5Attention) {
+      init.normal_(module.q.weight, 0, factor * (dModel * dKv) ** -0.5);
+      init.normal_(module.k.weight, 0, factor * dModel ** -0.5);
+      init.normal_(module.v.weight, 0, factor * dModel ** -0.5);
+      init.normal_(module.o.weight, 0, factor * (heads * dKv) ** -0.5);
+      if (module.relative_attention_bias) init.normal_(module.relative_attention_bias.weight, 0, factor * dModel ** -0.5);
     }
-  });
+  };
 }
 
 /** ``T5ForConditionalGeneration``. */
@@ -407,7 +414,7 @@ export class T5ForConditionalGeneration extends NativeModel {
     this.encoder = this.registerModule('encoder', new T5Stack(config, false));
     this.decoder = this.registerModule('decoder', new T5Stack(config, true));
     this.lm_head = this.registerModule('lm_head', new Linear(this.modelDim, config.number('vocab_size'), { bias: false }));
-    initializeT5(this, config);
+    postInit(this, t5InitWeights(config));
     // ``_tied_weights_keys`` apply only when word embeddings are tied.
     if (config.get('tie_word_embeddings') !== false) {
       for (const path of ['encoder.embed_tokens.weight', 'decoder.embed_tokens.weight', 'lm_head.weight']) this.setParameterAt(path, this.shared.weight);
@@ -486,7 +493,7 @@ export class T5EncoderModel extends NativeModel implements NativeEncoder {
     super(config);
     this.shared = this.registerModule('shared', new Embedding(config.number('vocab_size'), config.number('d_model')));
     this.encoder = this.registerModule('encoder', new T5Stack(config, false));
-    initializeT5(this, config);
+    postInit(this, t5InitWeights(config));
     if (config.get('tie_word_embeddings') !== false) this.setParameterAt('encoder.embed_tokens.weight', this.shared.weight);
   }
 

@@ -339,7 +339,7 @@ export async function rankingFromFoundation<T extends Module & { rank: RankOpera
   options: Omit<FoundationOptions, 'head'> & { options?: JsonObject } = {},
 ): Promise<T> {
   const { options: toolOptions, ...load } = options;
-  const loaded = await loadNativeFoundation(repo, { ...load, head: 'base' });
+  const loaded = await loadNativeFoundation(repo, { ...load, head: 'base', initializeMissing: true });
   if (!loaded.tokenizer) throw new ValueError('foundation requires a serializable fast tokenizer');
   const resolved = loaded.commitHash ?? load.revision ?? null;
   const special: JsonObject = {};

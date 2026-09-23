@@ -498,7 +498,7 @@ export class Investigator extends PretrainedModule<Record<string, unknown>, Json
     const generator = await Chatbot.fromFoundation(generatorRepo, {
       ...load, revision: generatorRevision, options: (generatorOptions ?? {}) as ChatbotFoundationOptions['options'],
     });
-    const verifier = await loadNativeFoundation(verifierRepo, { ...load, revision: verifierRevision, head: 'sequence-classification' });
+    const verifier = await loadNativeFoundation(verifierRepo, { ...load, revision: verifierRevision, head: 'sequence-classification', initializeMissing: true });
     const resolved = verifier.commitHash ?? verifierRevision;
     if (!(await isDirectory(verifierRepo)) && !resolved) throw new ValueError('verifier provenance requires a resolved Hub revision');
     if (!verifier.tokenizer) throw new ValueError('verifier requires a serializable fast tokenizer');

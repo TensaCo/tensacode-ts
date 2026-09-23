@@ -4,20 +4,22 @@
  *
  * Directory checkpoints (``training.json`` + ``tensors-<uuid>.safetensors``)
  * preserve weights, optimizer state, per-module training modes, the step count,
- * caller progress and the TensorCode random generator.
- *
- * Cross-language note: Python directory checkpoints carry ``python_rng``,
- * ``torch_rng`` and ``cuda_rng``. TypeScript cannot restore PyTorch or CPython
- * generators, so loading such a checkpoint validates and ignores them (weights,
- * optimizer, modes, steps and progress are restored). TypeScript checkpoints
- * store ``{rng, runtime: 'typescript'}`` instead, which Python rejects.
+ * caller progress and both random generators, in exactly Python's format:
+ * ``python_rng`` is CPython's ``random.getstate()`` (the process-wide
+ * ``pythonRandom``), ``torch_rng`` is ``torch.get_rng_state()`` (the default
+ * PyTorch-compatible generator) and ``cuda_rng`` is empty. Checkpoints move
+ * between the two languages in both directions and restore the same random
+ * streams.
  */
 import { mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Module } from '../../nn/module.js';
-import { Generator, getRngState, setRngState, type GeneratorState } from '../../nn/random.js';
+import { Generator } from '../../nn/random.js';
+import { PythonRandom, pythonRandom, type PythonRandomState } from '../../nn/randomPython.js';
+import { getRngState, rngStateTensor, setRngState } from '../../nn/randomTensor.js';
+import { Tensor } from '../../nn/tensor.js';
 import { ValueError } from '../../errors.js';
-import { isPlainObject } from '../json.js';
+import { PythonFloat, isPlainObject } from '../json.js';
 import { snapshot, trace, type Trace } from '../tracing.js';
 import type { TrainableTool } from '../contracts.js';
 import type { OperationLike } from '../../ops/base.js';
@@ -69,25 +71,33 @@ export interface EngineOptions extends TrainerOptions {
   tool?: TrainableTool | null;
 }
 
-const PYTHON_STATE = ['modes', 'steps', 'progress', 'python_rng', 'torch_rng', 'cuda_rng'];
-const TYPESCRIPT_STATE = ['modes', 'steps', 'progress', 'rng', 'runtime'];
+const STATE_KEYS = ['modes', 'steps', 'progress', 'python_rng', 'torch_rng', 'cuda_rng'];
 
 function hasExactly(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const own = Object.keys(value);
   return own.length === keys.length && keys.every((key) => own.includes(key));
 }
 
-function rngRecord(state: GeneratorState): Record<string, unknown> {
-  return { algorithm: state.algorithm, words: [...state.words], spare_normal: state.spareNormal };
+/** ``random.getstate()`` as the codec's tuple: ``(3, (words..., index), gauss_next)``. */
+function pythonRngValue(state: PythonRandomState): unknown {
+  const [version, internal, gaussNext] = state;
+  return Object.freeze([version, Object.freeze([...internal]), gaussNext === null ? null : new PythonFloat(gaussNext)]);
 }
 
-function parseRng(value: unknown): GeneratorState {
-  if (!isPlainObject(value) || !hasExactly(value, ['algorithm', 'words', 'spare_normal'])) {
-    throw new ValueError('Invalid TensorCode generator state');
-  }
-  const state = { algorithm: value.algorithm, words: value.words, spareNormal: value.spare_normal } as GeneratorState;
-  new Generator().setState(state); // validates (TypeError on malformed state)
-  return { algorithm: state.algorithm, words: [...state.words] as [number, number, number, number], spareNormal: state.spareNormal };
+/** Validate a decoded ``random.getstate()`` like ``random.Random().setstate``. */
+function parsePythonRng(value: unknown): PythonRandomState {
+  if (!Array.isArray(value)) throw new ValueError('Invalid Python RNG state');
+  if (Array.isArray(value[1]) && !Object.isFrozen(value[1])) throw new TypeError('state vector must be a tuple');
+  new PythonRandom(0).setstate(value);
+  const [version, internal, gaussNext] = value as [number, unknown[], number | null];
+  return [version, (internal as unknown[]).map((item) => Number(item)), gaussNext === null ? null : Number(gaussNext)];
+}
+
+/** Validate a decoded ``torch.get_rng_state()`` like ``torch.Generator().set_state``. */
+function parseTorchRng(value: unknown): Tensor {
+  if (!(value instanceof Tensor)) throw new ValueError('Invalid PyTorch RNG state');
+  new Generator().setState(value);
+  return value;
 }
 
 function deepCopy<T>(value: T): T {
@@ -152,7 +162,10 @@ export class TrainingEngine extends OperationTrainer {
       modes[name] = Object.fromEntries([...modules].map(([key, module]) => [key, module.training]));
     }
     const state = {
-      modes, steps: this.steps, progress: codec.encode(progress), rng: rngRecord(getRngState()), runtime: 'typescript',
+      modes, steps: this.steps, progress: codec.encode(progress),
+      python_rng: codec.encode(pythonRngValue(pythonRandom.getstate())),
+      torch_rng: codec.encode(rngStateTensor(getRngState())),
+      cuda_rng: codec.encode([]),
     };
     const model = checkpointPayload({ operations: this.checkpointOperations, optimizer: this.optimizer, codec });
     const tensors = await codec.write(directory);
@@ -179,7 +192,7 @@ export class TrainingEngine extends OperationTrainer {
     const payload = await readArtifact(join(path, 'training.json'), 'tensorcode.tool_training');
     if (!hasExactly(payload, ['format', 'version', 'model', 'state', 'tensors'])) throw new ValueError('Malformed tool training checkpoint');
     const state = payload.state;
-    if (!isPlainObject(state) || !(hasExactly(state, TYPESCRIPT_STATE) || hasExactly(state, PYTHON_STATE))) {
+    if (!isPlainObject(state) || !hasExactly(state, STATE_KEYS)) {
       throw new ValueError('Malformed training progress');
     }
     const steps = state.steps;
@@ -202,17 +215,11 @@ export class TrainingEngine extends OperationTrainer {
     const codec = await TensorStore.read(path, payload.tensors, payload);
     const progress = codec.decode(state.progress);
     if (!isPlainObject(progress)) throw new ValueError('Invalid training progress');
-    let rng: GeneratorState | null = null;
-    if ('runtime' in state) {
-      if (state.runtime !== 'typescript') throw new ValueError('Unknown training checkpoint runtime');
-      rng = parseRng(state.rng);
-    } else {
-      // Python checkpoint: validate the recorded generator payloads, then ignore
-      // them — CPython/PyTorch generator streams cannot be restored here.
-      codec.decode(state.python_rng);
-      codec.decode(state.torch_rng);
-      if (!Array.isArray(codec.decode(state.cuda_rng))) throw new ValueError('Invalid CUDA RNG states');
-    }
+    const pythonRng = parsePythonRng(codec.decode(state.python_rng));
+    const torchRng = parseTorchRng(codec.decode(state.torch_rng));
+    const cudaRng = codec.decode(state.cuda_rng);
+    if (!Array.isArray(cudaRng)) throw new ValueError('Invalid CUDA RNG states');
+    if (cudaRng.length) throw new ValueError('CUDA device topology differs from training checkpoint');
     const model = payload.model;
     if (!isPlainObject(model) || model.format !== 'tensorcode.checkpoint' || model.version !== 1) {
       throw new ValueError('Unknown artifact format or version');
@@ -224,7 +231,8 @@ export class TrainingEngine extends OperationTrainer {
     const originals = new Map(Object.entries(this.checkpointOperations).map(([name, operation]) => [name, snapshotState(operation)]));
     const originalOptimizer = this.optimizer.stateDict();
     const originalModes = Object.values(modules).flatMap((children) => [...children.values()].map((module) => [module, module.training] as const));
-    const originalRng = getRngState();
+    const originalTorchRng = getRngState();
+    const originalPythonRng = pythonRandom.getstate();
     try {
       applyCheckpoint(prepared, options);
       // Set exact local flags, without recursively resetting mixed modes or
@@ -232,12 +240,13 @@ export class TrainingEngine extends OperationTrainer {
       for (const [name, children] of Object.entries(modules)) {
         for (const [key, module] of children) module.training = (modes[name] as Record<string, boolean>)[key]!;
       }
-      if (rng !== null) TrainingEngine.restoreRng(rng);
+      TrainingEngine.restoreRng(torchRng, pythonRng);
     } catch (error) {
       for (const [name, snapshot] of originals) loadStateOf(this.checkpointOperations[name], snapshot);
       this.optimizer.loadStateDict(originalOptimizer);
       for (const [module, flag] of originalModes) module.training = flag;
-      setRngState(originalRng);
+      pythonRandom.setstate(originalPythonRng);
+      setRngState(originalTorchRng);
       throw error;
     }
     this.steps = steps;
@@ -246,5 +255,8 @@ export class TrainingEngine extends OperationTrainer {
   }
 
   /** @internal RNG restoration hook (replaceable in tests to simulate interruption). */
-  static restoreRng: (state: GeneratorState) => void = setRngState;
+  static restoreRng: (torchState: Tensor, pythonState: PythonRandomState) => void = (torchState, pythonState) => {
+    pythonRandom.setstate(pythonState);
+    setRngState(torchState);
+  };
 }
