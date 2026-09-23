@@ -95,7 +95,7 @@
     "test:watch": "vitest",
     "fixtures": "../python/.venv/bin/python scripts/fixtures/generate.py",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "codegen": "../python/.venv/bin/python scripts/codegen/native_defaults.py",
+    "codegen": "../python/.venv/bin/python scripts/codegen/native_defaults.py && ../python/.venv/bin/python scripts/codegen/diffusers_defaults.py && ../python/.venv/bin/python scripts/codegen/blank_tokenizers.py",
     "prepare": "npm run build"
   },
   "peerDependencies": {

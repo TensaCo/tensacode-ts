@@ -11,6 +11,7 @@
  * and decoders (WordPiece, Metaspace, ByteLevel, BPEDecoder, Replace, Strip,
  * Fuse, ByteFallback, CTC, Sequence). Offsets are not computed.
  */
+import { BLANK_TOKENIZERS } from './blankTokenizers.generated.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Tensor, tensor } from '../../nn/tensor.js';
@@ -281,10 +282,10 @@ const CLASS_INPUT_NAMES: Record<string, string[]> = {
 };
 
 /** transformers 5 tokenizer class chosen from ``config.json`` ``model_type`` when ``tokenizer_class`` is absent. */
+/** transformers 5.17 ``TOKENIZER_MAPPING_NAMES`` for the native model types (unmapped types load as ``TokenizersBackend``). */
 const MODEL_TYPE_TOKENIZERS: Record<string, string> = {
-  bert: 'BertTokenizer', electra: 'BertTokenizer', distilbert: 'DistilBertTokenizer', roberta: 'RobertaTokenizer',
-  t5: 'T5Tokenizer', mt5: 'T5Tokenizer', clip: 'CLIPTokenizer', clip_text_model: 'CLIPTokenizer', vit: 'BertTokenizer',
-  albert: 'AlbertTokenizer', 'deberta-v2': 'DebertaV2Tokenizer',
+  bert: 'BertTokenizer', electra: 'BertTokenizer', distilbert: 'BertTokenizer', roberta: 'RobertaTokenizer',
+  t5: 'T5Tokenizer', mt5: 'T5Tokenizer', clip: 'CLIPTokenizer', albert: 'AlbertTokenizer', 'deberta-v2': 'DebertaV2Tokenizer',
 };
 
 /** Class-default special tokens (transformers 5 ``__init__`` defaults). */
@@ -421,6 +422,24 @@ export class FastTokenizer {
       'special_tokens_map.json': await readOptional('special_tokens_map.json'),
       'config.json': await readOptional('config.json'),
     });
+  }
+
+  /**
+   * ``AutoTokenizer.from_pretrained`` for a checkpoint without any tokenizer
+   * files: the model type's tokenizer class built with its defaults (a
+   * vocabulary of special tokens only), or ``null`` when transformers cannot
+   * build that class without files either.
+   */
+  static blankForModel(configJson: string): FastTokenizer | null {
+    let modelType: unknown;
+    try {
+      modelType = (parseJsonStrict(configJson) as Record<string, unknown>).model_type;
+    } catch {
+      return null;
+    }
+    const blank = typeof modelType === 'string' ? BLANK_TOKENIZERS[modelType] : undefined;
+    if (!blank) return null;
+    return FastTokenizer.fromFiles({ 'tokenizer.json': blank.json, 'config.json': configJson });
   }
 
   /**

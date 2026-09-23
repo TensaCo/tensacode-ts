@@ -31,10 +31,28 @@ import { BASE_MODEL_PREFIX, createNativeModel, type NativeHead } from './registr
 import { baseInitWeights, initializeMissingWeights, initializerStd } from './hfInit.js';
 import type { NativeModel } from './modules.js';
 
+/** Tokenizer files ``AutoTokenizer`` reads besides ``tokenizer.json`` (slow vocabularies included). */
+const TOKENIZER_FILES = [
+  'tokenizer_config.json', 'special_tokens_map.json', 'added_tokens.json', 'vocab.txt', 'vocab.json', 'merges.txt',
+  'spiece.model', 'sentencepiece.bpe.model', 'spm.model', 'tokenizer.model',
+];
+
 export const FOUNDATION_FILES = [
   'config.json', 'generation_config.json', '*.safetensors', 'model.safetensors.index.json', 'tokenizer.json',
-  'tokenizer_config.json', 'special_tokens_map.json', 'preprocessor_config.json',
+  ...TOKENIZER_FILES, 'preprocessor_config.json',
 ];
+
+/**
+ * The foundation's tokenizer, as ``AutoTokenizer.from_pretrained`` builds it:
+ * from ``tokenizer.json``, or, for a checkpoint without any tokenizer files,
+ * the model type's class defaults. Slow vocabulary files without a
+ * ``tokenizer.json`` are not converted (``null``).
+ */
+async function foundationTokenizer(path: string): Promise<FastTokenizer | null> {
+  if (await pathExists(join(path, 'tokenizer.json'))) return FastTokenizer.fromDirectory(path);
+  for (const name of TOKENIZER_FILES) if (await pathExists(join(path, name))) return null;
+  return FastTokenizer.blankForModel(await readFile(join(path, 'config.json'), 'utf8'));
+}
 
 export interface FoundationOptions extends Omit<HubOptions, 'allowPatterns'> {
   head?: NativeHead;
@@ -310,7 +328,7 @@ export async function loadNativeFoundation(source: string, options: FoundationOp
       ? generationConfigFromFile(parseJsonStrict(await readFile(file, 'utf8')))
       : generationConfigFromModel(config);
   }
-  const tokenizer = wantTokenizer !== false && (await pathExists(join(path, 'tokenizer.json'))) ? await FastTokenizer.fromDirectory(path) : null;
+  const tokenizer = wantTokenizer !== false ? await foundationTokenizer(path) : null;
   const commitHash = /[\\/]snapshots[\\/]([0-9a-f]{40})[\\/]?$/.exec(path)?.[1] ?? null;
   return { model, config, generationConfig, tokenizer, directory: path, rawConfig, unexpectedKeys: unexpected, commitHash };
 }

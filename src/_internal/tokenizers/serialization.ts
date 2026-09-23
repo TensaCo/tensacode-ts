@@ -197,7 +197,8 @@ function unigramPieces(root: RawNode): string[] {
 }
 
 function tokenId(root: RawNode, token: string): number {
-  const index = unigramPieces(root).indexOf(token);
+  // Rust's token_to_id map keeps the last id of a repeated piece.
+  const index = unigramPieces(root).lastIndexOf(token);
   if (index >= 0) return index;
   const byVocabulary = vocabularyId(root, token);
   if (byVocabulary !== null) return byVocabulary;

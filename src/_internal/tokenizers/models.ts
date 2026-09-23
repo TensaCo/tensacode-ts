@@ -212,7 +212,8 @@ class Unigram implements TokenModel {
     this.fuseUnk = spec.fuse_unk !== false;
     let minScore = Number.POSITIVE_INFINITY;
     vocab.forEach(([piece, score], id) => {
-      if (!this.toId.has(piece)) this.toId.set(piece, id);
+      // Rust fills a HashMap in vocabulary order: a repeated piece maps to its last id.
+      this.toId.set(piece, id);
       if (score < minScore) minScore = score;
       let node = this.root;
       for (const char of piece) {
