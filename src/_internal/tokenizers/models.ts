@@ -6,6 +6,12 @@ export interface TokenModel {
   /** Token strings for one pre-tokenized piece. */
   tokenize(piece: string): string[];
   tokenToId(token: string): number | undefined;
+  /**
+   * Id of a token this model's ``tokenize`` produced, when it differs from a
+   * vocabulary lookup (Rust Unigram maps pieces outside the vocabulary to
+   * ``unk_id`` while encoding, but ``token_to_id`` does not).
+   */
+  tokenizedId?(token: string): number | undefined;
   idToToken(id: number): string | undefined;
   readonly vocabSize: number;
 }
@@ -297,10 +303,13 @@ class Unigram implements TokenModel {
     });
   }
 
+  /** Rust ``Unigram::token_to_id``: vocabulary pieces only. */
   tokenToId(token: string): number | undefined {
-    const id = this.toId.get(token);
-    if (id !== undefined) return id;
-    return this.unkId ?? undefined;
+    return this.toId.get(token);
+  }
+
+  tokenizedId(token: string): number | undefined {
+    return this.toId.get(token) ?? this.unkId ?? undefined;
   }
 
   idToToken(id: number): string | undefined { return this.pieces[id]; }

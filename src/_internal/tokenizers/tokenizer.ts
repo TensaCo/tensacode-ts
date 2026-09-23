@@ -189,7 +189,7 @@ export class Tokenizer {
         if (this.preTokenizer) pieces = this.preTokenizer(pieces);
         for (const piece of pieces) {
           for (const token of this.model.tokenize(piece.text)) {
-            const id = this.model.tokenToId(token) ?? this.tokenToId(token);
+            const id = (this.model.tokenizedId ?? this.model.tokenToId).call(this.model, token) ?? this.tokenToId(token);
             if (id === undefined) throw new ValueError(`token ${JSON.stringify(token)} has no id`);
             ids.push(id);
           }

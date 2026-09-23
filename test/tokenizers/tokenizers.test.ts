@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { FastTokenizer } from '../../src/_internal/tokenizers/index.js';
+import { FastTokenizer, Tokenizer } from '../../src/_internal/tokenizers/index.js';
 import { canonicalizeJsonText, pythonFloatRepr, sha256Hex } from '../../src/_internal/json.js';
 import { rustFloatRepr, rustJsonF64, rustTokenizerString } from '../../src/_internal/tokenizers/serialization.js';
 import { cachedSnapshot } from '../helpers/hub.js';
@@ -156,3 +156,20 @@ describe('added tokens', () => {
   });
 });
 
+
+describe('Unigram vocabulary lookups', () => {
+  // Python: Tokenizer(models.Unigram([('<unk>', 0.0), ('a', -1.0), ('b', -2.0)], unk_id=0)).
+  const json = JSON.stringify({
+    version: '1.0', truncation: null, padding: null, added_tokens: [], normalizer: null, pre_tokenizer: null,
+    post_processor: null, decoder: null, model: { type: 'Unigram', unk_id: 0, vocab: [['<unk>', 0], ['a', -1], ['b', -2]], byte_fallback: false },
+  });
+
+  it('token_to_id returns None outside the vocabulary; encoding still maps to unk', () => {
+    const tokenizer = Tokenizer.fromString(json);
+    expect(tokenizer.tokenToId('zz')).toBeUndefined();
+    expect(tokenizer.addSpecialToken('<new>')).toBe(3);
+    expect(tokenizer.tokenToId('<new>')).toBe(3);
+    expect(tokenizer.vocabSize).toBe(4);
+    expect(tokenizer.encodeText('ab<new>zz')).toEqual([1, 2, 3, 0]);
+  });
+});
