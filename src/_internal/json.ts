@@ -109,6 +109,9 @@ export const PYTHON_FLOAT_KEYS = new Set<string>([
   // TensorCode configurations
   'min_temperature', 'max_temperature', 'min_support', 'max_contradiction', 'max_unknown',
   'coordinate_stride', 'coordinate_offset',
+  // diffusers configurations (UNet2DConditionModel, AutoencoderKL, DDIMScheduler)
+  'beta_start', 'beta_end', 'clip_sample_range', 'sample_max_value', 'dynamic_thresholding_ratio',
+  'resnet_out_scale_factor', 'scaling_factor', 'shift_factor', 'norm_eps',
 ]);
 
 /** Declare additional float keys (application start-up only; see {@link PYTHON_FLOAT_KEYS}). */

@@ -246,8 +246,14 @@ others with `ValueError`.
 - **Weights.** Only safetensors checkpoints (no `pytorch_model.bin`/pickle); the
   Hub safetensors-conversion PR lookup is not emulated — pin a revision that
   contains `model.safetensors`.
+- **Latent diffusion.** `ops.vec.ImageDecoder` ports diffusers 0.40
+  `UNet2DConditionModel` (cross-attention down/up blocks, `UNetMidBlock2DCrossAttn`),
+  `AutoencoderKL` (`DownEncoderBlock2D`/`UpDecoderBlock2D`) and `DDIMScheduler`
+  (float32 schedules bit-identical to PyTorch) in `src/_internal/native/diffusers.ts`.
+  Other diffusers blocks raise `NotImplementedError`. `context.seed` draws noise
+  from the TensorCode generator, so seeded samples differ from Python; supply
+  `context.noise` for identical samples.
 - **Out of scope (explicit `NotImplementedError` with a clear message):**
-  `ops.vec.ImageDecoder`/`ImageDecode` latent diffusion (diffusers UNet/VAE/DDIM);
   `Scene.fromLanguageFoundation`/`interpret` (Idefics3/SmolVLM); image file
   decoding (callers supply decoded CHW float tensors; resize/normalize helpers are
   provided). Graph operations stay symbolic stubs exactly as in Python.

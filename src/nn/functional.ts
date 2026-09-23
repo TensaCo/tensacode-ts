@@ -2,7 +2,7 @@
 export { linear, matmul } from './ops/linalg.js';
 export {
   activation, binaryCrossEntropyWithLogits, conv2d, cosineSimilarity, crossEntropy, dropout, embedding,
-  embeddingBag, gelu, layerNorm, leakyRelu, mseLoss, nllLoss, normalize, oneHot, quickGelu, rmsNorm,
+  embeddingBag, gelu, groupNorm, interpolateNearest, layerNorm, leakyRelu, mseLoss, nllLoss, normalize, oneHot, quickGelu, rmsNorm,
   scaledDotProductAttention, silu, softplus,
   type ActivationName, type Conv2dOptions, type CrossEntropyOptions, type Reduction,
 } from './ops/nn.js';

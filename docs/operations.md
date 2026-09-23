@@ -52,7 +52,7 @@ shape.
 | `TextEncoder(config)` | Owned T5/BERT-family text transformer: raw text → `output_space`. `readout` is `'sequence'`, `'pooled'` (masked mean) or output encoding |
 | `ImageEncoder(config)` | Owned ViT plus a tensor-only image processor: CHW image → `output_space` |
 | `TextDecoder(config)` | `input_space` → generated text through an explicit linear or identity bridge |
-| `ImageDecoder(config)` | **Not available in TypeScript** (latent diffusion); throws `NotImplementedError` |
+| `ImageDecoder(config)` | Owned latent diffusion (diffusers cross-attention UNet, AutoencoderKL, DDIM): `input_space` → RGB pixels. Sampling needs `context.noise` or `context.seed`; `fromFoundation` imports a diffusers-format repository |
 | `VocabularyEncoder(config)` | A `vocabulary` list, `dimensions`, optional `output_space`; lowercase regex tokens, mean-pooled trainable embeddings |
 | `Transform(config)` | Owned `linear`, `mlp` or native `transformer`; declared `input_space` and `output_space`; returns a `Latent` |
 | `Classify(config)` | Owned head with `input_space` and `labels`; returns a `Prediction` with `logits`, softmax `probabilities` and `value`/`values` |

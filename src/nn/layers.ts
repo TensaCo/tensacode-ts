@@ -9,6 +9,7 @@ import {
 } from './ops/nn.js';
 import { add, mul, relu as reluOp, sigmoid as sigmoidOp, sub, tanh as tanhOp } from './ops/elementwise.js';
 import { chunk, select, stack, unsqueeze } from './ops/shape.js';
+import { groupNorm as groupNormOp } from './ops/nn.js';
 
 /** A module mapping one tensor to one tensor. */
 export interface TensorModule extends Module {
@@ -482,4 +483,41 @@ function pair(value: number | readonly [number, number], name: string, allowZero
   const result: [number, number] = typeof value === 'number' ? [value, value] : [value[0], value[1]];
   for (const item of result) positiveInteger(item, name, allowZero);
   return result;
+}
+
+/** ``torch.nn.GroupNorm`` over ``[N, C, *]`` with per-channel affine parameters. */
+export class GroupNorm extends Module implements TensorModule {
+  static override readonly qualifiedName: string = 'torch.nn.modules.normalization.GroupNorm';
+
+  override configurationAttributes(): Record<string, unknown> {
+    return { affine: this.weight !== null, eps: this.eps, num_channels: this.numChannels, num_groups: this.numGroups };
+  }
+
+  readonly numGroups: number;
+  readonly numChannels: number;
+  readonly eps: number;
+  weight: Parameter | null;
+  bias: Parameter | null;
+
+  constructor(numGroups: number, numChannels: number, options: { eps?: number; affine?: boolean } = {}) {
+    super();
+    positiveInteger(numGroups, 'numGroups');
+    positiveInteger(numChannels, 'numChannels');
+    if (numChannels % numGroups !== 0) throw new RangeError('numChannels must be divisible by numGroups');
+    this.numGroups = numGroups;
+    this.numChannels = numChannels;
+    this.eps = options.eps ?? 1e-5;
+    const affine = options.affine ?? true;
+    this.weight = this.registerParameter('weight', affine ? new Parameter(ones([numChannels])) : null);
+    this.bias = this.registerParameter('bias', affine ? new Parameter(zeros([numChannels])) : null);
+  }
+
+  protected override onRegistryChange(): void {
+    this.weight = this.getParameter('weight');
+    this.bias = this.getParameter('bias');
+  }
+
+  forward(input: Tensor): Tensor {
+    return groupNormOp(input, this.numGroups, this.weight, this.bias, this.eps);
+  }
 }

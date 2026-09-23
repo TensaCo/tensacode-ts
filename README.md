@@ -117,7 +117,7 @@ network returns a `Promise`. Pure computation is synchronous.
 | Experience files (`tensorcode.experience`) | Interchangeable | Operation fingerprints equal Python's for the same configuration |
 | Model artifacts (`savePretrained` / `fromPretrained`, Hub) | Interchangeable | Python artifacts load in TS and re-save with a byte-identical manifest. Weights re-save byte-identically except that tied-alias metadata order varies, because Python itself writes that order nondeterministically. The Hub cache layout is shared |
 | Vector operations (`ops.vec`) | Yes | Linear, MLP and native BERT/RoBERTa/DistilBERT transformer variants; T5 text and ViT image encoders |
-| `ImageDecoder` (latent diffusion) | No | Throws `NotImplementedError`; use the Python package |
+| `ImageDecoder` (latent diffusion) | Yes | diffusers cross-attention UNet, AutoencoderKL and DDIM. Pass `context.noise` for samples identical to Python's (seeded noise uses the TensorCode generator) |
 | Text operations (`ops.text`) | Yes | Owned T5 models (generation and likelihood decoding) and external providers. HTTP providers are async-only |
 | Graph operations | Symbolic stubs | Same as Python |
 | `Chatbot`, `Investigator`, `Decision`, `Planner` | Yes | Including cognitive sessions, episodic memory, verifiers and plan execution |

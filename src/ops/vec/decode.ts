@@ -22,11 +22,7 @@ export class TextDecoder extends TextDecoderImpl {
   static override readonly qualifiedName: string = 'tensorcode.ops.vec.decode.TextDecoder';
 }
 
-/**
- * Generate RGB images from vectors through owned latent diffusion.
- * Unavailable in the TypeScript port: construction and loading raise
- * ``NotImplementedError``.
- */
+/** Generate RGB images from vectors through owned latent diffusion (DDIM sampling). */
 export class ImageDecoder extends ImageDecoderImpl {
   static override readonly qualifiedName: string = 'tensorcode.ops.vec.decode.ImageDecoder';
 }

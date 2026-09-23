@@ -473,3 +473,42 @@ function attend(weights: Tensor, value: Tensor): Tensor {
   return matmul(weights, value);
 }
 
+
+// ------------------------------------------------------------------ group normalization and resampling
+
+/**
+ * ``torch.nn.functional.group_norm`` over ``[N, C, *]``: biased statistics per
+ * ``(sample, group)``, then an optional per-channel affine transform.
+ */
+export function groupNorm(x: Tensor, groups: number, weight: Tensor | null = null, bias: Tensor | null = null, eps = 1e-5): Tensor {
+  if (x.ndim < 2) throw new RangeError('group_norm expects [N, C, *] input');
+  const [batch, channels] = x.shape as [number, number];
+  if (!Number.isInteger(groups) || groups < 1 || channels % groups !== 0) {
+    throw new RangeError(`group_norm: ${channels} channels are not divisible into ${groups} groups`);
+  }
+  const grouped = x.reshape(batch, groups, x.numel / (batch * groups));
+  const centered = sub(grouped, mean(grouped, -1, true));
+  const variance = mean(mul(centered, centered), -1, true);
+  let result = mul(centered, add(variance, eps).rsqrt()).reshape(x.shape);
+  const affine = [1, channels, ...x.shape.slice(2).map(() => 1)];
+  if (weight) result = mul(result, weight.reshape(affine));
+  if (bias) result = add(result, bias.reshape(affine));
+  return result;
+}
+
+/**
+ * ``F.interpolate(x, size, mode='nearest')`` for ``[N, C, H, W]`` (PyTorch's
+ * legacy nearest rule: ``min(floor(i * (float)in / out), in - 1)``, exact
+ * halving for 2x upsampling).
+ */
+export function interpolateNearest(x: Tensor, size: readonly [number, number]): Tensor {
+  if (x.ndim !== 4) throw new RangeError('nearest interpolation expects [N, C, H, W]');
+  const indices = (input: number, output: number): number[] => Array.from({ length: output }, (_, index) => {
+    if (output === input) return index;
+    if (output === 2 * input) return index >> 1;
+    const scale = Math.fround(input / output);
+    return Math.min(Math.floor(Math.fround(index * scale)), input - 1);
+  });
+  const [height, width] = [x.shape[2]!, x.shape[3]!];
+  return x.indexSelect(2, indices(height, size[0])).indexSelect(3, indices(width, size[1]));
+}

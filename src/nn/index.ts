@@ -18,7 +18,7 @@ export {
 export { Module, parameter, type StateDict, type LoadStateDictResult } from './module.js';
 export {
   Linear, Identity, Embedding, EmbeddingBag, LayerNorm, Dropout, GELU, ReLU, Tanh, Sigmoid, SiLU,
-  Sequential, ModuleList, Conv2d, GRUCell, GRU, isTensorModule, type TensorModule,
+  Sequential, ModuleList, Conv2d, GRUCell, GRU, GroupNorm, isTensorModule, type TensorModule,
 } from './layers.js';
 export * as init from './init.js';
 export * as F from './functional.js';
