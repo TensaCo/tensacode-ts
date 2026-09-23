@@ -18,7 +18,7 @@ import { ValueError } from '../errors.js';
 import { invoke, invokeAsync } from './tracing.js';
 import { LatentOperation } from './latentOps.js';
 import { isPlainObject, pythonJsonDumps, validatedJson, type JsonObject, type JsonValue } from './json.js';
-import { validatedModelConfig } from './pretrained.js';
+import { pythonClassName, rejectUnknownToolFields, validatedModelConfig } from './pretrained.js';
 import { createNativeModel, loadNativeFoundation, nativeConfig, type NativeEncoder } from './native/index.js';
 import { FastTokenizer, type TensorBatch } from './tokenizers/index.js';
 import { TemperatureCalibration, type CalibrationReport } from '../training/calibration.js';
@@ -61,9 +61,9 @@ export interface QualityReceipt extends InputMetadata {
 const ALLOWED = new Set(['foundation_config', 'tokenizer_json', 'tokenizer_special_tokens', 'tokenizer_options', 'max_tokens',
   'foundation', 'calibration', 'input_format']);
 
-function normalizedConfig(input: unknown): JsonObject {
+function normalizedConfig(input: unknown, owner: string): JsonObject {
   const config = validatedModelConfig(input);
-  if (Object.keys(config).some((key) => !ALLOWED.has(key))) throw new ValueError('unsupported response quality configuration fields');
+  rejectUnknownToolFields(config, ALLOWED, owner);
   const format = 'input_format' in config ? config.input_format : 'json';
   if (format !== 'json' && format !== 'paired') throw new ValueError('input_format must be json or paired');
   if (!isPlainObject(config.foundation_config) || typeof config.tokenizer_json !== 'string') {
@@ -204,7 +204,7 @@ export class ResponseQualityAssessor extends LatentOperation<QualityInputs | Qua
   private calibrationVersions: string | null = null;
 
   constructor(config: unknown) {
-    const normalized = normalizedConfig(config);
+    const normalized = normalizedConfig(config, pythonClassName(new.target));
     super(normalized);
     const native = normalized.foundation_config as JsonObject;
     const encoder = createNativeModel(nativeConfig(native), 'base', native.model_type === 'bert' ? { addPoolingLayer: false } : {});

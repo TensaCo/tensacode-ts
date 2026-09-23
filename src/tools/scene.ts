@@ -21,7 +21,7 @@ import { ValueError } from '../errors.js';
 import { ModuleOperation, type CallOptions, type Context, type OperationLike } from '../ops/base.js';
 import { Space } from '../ops/vec/latent.js';
 import { PatchEncoder } from '../ops/vec/encode.js';
-import { PretrainedModule } from '../_internal/pretrained.js';
+import { PretrainedModule, pythonClassName, rejectUnknownToolFields } from '../_internal/pretrained.js';
 import { RankingObjective, replayableBindings } from '../_internal/ranking.js';
 import { Workspace, type WorkspaceOutput } from '../_internal/workspace.js';
 import { TensorAdapter as Transform } from '../_internal/vec/adapter.js';
@@ -377,12 +377,35 @@ function positiveInteger(value: unknown): boolean {
 }
 
 /** Validate and default a Scene configuration (private keys removed). */
-function normalizeSceneConfig(input: unknown): JsonObject {
+/**
+ * Ranking-mode configuration fields (Python ``Scene.ranking_fields``). Ranking
+ * and language checkpoints are distinct architectures; each accepts only its
+ * own fields.
+ */
+const SCENE_RANKING_FIELDS: readonly string[] = Object.freeze([
+  'mode', 'vocabulary', 'dimensions', 'slots', 'steps', 'max_tokens', 'architecture_version',
+  'patch_size', 'in_channels', 'max_image_size', 'max_candidates', 'foundation_config',
+  'foundation_source', 'tokenizer_sha256', 'image_mean', 'image_std', 'preprocessing',
+]);
+
+/** Language-mode configuration fields (Python ``Scene.language_fields``). */
+const SCENE_LANGUAGE_FIELDS: readonly string[] = Object.freeze([
+  'mode', 'architecture_version', 'language_config', 'generation_config', 'foundation_source',
+  'freeze_foundation', 'processor_hashes', 'workspace_dimensions', 'workspace_slots',
+  'workspace_steps', 'max_image_size', 'max_question_chars', 'max_input_tokens',
+  'max_target_chars', 'max_new_tokens',
+]);
+
+function normalizeSceneConfig(input: unknown, owner: string): JsonObject {
   if (!isPlainObject(input)) throw new ValueError('model config must be a JSON object');
   const config: Record<string, unknown> = { ...input };
+  // Underscored construction inputs carry local assets bound while loading
+  // and never persist in the configuration.
   delete config._tokenizer_json;
   delete config._language_assets;
-  if (config.mode === 'language') {
+  const language = config.mode === 'language';
+  rejectUnknownToolFields(config, language ? SCENE_LANGUAGE_FIELDS : SCENE_RANKING_FIELDS, `${owner} ${language ? 'language' : 'ranking'}`);
+  if (language) {
     if ((config.architecture_version ?? 1) !== 1) throw new ValueError('unsupported scene language architecture_version');
     config.architecture_version = 1;
     for (const [key, fallback] of LANGUAGE_DEFAULTS) {
@@ -454,6 +477,10 @@ export interface SceneReceipt extends JsonObject {
  */
 export class Scene extends PretrainedModule<SceneInputs | SceneLanguageInputs, SceneReceipt | SceneInterpretation> {
   static override readonly qualifiedName: string = 'tensorcode.tools.scene.Scene';
+  /** Ranking-mode fields; unknown ones raise ``ValueError`` (Python ``ranking_fields``). */
+  static readonly rankingFields: readonly string[] = SCENE_RANKING_FIELDS;
+  /** Language-mode fields (Python ``language_fields``). */
+  static readonly languageFields: readonly string[] = SCENE_LANGUAGE_FIELDS;
   /** Ranking model (ranking mode only). */
   readonly rank!: SceneRank;
   /** Idefics3 interpretation model (language mode only). */
@@ -461,7 +488,7 @@ export class Scene extends PretrainedModule<SceneInputs | SceneLanguageInputs, S
   readonly objective: RankingObjective | SceneLanguageObjective;
 
   constructor(config: unknown) {
-    super(normalizeSceneConfig(config));
+    super(normalizeSceneConfig(config, pythonClassName(new.target)));
     if (this.config.mode === 'language') {
       this.language = this.registerModule('language', new SceneLanguage(this.config, (config as Record<string, unknown>)._language_assets));
       this.objective = this.registerModule('objective', new SceneLanguageObjective(this));

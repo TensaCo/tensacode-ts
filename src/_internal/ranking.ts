@@ -6,6 +6,7 @@
 import { Module } from '../nn/module.js';
 import { Parameter, Tensor, tensor, zerosLike } from '../nn/tensor.js';
 import { Embedding, GELU, Linear, Sequential } from '../nn/layers.js';
+import { torchDTypeName } from '../nn/dtype.js';
 import { cat, stack } from '../nn/ops/shape.js';
 import { ValueError } from '../errors.js';
 import { ModuleOperation, type Context, type OperationLike } from '../ops/base.js';
@@ -20,6 +21,17 @@ import { NativeConfig } from './native/config.js';
 import { createNativeModel } from './native/registry.js';
 import { loadNativeFoundation, type FoundationOptions } from './native/foundation.js';
 import type { EncoderOutput, NativeModel } from './native/modules.js';
+
+/**
+ * Fields shared by every ranking tool (Python ``RANKING_FIELDS``). Foundation
+ * fields describe an owned native encoder; ``foundation`` records its import
+ * provenance.
+ */
+export const RANKING_FIELDS: readonly string[] = Object.freeze([
+  'vocabulary', 'dimensions', 'slots', 'steps', 'max_tokens', 'architecture_version',
+  'cache_records', 'foundation_config', 'tokenizer_json', 'tokenizer_special_tokens',
+  'freeze_foundation', 'foundation',
+]);
 
 /** Validate and default a ranking tool configuration (Python ``normalize_config``). */
 export function normalizeRankingConfig(config: JsonObject): JsonObject {
@@ -83,6 +95,26 @@ export class FoundationEncoding extends Module {
   }
 }
 
+/**
+ * Private tensor execution with an explicit native-model identity (Python
+ * ``FoundationTransform``): the complete native configuration and the
+ * registered tensor schemas describe the owned architecture.
+ */
+export class FoundationTransform extends Transform<FoundationEncoding> {
+  static override readonly qualifiedName: string = 'tensorcode._internal.ranking.FoundationTransform';
+
+  override configuration(): JsonObject {
+    return {
+      operation: qualifiedName(this),
+      module: this.module.configuration(),
+      parameters: this.namedParameters().map(([name, value]) => ({
+        name, shape: [...value.shape], dtype: torchDTypeName(value.dtype), requires_grad: value.requiresGrad,
+      })),
+      buffers: this.namedBuffers().map(([name, value]) => ({ name, shape: [...value.shape], dtype: torchDTypeName(value.dtype) })),
+    };
+  }
+}
+
 export interface RankingRecord {
   [key: string]: JsonValue;
 }
@@ -121,7 +153,7 @@ export class RankOperation extends ModuleOperation<Record<string, unknown>, Tens
     if ('foundation_config' in config) {
       this.tokenizer = FastTokenizer.fromJsonString(config.tokenizer_json as string, (config.tokenizer_special_tokens as Record<string, string> | undefined) ?? {});
       const encoding = new FoundationEncoding(config);
-      this.encode = this.registerModule('encode', new Transform(encoding));
+      this.encode = this.registerModule('encode', new FoundationTransform(encoding));
       this.projection = this.registerModule('projection', new Transform(new Linear(encoding.model.config.hiddenSize, dimensions)));
     } else {
       this.tokenizer = null;

@@ -13,8 +13,8 @@ import { normalize } from '../nn/ops/nn.js';
 import { torchDTypeName } from '../nn/dtype.js';
 import { ValueError } from '../errors.js';
 import type { Context } from '../ops/base.js';
-import { PretrainedModule, validatedModelConfig } from './pretrained.js';
-import { FoundationEncoding } from './ranking.js';
+import { PretrainedModule, pythonClassName, rejectUnknownToolFields, validatedModelConfig } from './pretrained.js';
+import { FoundationEncoding, FoundationTransform } from './ranking.js';
 import { TensorAdapter as Transform } from './vec/adapter.js';
 import { deepCopy, isPlainObject, type JsonObject } from './json.js';
 import { qualifiedName } from './identity.js';
@@ -22,24 +22,9 @@ import { FastTokenizer } from './tokenizers/index.js';
 import { loadNativeFoundation, type FoundationOptions } from './native/foundation.js';
 import { withEvalModes } from './memory/learned.js';
 
-/**
- * Private tensor execution with an explicit native-model identity: its
- * complete native configuration and registered tensor schemas describe the
- * owned architecture.
- */
-export class RetrievalTransform extends Transform<FoundationEncoding> {
+/** Retrieval's native encoder transform; its persisted identity is stable. */
+export class RetrievalTransform extends FoundationTransform {
   static override readonly qualifiedName: string = 'tensorcode._internal.retrieval._RetrievalTransform';
-
-  override configuration(): JsonObject {
-    return {
-      operation: qualifiedName(this),
-      module: this.module.configuration(),
-      parameters: this.namedParameters().map(([name, value]) => ({
-        name, shape: [...value.shape], dtype: torchDTypeName(value.dtype), requires_grad: value.requiresGrad,
-      })),
-      buffers: this.namedBuffers().map(([name, value]) => ({ name, shape: [...value.shape], dtype: torchDTypeName(value.dtype) })),
-    };
-  }
 }
 
 const ALLOWED = new Set([
@@ -73,7 +58,7 @@ export class RetrievalEncoder extends PretrainedModule<readonly string[], Tensor
 
   constructor(config: unknown) {
     const value = validatedModelConfig(config);
-    if (Object.keys(value).some((key) => !ALLOWED.has(key))) throw new ValueError('unsupported retrieval encoder configuration fields');
+    rejectUnknownToolFields(value, ALLOWED, pythonClassName(new.target));
     if (value.pooling !== 'masked_mean' || value.normalize !== true) {
       throw new ValueError('retrieval requires explicit pooling=masked_mean and normalize=True');
     }

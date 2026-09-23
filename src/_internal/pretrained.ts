@@ -20,7 +20,7 @@ import {
   deserializeSafetensors, loadModelFromBytes, serializeModel, type SafetensorsContents,
 } from '../nn/safetensors.js';
 import { ValueError } from '../errors.js';
-import { canonicalJson, parseJsonStrict, pythonJsonDumps, validatedJson, type JsonObject } from './json.js';
+import { canonicalJson, comparePythonStrings, parseJsonStrict, pythonJsonDumps, validatedJson, type JsonObject } from './json.js';
 import { qualifiedName } from './identity.js';
 import { resolveArtifactDirectory, type HubOptions } from './hub.js';
 import { isSymlink, pathExists } from './files.js';
@@ -54,6 +54,42 @@ export function validatedModelConfig(config: unknown): JsonObject {
   } catch (error) {
     throw new ValueError('model config must contain finite JSON values of JSON types', { cause: error });
   }
+}
+
+/** CPython ``repr`` of a string (quote choice and escapes of ``str.__repr__``). */
+export function pythonStringRepr(value: string): string {
+  const quote = value.includes("'") && !value.includes('"') ? '"' : "'";
+  let body = '';
+  for (const char of value) {
+    const code = char.codePointAt(0)!;
+    if (char === '\\') body += '\\\\';
+    else if (char === quote) body += `\\${quote}`;
+    else if (char === '\n') body += '\\n';
+    else if (char === '\r') body += '\\r';
+    else if (char === '\t') body += '\\t';
+    else if (code < 0x20 || code === 0x7f) body += `\\x${code.toString(16).padStart(2, '0')}`;
+    else body += char;
+  }
+  return quote + body + quote;
+}
+
+/** The Python class name (``type(self).__name__``) of a class with a ``qualifiedName``. */
+export function pythonClassName(cls: { name: string; qualifiedName?: string }): string {
+  return cls.qualifiedName?.split('.').pop() ?? cls.name;
+}
+
+/**
+ * Reject obsolete or misspelled configuration fields, naming the valid ones
+ * (Python ``reject_unknown_fields``). Tools own complete architectures;
+ * silently ignoring an unknown field would let a typo or an obsolete artifact
+ * construct a different model than the configuration describes.
+ */
+export function rejectUnknownToolFields(config: Readonly<Record<string, unknown>>, valid: Iterable<string>, owner: string): void {
+  const allowed = new Set(valid);
+  const unknown = Object.keys(config).filter((key) => !allowed.has(key)).sort(comparePythonStrings);
+  if (!unknown.length) return;
+  const list = (items: readonly string[]): string => `[${items.map(pythonStringRepr).join(', ')}]`;
+  throw new ValueError(`Unknown ${owner} configuration fields: ${list(unknown)}; valid fields: ${list([...allowed].sort(comparePythonStrings))}`);
 }
 
 export function requireCpu(device: string | undefined): void {

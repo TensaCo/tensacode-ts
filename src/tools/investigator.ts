@@ -7,10 +7,10 @@ import { noGrad } from '../nn/autograd.js';
 import { crossEntropy } from '../nn/ops/nn.js';
 import { ValueError } from '../errors.js';
 import { ModuleOperation, type Context, type OperationLike } from '../ops/base.js';
-import { PretrainedModule } from '../_internal/pretrained.js';
+import { PretrainedModule, pythonClassName, rejectUnknownToolFields } from '../_internal/pretrained.js';
 import { deepCopy, isPlainObject, sha256Bytes, type JsonObject, type JsonValue } from '../_internal/json.js';
 import {
-  RankOperation, RankingObjective, normalizeRankingConfig, rankingFromFoundation, replayableBindings,
+  RANKING_FIELDS, RankOperation, RankingObjective, normalizeRankingConfig, rankingFromFoundation, replayableBindings,
 } from '../_internal/ranking.js';
 import { FastTokenizer } from '../_internal/tokenizers/index.js';
 import { NativeConfig } from '../_internal/native/config.js';
@@ -26,6 +26,15 @@ import { CognitiveState } from '../_internal/cognition/state.js';
 import { Sha256Accumulator, updateTensorDigest } from '../_internal/cognition/locking.js';
 import { withEvalModes } from '../_internal/memory/learned.js';
 import { Chatbot, type ChatbotFoundationOptions } from './chatbot.js';
+
+/** Investigator configuration fields (Python ``Investigator.config_fields``); Decision inherits them. */
+const INVESTIGATOR_FIELDS: readonly string[] = Object.freeze([
+  ...RANKING_FIELDS,
+  'generator', 'retrieval_encoder', 'verification_scope', 'max_proposals',
+  'proposal_template_version', 'verifier_config', 'verifier_tokenizer_json',
+  'verifier_tokenizer_special_tokens', 'verifier_labels', 'verifier_foundation',
+  'verifier_max_tokens', 'verifier_calibration',
+]);
 
 export { Evidence } from './cognition.js';
 /** The session type returned by {@link Investigator.newCognitiveSession}. */
@@ -278,6 +287,8 @@ function hasContext(context: Context | null | undefined): boolean {
  */
 export class Investigator extends PretrainedModule<Record<string, unknown>, JsonObject> {
   static override readonly qualifiedName: string = 'tensorcode.tools.investigator.Investigator';
+  /** Accepted configuration fields; unknown ones raise ``ValueError`` (Python ``config_fields``). */
+  static readonly configFields: readonly string[] = INVESTIGATOR_FIELDS;
   declare readonly rank: RankOperation;
   declare readonly objective: RankingObjective;
   declare readonly generator: Chatbot | null;
@@ -287,6 +298,7 @@ export class Investigator extends PretrainedModule<Record<string, unknown>, Json
   constructor(config: unknown) {
     if (!isPlainObject(config)) throw new ValueError('model config must be a JSON object');
     const value = deepCopy(config as JsonObject);
+    rejectUnknownToolFields(value, INVESTIGATOR_FIELDS, pythonClassName(new.target));
     const generator = 'generator' in value ? new Chatbot(value.generator) : null;
     if (generator !== null) value.generator = generator.configuration();
     const episodic = 'retrieval_encoder' in value ? new RetrievalEncoder(value.retrieval_encoder) : null;

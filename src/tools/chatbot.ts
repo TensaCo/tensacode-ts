@@ -9,7 +9,7 @@ import { FLOAT32_EPSILON } from '../nn/dtype.js';
 import { div, maximum, where } from '../nn/ops/elementwise.js';
 import { ValueError } from '../errors.js';
 import { Operation, type Context, type OperationLike } from '../ops/base.js';
-import { PretrainedModule, type FromPretrainedOptions, type PretrainedClass } from '../_internal/pretrained.js';
+import { PretrainedModule, pythonClassName, rejectUnknownToolFields, type FromPretrainedOptions, type PretrainedClass } from '../_internal/pretrained.js';
 import { Workspace, type WorkspaceOutput } from '../_internal/workspace.js';
 import { deepCopy, isPlainObject, pythonJsonDumps, sha256Hex, type JsonObject, type JsonValue } from '../_internal/json.js';
 import { conversationBlock, type ConversationRow } from '../_internal/conversation.js';
@@ -30,6 +30,20 @@ import { Evidence } from './cognition.js';
 import { Investigator, type InvestigatorFoundationsOptions } from './investigator.js';
 
 const ABSTENTION = 'I do not have enough supported evidence to answer.';
+
+/** Configuration fields a Chatbot accepts (Python ``Chatbot.config_fields``). */
+const CHATBOT_FIELDS: readonly string[] = Object.freeze([
+  'foundation_config', 'untied_lm_head', 'generation_config', 'tokenizer_json',
+  'tokenizer_special_tokens', 'foundation', 'max_new_tokens', 'max_input_tokens',
+  'max_target_tokens', 'max_turns', 'workspace', 'memory_mode', 'memory_update',
+  'cognition',
+]);
+
+/** Fields of the nested ``cognition`` configuration (Python ``Chatbot.cognition_fields``). */
+const CHATBOT_COGNITION_FIELDS: readonly string[] = Object.freeze([
+  'investigator', 'conversation_context_tokens', 'proposal_count', 'abstention_text',
+  'max_records', 'policy', 'memory',
+]);
 
 /**
  * Scale each example's valid-token update to its native encoder RMS
@@ -141,6 +155,10 @@ type ChatStatics = typeof Chatbot;
  */
 export class Chatbot extends PretrainedModule<unknown, string> {
   static override readonly qualifiedName: string = 'tensorcode.tools.chatbot.Chatbot';
+  /** Accepted configuration fields; unknown ones raise ``ValueError`` (Python ``config_fields``). */
+  static readonly configFields: readonly string[] = CHATBOT_FIELDS;
+  /** Accepted ``cognition`` fields (Python ``cognition_fields``). */
+  static readonly cognitionFields: readonly string[] = CHATBOT_COGNITION_FIELDS;
   declare readonly foundation: T5ForConditionalGeneration;
   declare readonly tokenizer: FastTokenizer;
   declare readonly workspace: Workspace;
@@ -158,11 +176,14 @@ export class Chatbot extends PretrainedModule<unknown, string> {
   constructor(config: unknown) {
     if (!isPlainObject(config)) throw new ValueError('model config must be a JSON object');
     const value: JsonObject = { ...(config as JsonObject) };
+    const owner = pythonClassName(new.target);
+    rejectUnknownToolFields(value, CHATBOT_FIELDS, owner);
     let cognitive = (value.cognition ?? null) as JsonObject | null;
     if (cognitive !== null) {
       if (!isPlainObject(cognitive) || !isPlainObject(cognitive.investigator)) {
         throw new ValueError('cognition requires a complete investigator configuration');
       }
+      rejectUnknownToolFields(cognitive, CHATBOT_COGNITION_FIELDS, `${owner} cognition`);
       const nested = cognitive.investigator as JsonObject;
       if (!isPlainObject(nested.generator) || !('verifier_config' in nested)) {
         throw new ValueError('cognition requires owned proposal generator and verifier');

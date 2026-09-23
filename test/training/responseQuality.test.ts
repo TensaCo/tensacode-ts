@@ -67,7 +67,7 @@ describe('ResponseQualityAssessor', () => {
         expect(() => model.loss(INPUT, bad as never)).toThrow();
       }
       expect(() => model.call({ ...INPUT, evidence: [...INPUT.evidence, ...INPUT.evidence] })).toThrow(/unique/);
-      expect(() => new ResponseQualityAssessor({ ...tinyConfig(), model: 'obsolete' })).toThrow(/unsupported/);
+      expect(() => new ResponseQualityAssessor({ ...tinyConfig(), model: 'obsolete' })).toThrow(/Unknown ResponseQualityAssessor configuration fields: \['model'\]/);
     });
   }
 

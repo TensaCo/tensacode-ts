@@ -6,10 +6,10 @@ import { Tensor, tensor } from '../nn/tensor.js';
 import { mseLoss } from '../nn/ops/nn.js';
 import { ValueError } from '../errors.js';
 import type { Context, OperationLike } from '../ops/base.js';
-import { PretrainedModule } from '../_internal/pretrained.js';
+import { PretrainedModule, pythonClassName, rejectUnknownToolFields } from '../_internal/pretrained.js';
 import { deepCopy, isPlainObject, type JsonObject, type JsonValue } from '../_internal/json.js';
 import {
-  RankOperation, RankingObjective, normalizeRankingConfig, rankingFromFoundation, replayableBindings,
+  RANKING_FIELDS, RankOperation, RankingObjective, normalizeRankingConfig, rankingFromFoundation, replayableBindings,
 } from '../_internal/ranking.js';
 import type { FoundationOptions } from '../_internal/native/foundation.js';
 import { generateProposals, proposalLoss, type ProposalRecord } from '../_internal/proposals.js';
@@ -22,6 +22,12 @@ export {
   PlanStep, ExecutablePlan, OutcomeExperience, ReplanRequest, PlanExecutionResult, PlanExecutor, withSignature,
   type ActionSignature, type ActionParameter,
 } from '../_internal/execution/planning.js';
+
+/** Planner configuration fields (Python ``Planner.config_fields``). */
+const PLANNER_FIELDS: readonly string[] = Object.freeze([
+  ...RANKING_FIELDS,
+  'generator',
+]);
 
 export interface PlannerFoundationOptions extends Omit<FoundationOptions, 'head'> {
   options?: JsonObject;
@@ -44,6 +50,8 @@ export interface PlannerFoundationsOptions extends Omit<FoundationOptions, 'head
  */
 export class Planner extends PretrainedModule<Record<string, unknown>, JsonObject> {
   static override readonly qualifiedName: string = 'tensorcode.tools.planner.Planner';
+  /** Accepted configuration fields; unknown ones raise ``ValueError`` (Python ``config_fields``). */
+  static readonly configFields: readonly string[] = PLANNER_FIELDS;
   declare readonly generator: Chatbot | null;
   declare readonly rank: RankOperation;
   declare readonly objective: RankingObjective;
@@ -55,6 +63,7 @@ export class Planner extends PretrainedModule<Record<string, unknown>, JsonObjec
   constructor(config: unknown) {
     if (!isPlainObject(config)) throw new ValueError('model config must be a JSON object');
     const value = { ...(config as JsonObject) };
+    rejectUnknownToolFields(value, PLANNER_FIELDS, pythonClassName(new.target));
     let generator: Chatbot | null = null;
     if (value.generator !== undefined && value.generator !== null) {
       generator = new Chatbot(value.generator);
