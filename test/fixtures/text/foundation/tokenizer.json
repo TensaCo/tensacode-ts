@@ -1,0 +1,118 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {
+      "id": 0,
+      "content": "[PAD]",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 1,
+      "content": "[UNK]",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 2,
+      "content": "</s>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    }
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Whitespace"
+  },
+  "post_processor": {
+    "type": "TemplateProcessing",
+    "single": [
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      }
+    ],
+    "pair": [
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "B",
+          "type_id": 1
+        }
+      }
+    ],
+    "special_tokens": {}
+  },
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "[PAD]": 0,
+      "[UNK]": 1,
+      "</s>": 2,
+      "question": 3,
+      "answer": 4,
+      "yes": 5,
+      "no": 6,
+      "bad": 7,
+      "good": 8,
+      "label": 9,
+      "choice": 10,
+      "score": 11,
+      "keys": 12,
+      "abstained": 13,
+      "distribution": 14,
+      "confidence": 15,
+      "scores": 16,
+      "true": 17,
+      "false": 18,
+      "null": 19,
+      "a": 20,
+      "b": 21,
+      "0": 22,
+      "1": 23,
+      "user": 24,
+      "system": 25,
+      "assistant": 26,
+      "content": 27,
+      "role": 28,
+      "messages": 29,
+      "instructions": 30,
+      "Options": 31,
+      "Answer": 32,
+      "{\"": 33,
+      "\":": 34,
+      ",": 35,
+      "\"": 36,
+      "}": 37,
+      "[{\"": 38,
+      "\"}]": 39,
+      "-": 40,
+      ":": 41,
+      "be": 42,
+      "brief": 43,
+      "affirmative": 44,
+      "refund": 45,
+      "policy": 46
+    },
+    "unk_token": "[UNK]"
+  }
+}
