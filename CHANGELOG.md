@@ -43,7 +43,9 @@ deliberate. See [Parity with Python](docs/parity.md) for what remains.
   `generate`: beam search, classifier-free guidance, sequence bias,
   prompt-lookup decoding, watermarking, stop strings, token healing and every
   logits processor. The Llama text model supports every RoPE type. The
-  processor batches prompts with any number of images.
+  processor batches prompts with any number of images, and processor assets
+  are written for the TokenizersBackend, Llama, GPT2, T5, ALBERT, DeBERTa-v2,
+  BERT, RoBERTa and CLIP tokenizer classes.
 - **Blocking providers.** `OpenAICompatibleModel`, `JevModel` and `LocalModel`
   block in `complete` like Python's, so `op.call` and `ask` work with them.
   Runtimes that cannot block a thread raise `SynchronousCallUnavailable`.

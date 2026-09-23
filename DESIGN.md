@@ -413,8 +413,10 @@ users. In short:
   reference platform, as PyTorch's own do.
 - Native architectures are the listed ones. SentencePiece-only tokenizers
   (no `tokenizer.json`) are not converted (Python needs optional packages).
-- Scene language processor assets cover the listed tokenizer classes; other
-  image processor classes raise `NotImplementedError`.
+- Scene language processor assets cover TokenizersBackend, Llama, GPT2, T5,
+  ALBERT, DeBERTa-v2, BERT, RoBERTa and CLIP tokenizer classes; other classes
+  with their own construction and other image processor classes raise
+  `NotImplementedError`.
 - `openImage` reads PNG, JPEG, GIF, WebP and BMP only.
 - Blocking provider calls need a thread that can block; `LocalModel` runs
   Transformers.js, not PyTorch.

@@ -73,6 +73,23 @@ def _unigram_json():
     return tokenizer.to_str()
 
 
+def _wordpiece_json():
+    vocab = {'[PAD]': 0, '[UNK]': 1, '[CLS]': 2, '[SEP]': 3, '[MASK]': 4, 'hello': 5, 'abc': 6, 'a': 7, '##bc': 8}
+    tokenizer = Tokenizer(models.WordPiece(vocab, unk_token='[UNK]'))
+    tokenizer.normalizer = normalizers.BertNormalizer(lowercase=True)
+    tokenizer.pre_tokenizer = pre_tokenizers.BertPreTokenizer()
+    tokenizer.decoder = decoders.WordPiece()
+    return tokenizer.to_str()
+
+
+def _clip_json():
+    vocab = {'<|startoftext|>': 0, '<|endoftext|>': 1, 'h': 2, 'e': 3, 'l': 4, 'o': 5, 'o</w>': 6, 'hello</w>': 7, 'a': 8, 'b': 9,
+             'c</w>': 10, 'he': 11, 'll': 12, 'hell': 13}
+    tokenizer = Tokenizer(models.BPE(vocab, [('h', 'e'), ('l', 'l'), ('he', 'll'), ('hell', 'o</w>')], end_of_word_suffix='</w>'))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    return tokenizer.to_str()
+
+
 SYNTHETIC = {
     'llama': (lambda: _bpe_json(True), {'tokenizer_class': 'LlamaTokenizer', 'bos_token': '<s>', 'eos_token': '</s>', 'unk_token': '<unk>',
                                         'add_bos_token': True, 'legacy': False, 'model_max_length': 64, 'padding_side': 'left'}),
@@ -83,6 +100,9 @@ SYNTHETIC = {
     't5_fast': (_unigram_json, {'tokenizer_class': 'T5TokenizerFast', 'extra_ids': 4, 'model_max_length': 512, 'sp_model_kwargs': {}}),
     'generic': (lambda: _bpe_json(True), {'tokenizer_class': 'PreTrainedTokenizerFast', 'bos_token': '<s>', 'eos_token': '</s>', 'truncation_side': 'left'}),
     'unknown_class': (lambda: _bpe_json(True), {'tokenizer_class': 'MysteryTokenizer', 'unk_token': '<unk>', 'custom_flag': 3}),
+    'bert': (_wordpiece_json, {'tokenizer_class': 'BertTokenizer', 'do_lower_case': False, 'model_max_length': 128}),
+    'roberta': (_gpt2_json, {'tokenizer_class': 'RobertaTokenizerFast', 'add_prefix_space': True, 'errors': 'strict'}),
+    'clip': (_clip_json, {'tokenizer_class': 'CLIPTokenizer'}),
 }
 CACHED = {
     'flan_t5': ('flan_t5', ['tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json'], None),

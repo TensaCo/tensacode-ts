@@ -98,6 +98,24 @@ const TOKENIZER_CLASS_SPECS: Record<string, TokenizerClassSpec> = {
     },
     consumed: ['vocab', '_spm_precompiled_charsmap'], files: ['vocab_file', 'tokenizer_file'],
   },
+  BertTokenizer: {
+    forwarded: {
+      do_lower_case: true, unk_token: '[UNK]', sep_token: '[SEP]', pad_token: '[PAD]', cls_token: '[CLS]', mask_token: '[MASK]',
+      tokenize_chinese_chars: true, strip_accents: null,
+    },
+    consumed: ['vocab'], files: ['vocab_file', 'tokenizer_file'],
+  },
+  RobertaTokenizer: {
+    forwarded: {
+      errors: 'replace', bos_token: '<s>', eos_token: '</s>', sep_token: '</s>', cls_token: '<s>', unk_token: '<unk>',
+      pad_token: '<pad>', mask_token: '<mask>', add_prefix_space: false, trim_offsets: true,
+    },
+    consumed: ['vocab', 'merges'], files: ['vocab_file', 'merges_file', 'tokenizer_file'],
+  },
+  CLIPTokenizer: {
+    forwarded: { unk_token: '<|endoftext|>', bos_token: '<|startoftext|>', eos_token: '<|endoftext|>', pad_token: '<|endoftext|>' },
+    consumed: ['vocab', 'merges'], files: ['vocab_file', 'merges_file', 'tokenizer_file'],
+  },
   DebertaV2Tokenizer: {
     forwarded: {
       bos_token: '[CLS]', eos_token: '[SEP]', unk_token: '[UNK]', sep_token: '[SEP]', cls_token: '[CLS]', pad_token: '[PAD]',

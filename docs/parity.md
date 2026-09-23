@@ -185,9 +185,13 @@ fail in both packages: Python converts them only when the optional
 
 `fromLanguageFoundation` writes the processor assets Python writes for
 `TokenizersBackend` (including `PreTrainedTokenizerFast` and unknown class
-names), `LlamaTokenizer`, `GPT2Tokenizer`, `T5Tokenizer`, `AlbertTokenizer` and
-`DebertaV2Tokenizer`, with or without `Fast`. Idefics3 foundations with other
-tokenizer classes raise `NotImplementedError`. Image processors other than
+names), `LlamaTokenizer`, `GPT2Tokenizer`, `T5Tokenizer`, `AlbertTokenizer`,
+`DebertaV2Tokenizer`, `BertTokenizer`, `RobertaTokenizer` and `CLIPTokenizer`,
+with or without `Fast` (the Idefics3 checkpoints on the Hub use
+`GPT2Tokenizer` or `PreTrainedTokenizerFast`). Other transformers tokenizer
+classes with their own construction (for example `Qwen2Tokenizer`,
+`GemmaTokenizer`, `CodeLlamaTokenizer`, `XLMRobertaTokenizer`) raise
+`NotImplementedError` there. Image processors other than
 `Idefics3ImageProcessor` (also named `...Fast` or `...Pil`) raise
 `NotImplementedError` as well.
 
