@@ -173,9 +173,11 @@ inside its bounds (PyTorch computes that log with a vectorized kernel), and
 Python loads any transformers `AutoModel` for a text foundation. TypeScript
 implements ALBERT, BERT, RoBERTa, Electra, DistilBERT, DeBERTa-v2, T5, ViT,
 CLIP, Llama and Idefics3 natively and raises `ValueError` for other
-`model_type`s. Foundations need a `tokenizer.json`: a repository with only
-slow tokenizer files (`vocab.txt`, `spiece.model`, `vocab.json`/`merges.txt`),
-or none, loads in Python but not in TypeScript.
+`model_type`s. A foundation's tokenizer comes from its `tokenizer.json`, or,
+when the checkpoint has no tokenizer files at all, from the class defaults
+`AutoTokenizer` uses. A repository with only slow tokenizer files
+(`vocab.txt`, `spiece.model`, `vocab.json`/`merges.txt`) loads in Python, which
+converts them, but its tokenizer is not converted in TypeScript.
 
 ### Scene language mode
 

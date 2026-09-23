@@ -104,6 +104,12 @@ deliberate. See [Parity with Python](docs/parity.md) for what remains.
 - An `Idefics3ImageProcessorPil` processor configuration loads the default
   processor, as in transformers, instead of raising `NotImplementedError`.
 - transformers' legacy `LayerNorm.gamma` / `LayerNorm.beta` weight names load.
+- A foundation without any tokenizer files gets the class-default tokenizer
+  `AutoTokenizer` builds, instead of none.
+- A piece repeated in a Unigram vocabulary maps to its last id, as in the Rust
+  `tokenizers` library.
+- The tokenizer class chosen from `model_type` follows transformers 5.17
+  (DistilBERT checkpoints use `BertTokenizer`'s input names).
 
 ## 0.4.0-alpha.3
 

@@ -407,8 +407,9 @@ users. In short:
 - CPU only (no CUDA/GPU); computed results agree with PyTorch within float
   tolerance; bit-exact random streams and resampling follow the AArch64
   reference platform, as PyTorch's own do.
-- Native architectures are the listed ones, and foundations need a
-  `tokenizer.json`.
+- Native architectures are the listed ones, and slow tokenizer files
+  (`vocab.txt`, `spiece.model`, ...) without a `tokenizer.json` are not
+  converted.
 - Scene language processor assets cover the listed tokenizer classes; other
   image processor classes raise `NotImplementedError`.
 - `openImage` reads PNG, JPEG, GIF, WebP and BMP only.
