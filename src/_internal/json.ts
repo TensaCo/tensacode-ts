@@ -112,6 +112,8 @@ export const PYTHON_FLOAT_KEYS = new Set<string>([
   // diffusers configurations (UNet2DConditionModel, AutoencoderKL, DDIMScheduler)
   'beta_start', 'beta_end', 'clip_sample_range', 'sample_max_value', 'dynamic_thresholding_ratio',
   'resnet_out_scale_factor', 'scaling_factor', 'shift_factor', 'norm_eps',
+  // Idefics3/SmolVLM configurations (Llama text model attributes, legacy generation fields)
+  'neftune_noise_alpha', 'diversity_penalty', 'typical_p',
 ]);
 
 /** Declare additional float keys (application start-up only; see {@link PYTHON_FLOAT_KEYS}). */

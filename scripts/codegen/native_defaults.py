@@ -16,7 +16,8 @@ import transformers
 from transformers import AutoConfig, PretrainedConfig, GenerationConfig
 
 ROOT = Path(__file__).resolve().parents[2]
-TYPES = ['albert', 'bert', 'roberta', 'electra', 'distilbert', 't5', 'vit', 'clip', 'clip_text_model', 'clip_vision_model', 'deberta-v2']
+TYPES = ['albert', 'bert', 'roberta', 'electra', 'distilbert', 't5', 'vit', 'clip', 'clip_text_model', 'clip_vision_model', 'deberta-v2',
+         'llama', 'idefics3', 'idefics3_vision']
 
 
 def clean(d):

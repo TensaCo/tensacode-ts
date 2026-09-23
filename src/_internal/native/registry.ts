@@ -3,10 +3,11 @@
  *
  * | head                      | architectures                                              |
  * |---------------------------|------------------------------------------------------------|
- * | ``base``                  | albert, bert, roberta, electra, distilbert, deberta-v2, vit, clip |
+ * | ``base``                  | albert, bert, roberta, electra, distilbert, deberta-v2, vit, clip, llama |
  * | ``seq2seq``               | t5 (``AutoModelForSeq2SeqLM``)                             |
  * | ``encoder``               | t5 (``T5EncoderModel``)                                    |
  * | ``sequence-classification`` | albert, bert, roberta, electra, distilbert, deberta-v2   |
+ * | ``image-text-to-text``    | idefics3 (``AutoModelForImageTextToText``)                 |
  */
 import { ValueError } from '../../errors.js';
 import type { NativeConfig } from './config.js';
@@ -19,8 +20,10 @@ import { T5EncoderModel, T5ForConditionalGeneration } from './t5.js';
 import { ViTModel } from './vit.js';
 import { CLIPModel } from './clip.js';
 import { createDebertaV2ForSequenceClassification, createDebertaV2Model } from './debertaV2.js';
+import { LlamaModel } from './llama.js';
+import { Idefics3ForConditionalGeneration } from './idefics3.js';
 
-export type NativeHead = 'base' | 'seq2seq' | 'encoder' | 'sequence-classification';
+export type NativeHead = 'base' | 'seq2seq' | 'encoder' | 'sequence-classification' | 'image-text-to-text';
 
 export interface CreateOptions {
   /** BERT/RoBERTa/ViT pooler (``add_pooling_layer``); default true for BERT/RoBERTa, false for ViT. */
@@ -30,7 +33,7 @@ export interface CreateOptions {
 /** ``base_model_prefix`` of the architecture's pretrained head models. */
 export const BASE_MODEL_PREFIX: Record<string, string> = {
   albert: 'albert', bert: 'bert', roberta: 'roberta', electra: 'electra', distilbert: 'distilbert', 'deberta-v2': 'deberta',
-  t5: 'transformer', vit: 'vit', clip: 'clip',
+  t5: 'transformer', vit: 'vit', clip: 'clip', llama: 'model', idefics3: 'model',
 };
 
 export function createNativeModel(config: NativeConfig, head: NativeHead = 'base', options: CreateOptions = {}): NativeModel {
@@ -38,6 +41,10 @@ export function createNativeModel(config: NativeConfig, head: NativeHead = 'base
   if (head === 'seq2seq') {
     if (type === 't5') return new T5ForConditionalGeneration(config);
     throw new ValueError(`${type} is not a supported native sequence-to-sequence architecture (supported: t5)`);
+  }
+  if (head === 'image-text-to-text') {
+    if (type === 'idefics3') return new Idefics3ForConditionalGeneration(config);
+    throw new ValueError(`${type} is not a supported native image-text-to-text architecture (supported: idefics3)`);
   }
   if (head === 'encoder') {
     if (type === 't5') return new T5EncoderModel(config);
@@ -63,6 +70,8 @@ export function createNativeModel(config: NativeConfig, head: NativeHead = 'base
     case 'deberta-v2': return createDebertaV2Model(config);
     case 'vit': return new ViTModel(config, { addPoolingLayer: options.addPoolingLayer ?? false });
     case 'clip': return new CLIPModel(config);
+    case 'llama': return new LlamaModel(config);
+    case 'idefics3': throw new ValueError('Idefics3 models are used through the image-text-to-text head');
     case 't5': throw new ValueError('T5 base models are used through the seq2seq or encoder heads');
     default: throw new ValueError(`unsupported native architecture ${JSON.stringify(type)}`);
   }

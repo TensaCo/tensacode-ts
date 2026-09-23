@@ -391,6 +391,181 @@ export const CLASS_CONFIG_DEFAULTS: Record<string, JsonObject> = {
     "use_cache": true,
     "vocab_size": 30522
   },
+  "idefics3": {
+    "_name_or_path": "",
+    "architectures": null,
+    "chunk_size_feed_forward": 0,
+    "dtype": null,
+    "id2label": {
+      "0": "LABEL_0",
+      "1": "LABEL_1"
+    },
+    "image_token_id": 128257,
+    "is_encoder_decoder": false,
+    "label2id": {
+      "LABEL_0": 0,
+      "LABEL_1": 1
+    },
+    "model_type": "idefics3",
+    "output_attentions": false,
+    "output_hidden_states": false,
+    "pad_token_id": 128002,
+    "problem_type": null,
+    "return_dict": true,
+    "scale_factor": 2,
+    "text_config": {
+      "_name_or_path": "",
+      "architectures": null,
+      "attention_bias": false,
+      "attention_dropout": 0.0,
+      "bos_token_id": 1,
+      "chunk_size_feed_forward": 0,
+      "dtype": null,
+      "eos_token_id": 2,
+      "head_dim": 128,
+      "hidden_act": "silu",
+      "hidden_size": 4096,
+      "id2label": {
+        "0": "LABEL_0",
+        "1": "LABEL_1"
+      },
+      "initializer_range": 0.02,
+      "intermediate_size": 11008,
+      "is_encoder_decoder": false,
+      "label2id": {
+        "LABEL_0": 0,
+        "LABEL_1": 1
+      },
+      "max_position_embeddings": 2048,
+      "mlp_bias": false,
+      "model_type": "llama",
+      "num_attention_heads": 32,
+      "num_hidden_layers": 32,
+      "num_key_value_heads": 32,
+      "output_attentions": false,
+      "output_hidden_states": false,
+      "pad_token_id": 128002,
+      "pretraining_tp": 1,
+      "problem_type": null,
+      "return_dict": true,
+      "rms_norm_eps": 1e-05,
+      "rope_parameters": {
+        "rope_theta": 10000.0,
+        "rope_type": "default"
+      },
+      "tie_word_embeddings": false,
+      "use_cache": true,
+      "vocab_size": 32000
+    },
+    "tie_word_embeddings": false,
+    "use_cache": true,
+    "vision_config": {
+      "_name_or_path": "",
+      "architectures": null,
+      "attention_dropout": 0.0,
+      "chunk_size_feed_forward": 0,
+      "dtype": null,
+      "hidden_act": "gelu_pytorch_tanh",
+      "hidden_size": 1152,
+      "id2label": {
+        "0": "LABEL_0",
+        "1": "LABEL_1"
+      },
+      "image_size": 224,
+      "initializer_range": 0.02,
+      "intermediate_size": 3072,
+      "is_encoder_decoder": false,
+      "label2id": {
+        "LABEL_0": 0,
+        "LABEL_1": 1
+      },
+      "layer_norm_eps": 1e-06,
+      "model_type": "idefics3_vision",
+      "num_attention_heads": 16,
+      "num_channels": 3,
+      "num_hidden_layers": 12,
+      "output_attentions": false,
+      "output_hidden_states": false,
+      "patch_size": 32,
+      "problem_type": null,
+      "return_dict": true
+    }
+  },
+  "idefics3_vision": {
+    "_name_or_path": "",
+    "architectures": null,
+    "attention_dropout": 0.0,
+    "chunk_size_feed_forward": 0,
+    "dtype": null,
+    "hidden_act": "gelu_pytorch_tanh",
+    "hidden_size": 1152,
+    "id2label": {
+      "0": "LABEL_0",
+      "1": "LABEL_1"
+    },
+    "image_size": 224,
+    "initializer_range": 0.02,
+    "intermediate_size": 3072,
+    "is_encoder_decoder": false,
+    "label2id": {
+      "LABEL_0": 0,
+      "LABEL_1": 1
+    },
+    "layer_norm_eps": 1e-06,
+    "model_type": "idefics3_vision",
+    "num_attention_heads": 16,
+    "num_channels": 3,
+    "num_hidden_layers": 12,
+    "output_attentions": false,
+    "output_hidden_states": false,
+    "patch_size": 32,
+    "problem_type": null,
+    "return_dict": true
+  },
+  "llama": {
+    "_name_or_path": "",
+    "architectures": null,
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "bos_token_id": 1,
+    "chunk_size_feed_forward": 0,
+    "dtype": null,
+    "eos_token_id": 2,
+    "head_dim": 128,
+    "hidden_act": "silu",
+    "hidden_size": 4096,
+    "id2label": {
+      "0": "LABEL_0",
+      "1": "LABEL_1"
+    },
+    "initializer_range": 0.02,
+    "intermediate_size": 11008,
+    "is_encoder_decoder": false,
+    "label2id": {
+      "LABEL_0": 0,
+      "LABEL_1": 1
+    },
+    "max_position_embeddings": 2048,
+    "mlp_bias": false,
+    "model_type": "llama",
+    "num_attention_heads": 32,
+    "num_hidden_layers": 32,
+    "num_key_value_heads": 32,
+    "output_attentions": false,
+    "output_hidden_states": false,
+    "pad_token_id": null,
+    "pretraining_tp": 1,
+    "problem_type": null,
+    "return_dict": true,
+    "rms_norm_eps": 1e-06,
+    "rope_parameters": {
+      "rope_theta": 10000.0,
+      "rope_type": "default"
+    },
+    "tie_word_embeddings": false,
+    "use_cache": true,
+    "vocab_size": 32000
+  },
   "roberta": {
     "_name_or_path": "",
     "add_cross_attention": false,
@@ -524,6 +699,9 @@ export const ATTRIBUTE_MAPS: Record<string, Record<string, string>> = {
     "num_hidden_layers": "n_layers"
   },
   "electra": {},
+  "idefics3": {},
+  "idefics3_vision": {},
+  "llama": {},
   "roberta": {},
   "t5": {
     "head_dim": "d_kv",

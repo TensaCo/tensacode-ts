@@ -23,12 +23,40 @@ export { TRANSFORMERS_VERSION } from './defaults.generated.js';
 
 
 /** Model types whose architectures are implemented natively in TypeScript. */
-export const SUPPORTED_MODEL_TYPES = ['albert', 'bert', 'roberta', 'electra', 'distilbert', 't5', 'vit', 'clip', 'deberta-v2'] as const;
+export const SUPPORTED_MODEL_TYPES = ['albert', 'bert', 'roberta', 'electra', 'distilbert', 't5', 'vit', 'clip', 'deberta-v2', 'llama', 'idefics3'] as const;
 export type SupportedModelType = (typeof SUPPORTED_MODEL_TYPES)[number];
 
 const NESTED: Record<string, Record<string, string>> = {
   clip: { text_config: 'clip_text_model', vision_config: 'clip_vision_model' },
+  idefics3: { text_config: 'llama', vision_config: 'idefics3_vision' },
 };
+
+/** ``LlamaConfig.default_theta``. */
+const LLAMA_DEFAULT_THETA = 10000.0;
+
+/**
+ * ``RotaryEmbeddingConfigMixin.convert_rope_params_to_dict`` (single global
+ * RoPE dictionary): legacy ``rope_theta``/``rope_scaling`` become
+ * ``rope_parameters``.
+ */
+function standardizeRope(values: JsonObject, input: JsonObject): void {
+  const scaling = input.rope_scaling;
+  const supplied = input.rope_parameters;
+  const parameters: JsonObject = isPlainObject(scaling) && Object.keys(scaling).length
+    ? deepCopy(scaling as JsonObject)
+    : isPlainObject(supplied) ? deepCopy(supplied as JsonObject) : {};
+  delete values.rope_scaling;
+  delete values.rope_theta;
+  if (!('rope_theta' in parameters)) parameters.rope_theta = input.rope_theta !== undefined ? deepCopy(input.rope_theta as JsonValue) : LLAMA_DEFAULT_THETA;
+  if (input.partial_rotary_factor !== undefined && input.partial_rotary_factor !== null && !('partial_rotary_factor' in parameters)) {
+    parameters.partial_rotary_factor = deepCopy(input.partial_rotary_factor as JsonValue);
+  }
+  if (!('rope_type' in parameters)) parameters.rope_type = parameters.type !== undefined ? deepCopy(parameters.type as JsonValue) : 'default';
+  if (['llama3', 'yarn', 'longrope'].includes(String(parameters.rope_type)) && !('original_max_position_embeddings' in parameters)) {
+    parameters.original_max_position_embeddings = values.max_position_embeddings!;
+  }
+  values.rope_parameters = parameters;
+}
 
 function labelMaps(values: JsonObject, input: JsonObject): void {
   if (input.id2label !== undefined && input.id2label !== null) {
@@ -79,8 +107,23 @@ function normalize(modelType: string, input: JsonObject): JsonObject {
   // ``torch_dtype`` is the legacy spelling of ``dtype``.
   if (input.dtype === undefined && input.torch_dtype !== undefined) values.dtype = deepCopy(input.torch_dtype as JsonValue);
   labelMaps(values, input);
+  if (modelType === 'llama') {
+    if (input.head_dim === undefined || input.head_dim === null) values.head_dim = Math.floor((values.hidden_size as number) / (values.num_attention_heads as number));
+    if (input.num_key_value_heads === undefined || input.num_key_value_heads === null) values.num_key_value_heads = values.num_attention_heads!;
+    standardizeRope(values, input);
+  }
   for (const [key, nestedType] of Object.entries(nested)) {
     const supplied = input[key];
+    if (modelType === 'idefics3' && key === 'text_config') {
+      if (!isPlainObject(supplied)) {
+        // ``Idefics3Config`` default text model: Llama with ``rms_norm_eps=1e-5``.
+        values[key] = normalize('llama', { rms_norm_eps: 1e-5, pad_token_id: values.pad_token_id! });
+        delete (values[key] as JsonObject).transformers_version;
+        continue;
+      }
+      const textType = (supplied as JsonObject).model_type ?? 'llama';
+      if (textType !== 'llama') throw new ValueError(`unsupported Idefics3 text model_type ${JSON.stringify(textType)} (supported: llama)`);
+    }
     let childInput = isPlainObject(supplied) ? supplied as JsonObject : {};
     // CLIP ``text_config_dict``/``vision_config_dict`` (legacy): a complete
     // configuration built from the dict overrides ``text_config``/``vision_config``.

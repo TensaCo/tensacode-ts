@@ -1,6 +1,6 @@
 /** Standard layers with PyTorch parameter names, shapes and default initialization. */
 import { Module } from './module.js';
-import { Parameter, Tensor, empty, zeros, ones } from './tensor.js';
+import { Parameter, Tensor, empty, zeros, ones, tensor as tensorOf } from './tensor.js';
 import * as init from './init.js';
 import { linear as linearOp } from './ops/linalg.js';
 import {
@@ -9,7 +9,7 @@ import {
 } from './ops/nn.js';
 import { add, mul, relu as reluOp, sigmoid as sigmoidOp, sub, tanh as tanhOp } from './ops/elementwise.js';
 import { chunk, select, stack, unsqueeze } from './ops/shape.js';
-import { groupNorm as groupNormOp } from './ops/nn.js';
+import { groupNorm as groupNormOp, scaledDotProductAttention as scaledDotProductAttentionOp } from './ops/nn.js';
 
 /** A module mapping one tensor to one tensor. */
 export interface TensorModule extends Module {
@@ -519,5 +519,97 @@ export class GroupNorm extends Module implements TensorModule {
 
   forward(input: Tensor): Tensor {
     return groupNormOp(input, this.numGroups, this.weight, this.bias, this.eps);
+  }
+}
+
+/** ``torch.nn.modules.linear.NonDynamicallyQuantizableLinear`` (the attention output projection). */
+export class NonDynamicallyQuantizableLinear extends Linear {
+  static override readonly qualifiedName: string = 'torch.nn.modules.linear.NonDynamicallyQuantizableLinear';
+}
+
+/**
+ * ``torch.nn.MultiheadAttention`` with a packed input projection
+ * (``in_proj_weight``/``in_proj_bias``) and the ``out_proj`` output layer.
+ * ``forward`` returns ``[output, weights]``; weights are averaged over heads
+ * (``need_weights=True``) or ``null``.
+ */
+export class MultiheadAttention extends Module {
+  static override readonly qualifiedName: string = 'torch.nn.modules.activation.MultiheadAttention';
+  readonly embedDim: number;
+  readonly numHeads: number;
+  readonly headDim: number;
+  readonly dropout: number;
+  readonly batchFirst: boolean;
+  in_proj_weight: Parameter;
+  in_proj_bias: Parameter | null;
+  readonly out_proj: NonDynamicallyQuantizableLinear;
+
+  override configurationAttributes(): Record<string, unknown> {
+    return {
+      embed_dim: this.embedDim, kdim: this.embedDim, vdim: this.embedDim, num_heads: this.numHeads, dropout: this.dropout,
+      batch_first: this.batchFirst, head_dim: this.headDim, bias_k: null, bias_v: null, add_zero_attn: false,
+    };
+  }
+
+  constructor(embedDim: number, numHeads: number, options: { bias?: boolean; batchFirst?: boolean; dropout?: number } = {}) {
+    super();
+    positiveInteger(embedDim, 'embedDim');
+    positiveInteger(numHeads, 'numHeads');
+    if (embedDim % numHeads !== 0) throw new RangeError('embed_dim must be divisible by num_heads');
+    this.embedDim = embedDim;
+    this.numHeads = numHeads;
+    this.headDim = embedDim / numHeads;
+    this.dropout = options.dropout ?? 0;
+    this.batchFirst = options.batchFirst ?? false;
+    const bias = options.bias !== false;
+    this.in_proj_weight = this.registerParameter('in_proj_weight', new Parameter(empty([3 * embedDim, embedDim])));
+    this.in_proj_bias = this.registerParameter('in_proj_bias', bias ? new Parameter(zeros([3 * embedDim])) : null);
+    this.out_proj = this.registerModule('out_proj', new NonDynamicallyQuantizableLinear(embedDim, embedDim, { bias }));
+    init.xavierUniform_(this.in_proj_weight);
+    if (this.out_proj.bias) init.zeros_(this.out_proj.bias);
+  }
+
+  protected override onRegistryChange(): void {
+    this.in_proj_weight = (this.getParameter('in_proj_weight') ?? this.in_proj_weight) as Parameter;
+    this.in_proj_bias = this.getParameter('in_proj_bias');
+  }
+
+  /**
+   * ``query``/``key``/``value`` are ``[batch, length, embed]`` when
+   * ``batchFirst`` (else ``[length, batch, embed]``). ``keyPaddingMask``
+   * (``[batch, keys]``, true = ignore) is optional.
+   */
+  forward(query: Tensor, key: Tensor, value: Tensor, options: { keyPaddingMask?: Tensor | null; needWeights?: boolean } = {}): [Tensor, Tensor | null] {
+    const q0 = this.batchFirst ? query : query.transpose(0, 1);
+    const k0 = this.batchFirst ? key : key.transpose(0, 1);
+    const v0 = this.batchFirst ? value : value.transpose(0, 1);
+    const e = this.embedDim;
+    const part = (index: number): [Tensor, Tensor | null] => [
+      this.in_proj_weight.slice(0, index * e, (index + 1) * e),
+      this.in_proj_bias ? this.in_proj_bias.slice(0, index * e, (index + 1) * e) : null,
+    ];
+    const [wq, bq] = part(0);
+    const [wk, bk] = part(1);
+    const [wv, bv] = part(2);
+    const split = (x: Tensor): Tensor => {
+      const [batch, length] = x.shape as [number, number];
+      return x.reshape(batch, length, this.numHeads, this.headDim).transpose(1, 2);
+    };
+    const q = split(linearOp(q0, wq, bq));
+    const k = split(linearOp(k0, wk, bk));
+    const v = split(linearOp(v0, wv, bv));
+    let bias: Tensor | null = null;
+    const mask = options.keyPaddingMask;
+    if (mask) {
+      const [batch, keys] = mask.shape as [number, number];
+      const values = new Float32Array(batch * keys);
+      for (let index = 0; index < values.length; index += 1) values[index] = mask.data[index] ? -Infinity : 0;
+      bias = tensorOf(values, { shape: [batch, 1, 1, keys] });
+    }
+    const { output, weights } = scaledDotProductAttentionOp(q, k, v, { bias, dropout: this.dropout, training: this.training });
+    const [batch, , length] = output.shape as [number, number, number];
+    let result = this.out_proj.forward(output.transpose(1, 2).reshape(batch, length, e));
+    if (!this.batchFirst) result = result.transpose(0, 1);
+    return [result, options.needWeights === false ? null : weights.mean(1)];
   }
 }
