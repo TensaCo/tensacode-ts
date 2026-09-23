@@ -6,6 +6,7 @@ import {
 import { Tensor, attachGrad, fromStorage, aliasWithShape } from '../tensor.js';
 import { extents, sumToShape } from './reduce.js';
 import { cast } from './elementwise.js';
+import { swapAxes } from '../backend/kernels.js';
 
 // ------------------------------------------------------------------ views
 
@@ -52,12 +53,32 @@ export function permute(x: Tensor, dims: readonly number[]): Tensor {
   const inStrides = stridesOf(x.shape);
   const strides = order.map((dim) => inStrides[dim]!);
   const size = x.numel;
-  const out = allocate(x.dtype, size);
   const source = x.data;
   const ndim = shape.length;
+  const swapped = source instanceof Float32Array ? adjacentSwap(order) : -1;
+  if (swapped >= 0) {
+    const extent = (from: number, to: number) => x.shape.slice(from, to).reduce((product, value) => product * value, 1);
+    const fast = swapAxes(source as Float32Array, extent(0, swapped), x.shape[swapped]!, x.shape[swapped + 1]!, extent(swapped + 2, ndim));
+    if (fast) return permuteResult(x, fast, shape, order);
+  }
+  const out = allocate(x.dtype, size);
   const counter = new Array<number>(ndim).fill(0);
   let position = 0;
-  for (let flat = 0; flat < size; flat += 1) {
+  if (order[ndim - 1] === ndim - 1 && size > 0) {
+    // The last axis stays last: copy contiguous rows (for example head splits).
+    const inner = shape[ndim - 1]!;
+    for (let flat = 0; flat < size; flat += inner) {
+      for (let index = 0; index < inner; index += 1) out[flat + index] = source[position + index]!;
+      for (let dim = ndim - 2; dim >= 0; dim -= 1) {
+        counter[dim]! += 1;
+        position += strides[dim]!;
+        if (counter[dim]! < shape[dim]!) break;
+        position -= strides[dim]! * counter[dim]!;
+        counter[dim] = 0;
+      }
+    }
+  }
+  for (let flat = order[ndim - 1] === ndim - 1 ? size : 0; flat < size; flat += 1) {
     out[flat] = source[position]!;
     for (let dim = ndim - 1; dim >= 0; dim -= 1) {
       counter[dim]! += 1;
@@ -67,12 +88,28 @@ export function permute(x: Tensor, dims: readonly number[]): Tensor {
       counter[dim] = 0;
     }
   }
-  const inverse = new Array<number>(ndim);
+  return permuteResult(x, out, shape, order);
+}
+
+function permuteResult(x: Tensor, out: Storage, shape: number[], order: number[]): Tensor {
+  const inverse = new Array<number>(order.length);
   order.forEach((dim, index) => {
     inverse[dim] = index;
   });
   const result = fromStorage(out, shape, x.dtype);
   return attachGrad(result, [x], (grad) => [permute(grad, inverse)], 'permute');
+}
+
+/** ``i`` when ``order`` only swaps axes ``i`` and ``i + 1``, else -1. */
+function adjacentSwap(order: readonly number[]): number {
+  let found = -1;
+  for (let index = 0; index < order.length; index += 1) {
+    if (order[index] === index) continue;
+    if (found >= 0 || order[index] !== index + 1 || order[index + 1] !== index) return -1;
+    found = index;
+    index += 1;
+  }
+  return found;
 }
 
 export function transpose(x: Tensor, dim0: number, dim1: number): Tensor {
@@ -81,6 +118,44 @@ export function transpose(x: Tensor, dim0: number, dim1: number): Tensor {
   const b = normalizeDim(dim1, x.ndim);
   [order[a], order[b]] = [order[b]!, order[a]!];
   return permute(x, order);
+}
+
+/**
+ * Copy ``source`` (shape ``shape``) broadcast to ``target`` into ``out``,
+ * copying the longest trailing block that is not broadcast as one run.
+ */
+function expandInto(source: Storage, shape: readonly number[], target: readonly number[], out: Storage): void {
+  const ndim = target.length;
+  const offset = ndim - shape.length;
+  const inputSize = (axis: number): number => (axis >= offset ? shape[axis - offset]! : 1);
+  let split = ndim;
+  let run = 1;
+  while (split > 0 && inputSize(split - 1) === target[split - 1]) {
+    split -= 1;
+    run *= target[split]!;
+  }
+  const strides = new Array<number>(split).fill(0);
+  let stride = run;
+  for (let axis = split - 1; axis >= 0; axis -= 1) {
+    const size = inputSize(axis);
+    strides[axis] = size === 1 ? 0 : stride;
+    stride *= size;
+  }
+  const size = out.length;
+  if (size === 0) return;
+  const counter = new Array<number>(split).fill(0);
+  let position = 0;
+  for (let flat = 0; flat < size; flat += run) {
+    if (run === 1) out[flat] = source[position]!;
+    else out.set(source.subarray(position, position + run), flat);
+    for (let axis = split - 1; axis >= 0; axis -= 1) {
+      counter[axis]! += 1;
+      position += strides[axis]!;
+      if (counter[axis]! < target[axis]!) break;
+      position -= strides[axis]! * counter[axis]!;
+      counter[axis] = 0;
+    }
+  }
 }
 
 /** Materialize ``x`` broadcast to ``shape`` (``-1`` keeps a dimension). */
@@ -99,10 +174,8 @@ export function expand(x: Tensor, shape: readonly number[]): Tensor {
     return size;
   });
   if (shapesEqual(target, x.shape)) return x;
-  const map = broadcastIndexMap(target, x.shape);
-  const out = allocate(x.dtype, map.length);
-  const source = x.data;
-  for (let index = 0; index < map.length; index += 1) out[index] = source[map[index]!]!;
+  const out = allocate(x.dtype, numelOf(target));
+  expandInto(x.data, x.shape, target, out);
   const result = fromStorage(out, target, x.dtype);
   return attachGrad(result, [x], (grad) => [sumToShape(grad, x.shape)], 'expand');
 }

@@ -5,8 +5,20 @@ import {
 import { broadcastIndexMap, broadcastShapes, numelOf, shapesEqual, type Shape } from '../shape.js';
 import { Tensor, attachGrad, fromStorage, type Operand } from '../tensor.js';
 import { sumToShape } from './reduce.js';
+import { binary, unary, UnaryOp, type BinaryOp } from '../backend/kernels.js';
 
 // ------------------------------------------------------------------ helpers
+
+/**
+ * Round float16/bfloat16 results held in float32 storage to their dtype, as
+ * PyTorch's CPU kernels do after computing in float32 (other dtypes unchanged).
+ */
+export function roundHalf<T extends Storage>(dtype: DType, data: T): T {
+  if (dtype === 'float16' || dtype === 'bfloat16') {
+    for (let index = 0; index < data.length; index += 1) data[index] = roundToDType(dtype, data[index]!);
+  }
+  return data;
+}
 
 function roundStorage(dtype: DType, data: Storage): Storage {
   if (dtype === 'float16' || dtype === 'bfloat16') {
@@ -30,6 +42,52 @@ function floatUnary(x: Tensor, fn: (value: number) => number): Tensor {
   return mapUnary(x, fn, dtype);
 }
 
+/**
+ * Broadcast walk over ``shape``: calls ``row(offsetA, offsetB, offsetOut,
+ * length, strideA, strideB)`` for every run along the last dimension, where the
+ * strides are 1 (or 0 for a broadcast operand).
+ */
+function broadcastRows(
+  a: Tensor, b: Tensor, shape: Shape,
+  row: (offsetA: number, offsetB: number, offsetOut: number, length: number, strideA: number, strideB: number) => void,
+): void {
+  const size = numelOf(shape);
+  if (size === 0) return;
+  const ndim = shape.length;
+  if (ndim === 0) {
+    row(0, 0, 0, 1, 0, 0);
+    return;
+  }
+  const effective = (input: readonly number[]): number[] => {
+    const strides = new Array<number>(ndim).fill(0);
+    let stride = 1;
+    for (let axis = input.length - 1; axis >= 0; axis -= 1) {
+      const target = ndim - input.length + axis;
+      strides[target] = input[axis] === 1 && shape[target] !== 1 ? 0 : stride;
+      stride *= input[axis]!;
+    }
+    return strides;
+  };
+  const sa = effective(a.shape);
+  const sb = effective(b.shape);
+  const inner = shape[ndim - 1]!;
+  const counter = new Array<number>(ndim).fill(0);
+  let pa = 0;
+  let pb = 0;
+  for (let out = 0; out < size; out += inner) {
+    row(pa, pb, out, inner, sa[ndim - 1]!, sb[ndim - 1]!);
+    for (let axis = ndim - 2; axis >= 0; axis -= 1) {
+      counter[axis]! += 1;
+      pa += sa[axis]!;
+      pb += sb[axis]!;
+      if (counter[axis]! < shape[axis]!) break;
+      pa -= sa[axis]! * counter[axis]!;
+      pb -= sb[axis]! * counter[axis]!;
+      counter[axis] = 0;
+    }
+  }
+}
+
 /** Broadcast ``a`` and ``b`` and apply ``fn`` elementwise into ``dtype``. */
 export function mapBinary(a: Tensor, b: Tensor, fn: (x: number, y: number) => number, dtype: DType): Tensor {
   const ad = a.data;
@@ -40,21 +98,37 @@ export function mapBinary(a: Tensor, b: Tensor, fn: (x: number, y: number) => nu
     return fromStorage(roundStorage(dtype, out), a.shape, dtype);
   }
   const shape = broadcastShapes(a.shape, b.shape);
-  const size = numelOf(shape);
-  const out = allocate(dtype, size);
-  if (b.numel === 1 && shapesEqual(shape, a.shape)) {
-    const y = bd[0]!;
-    for (let index = 0; index < size; index += 1) out[index] = fn(ad[index]!, y);
-  } else if (a.numel === 1 && shapesEqual(shape, b.shape)) {
-    const x = ad[0]!;
-    for (let index = 0; index < size; index += 1) out[index] = fn(x, bd[index]!);
-  } else {
-    const ia = shapesEqual(shape, a.shape) ? null : broadcastIndexMap(shape, a.shape);
-    const ib = shapesEqual(shape, b.shape) ? null : broadcastIndexMap(shape, b.shape);
-    for (let index = 0; index < size; index += 1) {
-      out[index] = fn(ad[ia ? ia[index]! : index]!, bd[ib ? ib[index]! : index]!);
-    }
+  const out = allocate(dtype, numelOf(shape));
+  broadcastRows(a, b, shape, (pa, pb, po, length, sa, sb) => {
+    for (let index = 0; index < length; index += 1) out[po + index] = fn(ad[pa + index * sa]!, bd[pb + index * sb]!);
+  });
+  return fromStorage(roundStorage(dtype, out), shape, dtype);
+}
+
+const enum Arith { Add, Sub, Mul, Div }
+
+/** ``+ - * /`` with broadcasting, without a per-element callback. */
+function arith(a: Tensor, b: Tensor, op: Arith, dtype: DType): Tensor {
+  const ad = a.data;
+  const bd = b.data;
+  const shape = shapesEqual(a.shape, b.shape) ? a.shape : broadcastShapes(a.shape, b.shape);
+  if (dtype === 'float32' && ad instanceof Float32Array && bd instanceof Float32Array && ad.length === numelOf(shape)
+    && (bd.length === ad.length || bd.length === 1)) {
+    // Same-shape or scalar float32 arithmetic on the kernels (one IEEE float32 operation: identical results).
+    const fast = binary(op as number as BinaryOp, ad, bd);
+    if (fast) return fromStorage(fast, shape, dtype);
   }
+  const out = allocate(dtype, numelOf(shape));
+  const run = (pa: number, pb: number, po: number, length: number, sa: number, sb: number): void => {
+    switch (op) {
+      case Arith.Add: for (let index = 0; index < length; index += 1) out[po + index] = ad[pa + index * sa]! + bd[pb + index * sb]!; break;
+      case Arith.Sub: for (let index = 0; index < length; index += 1) out[po + index] = ad[pa + index * sa]! - bd[pb + index * sb]!; break;
+      case Arith.Mul: for (let index = 0; index < length; index += 1) out[po + index] = ad[pa + index * sa]! * bd[pb + index * sb]!; break;
+      case Arith.Div: for (let index = 0; index < length; index += 1) out[po + index] = ad[pa + index * sa]! / bd[pb + index * sb]!; break;
+    }
+  };
+  if (shape === a.shape) run(0, 0, 0, out.length, 1, 1);
+  else broadcastRows(a, b, shape, run);
   return fromStorage(roundStorage(dtype, out), shape, dtype);
 }
 
@@ -108,19 +182,19 @@ export function cast(x: Tensor, dtype: DType): Tensor {
 
 export function add(a: Operand, b: Operand): Tensor {
   const [x, y, dtype] = operands(a, b);
-  const result = mapBinary(x, y, (p, q) => p + q, dtype);
+  const result = arith(x, y, Arith.Add, dtype);
   return attachGrad(result, [x, y], (grad) => [reduceGrad(grad, x), reduceGrad(grad, y)], 'add');
 }
 
 export function sub(a: Operand, b: Operand): Tensor {
   const [x, y, dtype] = operands(a, b);
-  const result = mapBinary(x, y, (p, q) => p - q, dtype);
+  const result = arith(x, y, Arith.Sub, dtype);
   return attachGrad(result, [x, y], (grad) => [reduceGrad(grad, x), reduceGrad(neg(grad), y)], 'sub');
 }
 
 export function mul(a: Operand, b: Operand): Tensor {
   const [x, y, dtype] = operands(a, b);
-  const result = mapBinary(x, y, (p, q) => p * q, dtype);
+  const result = arith(x, y, Arith.Mul, dtype);
   return attachGrad(result, [x, y], (grad) => [
     x.requiresGrad ? reduceGrad(mul(grad, y), x) : null,
     y.requiresGrad ? reduceGrad(mul(grad, x), y) : null,
@@ -134,7 +208,7 @@ export function div(a: Operand, b: Operand): Tensor {
     x = cast(x, dtype);
     y = cast(y, dtype);
   }
-  const result = mapBinary(x, y, (p, q) => p / q, dtype);
+  const result = arith(x, y, Arith.Div, dtype);
   return attachGrad(result, [x, y], (grad) => [
     x.requiresGrad ? reduceGrad(div(grad, y), x) : null,
     y.requiresGrad ? reduceGrad(neg(div(mul(grad, x), mul(y, y))), y) : null,
@@ -163,7 +237,7 @@ export function neg(x: Tensor): Tensor {
 }
 
 export function exp(x: Tensor): Tensor {
-  const result = floatUnary(x, Math.exp);
+  const result = kernelUnary(x, UnaryOp.Exp) ?? floatUnary(x, Math.exp);
   return attachGrad(result, [x], (grad) => [mul(grad, result)], 'exp');
 }
 
@@ -207,7 +281,7 @@ export function reciprocal(x: Tensor): Tensor {
 }
 
 export function tanh(x: Tensor): Tensor {
-  const result = floatUnary(x, Math.tanh);
+  const result = kernelUnary(x, UnaryOp.Tanh) ?? floatUnary(x, Math.tanh);
   return attachGrad(result, [x], (grad) => [mul(grad, mapUnary(result, (value) => 1 - value * value))], 'tanh');
 }
 
@@ -217,8 +291,15 @@ function sigmoidValue(value: number): number {
   return e / (1 + e);
 }
 
+/** Float32 ``op`` on the WebAssembly kernels (bit-identical to the JavaScript formula), or ``null``. */
+function kernelUnary(x: Tensor, op: UnaryOp): Tensor | null {
+  if (x.dtype !== 'float32' || !(x.data instanceof Float32Array) || x.numel < 4096) return null;
+  const out = unary(op, x.data);
+  return out ? fromStorage(out, x.shape, 'float32') : null;
+}
+
 export function sigmoid(x: Tensor): Tensor {
-  const result = floatUnary(x, sigmoidValue);
+  const result = kernelUnary(x, UnaryOp.Sigmoid) ?? floatUnary(x, sigmoidValue);
   return attachGrad(result, [x], (grad) => [mul(grad, mapUnary(result, (value) => value * (1 - value)))], 'sigmoid');
 }
 

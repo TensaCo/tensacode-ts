@@ -251,8 +251,10 @@ export class Adam extends Optimizer {
           if (!param.grad) continue;
           let grad = param.grad;
           if (group.maximize) grad = grad.neg();
+          const fusable = !group.amsgrad && param.dtype === 'float32' && grad.dtype === 'float32'
+            && (group.decoupled_weight_decay || weightDecay === 0);
           if (group.decoupled_weight_decay) {
-            if (weightDecay !== 0) param.mul_(1 - lr * weightDecay);
+            if (weightDecay !== 0 && !fusable) param.mul_(1 - lr * weightDecay);
           } else if (weightDecay !== 0) {
             grad = grad.add(param.detach().mul(weightDecay));
           }
@@ -268,6 +270,9 @@ export class Adam extends Optimizer {
           const step = stepTensor.item();
           const expAvg = slots.exp_avg!;
           const expAvgSq = slots.exp_avg_sq!;
+          if (fusable && fusedAdamUpdate(param, grad, expAvg, expAvgSq, {
+            lr, beta1, beta2, eps, step, decay: group.decoupled_weight_decay && weightDecay !== 0 ? 1 - lr * weightDecay : null,
+          })) continue;
           expAvg.mul_(beta1).add_(grad, 1 - beta1);
           expAvgSq.mul_(beta2).addcmul_(grad, grad, 1 - beta2);
           const biasCorrection1 = 1 - beta1 ** step;
@@ -288,6 +293,47 @@ export class Adam extends Optimizer {
       }
     });
   }
+}
+
+/**
+ * One Adam(W) update of a float32 parameter in a single pass, performing
+ * exactly the float64 operations and float32 roundings of the chained in-place
+ * ops (``mul_``, ``add_``, ``addcmul_``, ``sqrt().div().add()``, ``addcdiv_``),
+ * so results are bit-identical without temporaries. Returns ``false`` when
+ * the storages are not all float32.
+ */
+function fusedAdamUpdate(
+  param: Tensor, grad: Tensor, expAvg: Tensor, expAvgSq: Tensor,
+  options: { lr: number; beta1: number; beta2: number; eps: number; step: number; decay: number | null },
+): boolean {
+  const p = param.data;
+  const g = grad.data;
+  const m = expAvg.data;
+  const v = expAvgSq.data;
+  if (!(p instanceof Float32Array) || !(g instanceof Float32Array) || !(m instanceof Float32Array) || !(v instanceof Float32Array)) return false;
+  if (g.length !== p.length || m.length !== p.length || v.length !== p.length) return false;
+  const { lr, beta1, beta2, eps, step, decay } = options;
+  const keep1 = 1 - beta1;
+  const keep2 = 1 - beta2;
+  // Tensor-scalar arithmetic stores the scalar operand in the tensor's float32 dtype.
+  const correction = Math.fround(Math.sqrt(1 - beta2 ** step));
+  const epsilon = Math.fround(eps);
+  const scale = -(lr / (1 - beta1 ** step));
+  const f32 = Math.fround;
+  for (let index = 0; index < p.length; index += 1) {
+    const gradient = g[index]!;
+    const first = f32(f32(m[index]! * beta1) + keep1 * gradient);
+    const second = f32(f32(v[index]! * beta2) + keep2 * gradient * gradient);
+    m[index] = first;
+    v[index] = second;
+    const denominator = f32(f32(f32(Math.sqrt(second)) / correction) + epsilon);
+    const current = decay === null ? p[index]! : f32(p[index]! * decay);
+    p[index] = current + scale * first / denominator;
+  }
+  param._storage.version += decay === null ? 1 : 2;
+  expAvg._storage.version += 2;
+  expAvgSq._storage.version += 2;
+  return true;
 }
 
 export class AdamW extends Adam {

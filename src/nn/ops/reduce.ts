@@ -3,7 +3,8 @@ import { allocate, isFloatingDType, type DType } from '../dtype.js';
 import { normalizeDim, normalizeDims, numelOf, shapesEqual, type Shape } from '../shape.js';
 import { Tensor, attachGrad, fromStorage, aliasWithShape } from '../tensor.js';
 import { expand } from './shape.js';
-import { div, mul, sub, exp, mapBinary, sqrt } from './elementwise.js';
+import { div, mul, sub, exp, mapBinary, sqrt, roundHalf } from './elementwise.js';
+import { softmaxRows } from '../backend/kernels.js';
 
 /** Split a shape around ``dim`` into outer, size and inner extents. */
 export function extents(shape: Shape, dim: number): [number, number, number] {
@@ -201,8 +202,9 @@ export function softmax(x: Tensor, dim: number): Tensor {
   const dtype = isFloatingDType(x.dtype) ? x.dtype : 'float32';
   const [outer, size, inner] = extents(x.shape, d);
   const data = x.data;
-  const out = allocate(dtype, x.numel);
-  for (let o = 0; o < outer; o += 1) {
+  const fast = dtype === 'float32' && inner === 1 && data instanceof Float32Array ? softmaxRows(data, outer, size) : null;
+  const out = fast ?? allocate(dtype, x.numel);
+  for (let o = 0; o < (fast ? 0 : outer); o += 1) {
     for (let i = 0; i < inner; i += 1) {
       const base = o * size * inner + i;
       let maximum = Number.NEGATIVE_INFINITY;
@@ -220,7 +222,7 @@ export function softmax(x: Tensor, dim: number): Tensor {
       for (let k = 0; k < size; k += 1) out[base + k * inner] = Math.exp(data[base + k * inner]! - maximum) / total;
     }
   }
-  const result = fromStorage(out, x.shape, dtype);
+  const result = fromStorage(roundHalf(dtype, out), x.shape, dtype);
   return attachGrad(result, [x], (grad) => {
     const g = grad.data;
     const y = result.data;
@@ -236,7 +238,7 @@ export function softmax(x: Tensor, dim: number): Tensor {
         }
       }
     }
-    return [fromStorage(gradIn, x.shape, grad.dtype)];
+    return [fromStorage(roundHalf(grad.dtype, gradIn), x.shape, grad.dtype)];
   }, 'softmax');
 }
 
@@ -260,7 +262,7 @@ export function logSoftmax(x: Tensor, dim: number): Tensor {
       for (let k = 0; k < size; k += 1) out[base + k * inner] = data[base + k * inner]! - logTotal;
     }
   }
-  const result = fromStorage(out, x.shape, dtype);
+  const result = fromStorage(roundHalf(dtype, out), x.shape, dtype);
   return attachGrad(result, [x], (grad) => {
     const g = grad.data;
     const y = result.data;
@@ -276,7 +278,7 @@ export function logSoftmax(x: Tensor, dim: number): Tensor {
         }
       }
     }
-    return [fromStorage(gradIn, x.shape, grad.dtype)];
+    return [fromStorage(roundHalf(grad.dtype, gradIn), x.shape, grad.dtype)];
   }, 'logSoftmax');
 }
 

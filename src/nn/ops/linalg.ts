@@ -1,10 +1,73 @@
-/** Matrix products. */
-import { allocate, isFloatingDType, promoteTypes, type DType } from '../dtype.js';
+/**
+ * Matrix products.
+ *
+ * Float32 products run on the WebAssembly SIMD kernels (``../backend``), with
+ * worker threads for large ones; float64 products, and every product where
+ * WebAssembly is unavailable, use the JavaScript kernels below (float64
+ * accumulation).
+ */
+import { allocate, isFloatingDType, promoteTypes, usesFloat32Storage, type DType, type Storage } from '../dtype.js';
 import { broadcastShapes, formatShape, numelOf, stridesOf } from '../shape.js';
 import { Tensor, attachGrad, fromStorage, aliasWithShape } from '../tensor.js';
 import { sumToShape } from './reduce.js';
 import { transpose } from './shape.js';
-import { cast } from './elementwise.js';
+import { cast, roundHalf } from './elementwise.js';
+import * as wasm from '../backend/kernels.js';
+
+/**
+ * ``op(a) @ op(b)`` with broadcast batch dimensions, where ``op`` transposes
+ * the last two dimensions when requested.
+ */
+function product(a: Tensor, b: Tensor, dtype: DType, transA: boolean, transB: boolean): Tensor {
+  const result = wasmProduct(a, b, dtype, transA, transB)
+    ?? batchedMatmul(transA ? transpose(a, -2, -1) : a, transB ? transpose(b, -2, -1) : b, dtype);
+  roundHalf(dtype, result.data);
+  return result;
+}
+
+function wasmProduct(a: Tensor, b: Tensor, dtype: DType, transA: boolean, transB: boolean): Tensor | null {
+  if (!usesFloat32Storage(dtype) || !(a.data instanceof Float32Array) || !(b.data instanceof Float32Array)) return null;
+  const rowsA = a.shape[a.ndim - 2]!;
+  const colsA = a.shape[a.ndim - 1]!;
+  const rowsB = b.shape[b.ndim - 2]!;
+  const colsB = b.shape[b.ndim - 1]!;
+  const n = transA ? colsA : rowsA;
+  const k = transA ? rowsA : colsA;
+  const m = transB ? rowsB : colsB;
+  if ((transB ? colsB : rowsB) !== k) {
+    throw new RangeError(`matmul shape mismatch: ${formatShape(a.shape)} @ ${formatShape(b.shape)}`);
+  }
+  const batchA = a.shape.slice(0, -2);
+  const batchB = b.shape.slice(0, -2);
+  const batch = broadcastShapes(batchA, batchB);
+  const count = numelOf(batch);
+  const indexA = new Int32Array(count);
+  const indexB = new Int32Array(count);
+  const aStrides = batchStrides(batch, batchA);
+  const bStrides = batchStrides(batch, batchB);
+  const counter = new Array<number>(batch.length).fill(0);
+  for (let flat = 0; flat < count; flat += 1) {
+    let aIndex = 0;
+    let bIndex = 0;
+    for (let axis = 0; axis < batch.length; axis += 1) {
+      aIndex += counter[axis]! * aStrides[axis]!;
+      bIndex += counter[axis]! * bStrides[axis]!;
+    }
+    indexA[flat] = aIndex;
+    indexB[flat] = bIndex;
+    for (let axis = batch.length - 1; axis >= 0; axis -= 1) {
+      counter[axis]! += 1;
+      if (counter[axis]! < batch[axis]!) break;
+      counter[axis] = 0;
+    }
+  }
+  const out = wasm.batchedMatmul(
+    { data: a.data, count: numelOf(batchA), rows: rowsA, cols: colsA, transposed: transA, index: indexA },
+    { data: b.data, count: numelOf(batchB), rows: rowsB, cols: colsB, transposed: transB, index: indexB },
+    count,
+  );
+  return out ? fromStorage(out, [...batch, n, m], dtype) : null;
+}
 
 /**
  * Batched ``[..., n, k] @ [..., k, m]`` with broadcast batch dimensions. Each
@@ -111,15 +174,15 @@ export function matmul(a: Tensor, b: Tensor): Tensor {
   const y = cast(b, dtype);
   const left = x.ndim === 1 ? aliasWithShape(x, [1, x.shape[0]!]) : x;
   const right = y.ndim === 1 ? aliasWithShape(y, [y.shape[0]!, 1]) : y;
-  const product = batchedMatmul(left, right, dtype);
-  let shape = [...product.shape];
+  const result0 = product(left, right, dtype, false, false);
+  let shape = [...result0.shape];
   if (x.ndim === 1) shape.splice(shape.length - 2, 1);
   if (y.ndim === 1) shape = shape.slice(0, -1);
-  const result = aliasWithShape(product, shape);
+  const result = aliasWithShape(result0, shape);
   return attachGrad(result, [x, y], (grad) => {
-    const g = aliasWithShape(grad, product.shape);
-    const gradLeft = x.requiresGrad ? sumToShape(batchedMatmul(g, transpose(right, -2, -1), g.dtype), left.shape) : null;
-    const gradRight = y.requiresGrad ? sumToShape(batchedMatmul(transpose(left, -2, -1), g, g.dtype), right.shape) : null;
+    const g = aliasWithShape(grad, result0.shape);
+    const gradLeft = x.requiresGrad ? sumToShape(product(g, right, g.dtype, false, true), left.shape) : null;
+    const gradRight = y.requiresGrad ? sumToShape(product(left, g, g.dtype, true, false), right.shape) : null;
     return [
       gradLeft ? aliasWithShape(gradLeft, x.shape) : null,
       gradRight ? aliasWithShape(gradRight, y.shape) : null,
@@ -142,10 +205,48 @@ export function linear(x: Tensor, weight: Tensor, bias: Tensor | null = null): T
   if (!isFloatingDType(dtype)) dtype = 'float32';
   const input = cast(x, dtype);
   const rows = input.numel / inFeatures;
-  const out = allocate(dtype, rows * outFeatures);
   const xd = input.data;
   const wd = weight.data;
   const bd = bias ? bias.data : null;
+  const float32 = usesFloat32Storage(dtype) && xd instanceof Float32Array && wd instanceof Float32Array
+    && (bd === null || bd instanceof Float32Array);
+  const fast = float32
+    ? wasm.linearForward(xd, rows, inFeatures, { data: wd, key: weight._storage, version: weight._storage.version }, outFeatures, bd as Float32Array | null)
+    : null;
+  const out = roundHalf(dtype, fast ?? linearKernel(xd, wd, bd, rows, inFeatures, outFeatures, dtype));
+  const result = fromStorage(out, [...x.shape.slice(0, -1), outFeatures], dtype);
+  return attachGrad(result, [input, weight, bias], (grad) => {
+    const g = grad.data;
+    const float32Grad = float32 && g instanceof Float32Array;
+    let gradInput: Tensor | null = null;
+    let gradWeight: Tensor | null = null;
+    let gradBias: Tensor | null = null;
+    if (input.requiresGrad) {
+      const gi = float32Grad ? wasm.linearBackwardInput(g, rows, outFeatures, wd as Float32Array, inFeatures) : null;
+      gradInput = fromStorage(roundHalf(grad.dtype, gi ?? linearGradInput(g, wd, rows, inFeatures, outFeatures, grad.dtype)), input.shape, grad.dtype);
+    }
+    if (weight.requiresGrad) {
+      const gw = float32Grad && usesFloat32Storage(weight.dtype)
+        ? wasm.linearBackwardWeight(g, rows, outFeatures, xd as Float32Array, inFeatures)
+        : null;
+      gradWeight = fromStorage(roundHalf(weight.dtype, gw ?? linearGradWeight(g, xd, rows, inFeatures, outFeatures, weight.dtype)), weight.shape, weight.dtype);
+    }
+    if (bias && bias.requiresGrad) {
+      const accumulator = new Float64Array(outFeatures);
+      for (let r = 0; r < rows; r += 1) for (let o = 0; o < outFeatures; o += 1) accumulator[o]! += g[r * outFeatures + o]!;
+      const gb = allocate(bias.dtype, outFeatures);
+      gb.set(accumulator);
+      gradBias = fromStorage(roundHalf(bias.dtype, gb), bias.shape, bias.dtype);
+    }
+    return [gradInput, gradWeight, gradBias];
+  }, 'linear');
+}
+
+/** JavaScript ``linear`` kernel (float64 accumulation). */
+function linearKernel(
+  xd: Storage, wd: Storage, bd: Storage | null, rows: number, inFeatures: number, outFeatures: number, dtype: DType,
+): Storage {
+  const out = allocate(dtype, rows * outFeatures);
   // Register-blocked over two rows and four outputs; every output still
   // accumulates in float64 in ascending input order (results are unchanged).
   let r = 0;
@@ -204,49 +305,37 @@ export function linear(x: Tensor, weight: Tensor, bias: Tensor | null = null): T
       out[outBase + o] = acc;
     }
   }
-  const result = fromStorage(out, [...x.shape.slice(0, -1), outFeatures], dtype);
-  return attachGrad(result, [input, weight, bias], (grad) => {
-    const g = grad.data;
-    let gradInput: Tensor | null = null;
-    let gradWeight: Tensor | null = null;
-    let gradBias: Tensor | null = null;
-    if (input.requiresGrad) {
-      const gi = allocate(grad.dtype, input.numel);
-      const row = new Float64Array(inFeatures);
-      for (let r = 0; r < rows; r += 1) {
-        row.fill(0);
-        for (let o = 0; o < outFeatures; o += 1) {
-          const value = g[r * outFeatures + o]!;
-          if (value === 0) continue;
-          const wBase = o * inFeatures;
-          for (let i = 0; i < inFeatures; i += 1) row[i]! += value * wd[wBase + i]!;
-        }
-        gi.set(row, r * inFeatures);
-      }
-      gradInput = fromStorage(gi, input.shape, grad.dtype);
+  return out;
+}
+
+function linearGradInput(g: Storage, wd: Storage, rows: number, inFeatures: number, outFeatures: number, dtype: DType): Storage {
+  const gi = allocate(dtype, rows * inFeatures);
+  const row = new Float64Array(inFeatures);
+  for (let r = 0; r < rows; r += 1) {
+    row.fill(0);
+    for (let o = 0; o < outFeatures; o += 1) {
+      const value = g[r * outFeatures + o]!;
+      if (value === 0) continue;
+      const wBase = o * inFeatures;
+      for (let i = 0; i < inFeatures; i += 1) row[i]! += value * wd[wBase + i]!;
     }
-    if (weight.requiresGrad) {
-      const accumulator = new Float64Array(outFeatures * inFeatures);
-      for (let r = 0; r < rows; r += 1) {
-        const xBase = r * inFeatures;
-        for (let o = 0; o < outFeatures; o += 1) {
-          const value = g[r * outFeatures + o]!;
-          if (value === 0) continue;
-          const wBase = o * inFeatures;
-          for (let i = 0; i < inFeatures; i += 1) accumulator[wBase + i]! += value * xd[xBase + i]!;
-        }
-      }
-      const gw = allocate(weight.dtype, accumulator.length);
-      gw.set(accumulator);
-      gradWeight = fromStorage(gw, weight.shape, weight.dtype);
+    gi.set(row, r * inFeatures);
+  }
+  return gi;
+}
+
+function linearGradWeight(g: Storage, xd: Storage, rows: number, inFeatures: number, outFeatures: number, dtype: DType): Storage {
+  const accumulator = new Float64Array(outFeatures * inFeatures);
+  for (let r = 0; r < rows; r += 1) {
+    const xBase = r * inFeatures;
+    for (let o = 0; o < outFeatures; o += 1) {
+      const value = g[r * outFeatures + o]!;
+      if (value === 0) continue;
+      const wBase = o * inFeatures;
+      for (let i = 0; i < inFeatures; i += 1) accumulator[wBase + i]! += value * xd[xBase + i]!;
     }
-    if (bias && bias.requiresGrad) {
-      const accumulator = new Float64Array(outFeatures);
-      for (let r = 0; r < rows; r += 1) for (let o = 0; o < outFeatures; o += 1) accumulator[o]! += g[r * outFeatures + o]!;
-      const gb = allocate(bias.dtype, outFeatures);
-      gb.set(accumulator);
-      gradBias = fromStorage(gb, bias.shape, bias.dtype);
-    }
-    return [gradInput, gradWeight, gradBias];
-  }, 'linear');
+  }
+  const gw = allocate(dtype, accumulator.length);
+  gw.set(accumulator);
+  return gw;
 }
