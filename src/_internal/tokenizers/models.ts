@@ -1,5 +1,6 @@
 /** Tokenization models from ``tokenizer.json`` (Rust ``tokenizers`` semantics). */
 import { UnsupportedTokenizerError, type Json } from './pipeline.js';
+import { ValueError } from '../../errors.js';
 import { utf8Bytes } from './unicode.js';
 
 export interface TokenModel {
@@ -97,6 +98,8 @@ class BPE implements TokenModel {
   private readonly byteFallback: boolean;
   private readonly ignoreMerges: boolean;
   private readonly cache = new Map<string, string[]>();
+  /** Probability of skipping each merge (BPE-dropout); ``null`` merges deterministically. */
+  private readonly dropout: number | null;
 
   constructor(spec: Json) {
     ({ toId: this.toId, toToken: this.toToken } = vocabularyFrom(spec.vocab as Record<string, number>));
@@ -116,15 +119,19 @@ class BPE implements TokenModel {
     this.fuseUnk = spec.fuse_unk === true;
     this.byteFallback = spec.byte_fallback === true;
     this.ignoreMerges = spec.ignore_merges === true;
-    if (spec.dropout !== null && spec.dropout !== undefined && spec.dropout !== 0) {
-      throw new UnsupportedTokenizerError('BPE dropout is not supported');
+    const dropout = spec.dropout ?? null;
+    if (dropout !== null && (typeof dropout !== 'number' || !(dropout >= 0 && dropout <= 1))) {
+      throw new ValueError('Dropout should be between 0 and 1, inclusive');
     }
+    this.dropout = dropout === 0 ? null : dropout;
   }
 
   get vocabSize(): number { return this.toId.size; }
 
   tokenize(piece: string): string[] {
     if (!piece) return [];
+    // Like the Rust model, dropout bypasses the cache: every call samples its own merges.
+    if (this.dropout !== null) return this.merge(piece);
     const cached = this.cache.get(piece);
     if (cached) return cached;
     const result = this.merge(piece);
@@ -160,6 +167,7 @@ class BPE implements TokenModel {
       unkRun = true;
     });
     const unknown = this.unk;
+    if (this.dropout !== null) return this.mergeWithDropout(symbols, this.dropout);
     for (;;) {
       let best = Number.POSITIVE_INFINITY;
       let position = -1;
@@ -179,6 +187,86 @@ class BPE implements TokenModel {
       symbols = [...symbols.slice(0, position), merged, ...symbols.slice(position + 2)];
     }
     return symbols;
+  }
+
+  /** The merged token for a pair, or ``undefined`` when no merge applies (unknown symbols never merge). */
+  private mergedPair(left: string, right: string): { rank: number; token: string } | undefined {
+    if (left === this.unk || right === this.unk) return undefined;
+    const rank = this.ranks.get(`${left}\u0000${right}`);
+    if (rank === undefined) return undefined;
+    return { rank, token: left + (this.prefix && right.startsWith(this.prefix) ? right.slice(this.prefix.length) : right) };
+  }
+
+  /**
+   * The Rust ``Word::merge_all`` with dropout: merges leave a priority queue
+   * lowest rank first (then leftmost), each is skipped with probability
+   * ``dropout``, and skipped merges return to the queue after the next merge
+   * that happens. Like Rust's ``thread_rng``, the draws are not seedable.
+   */
+  private mergeWithDropout(initial: string[], dropout: number): string[] {
+    const symbols = initial.map((token) => ({ token, alive: true }));
+    const prev = symbols.map((_, index) => index - 1);
+    const next = symbols.map((_, index) => (index + 1 < symbols.length ? index + 1 : -1));
+    type Entry = { pos: number; rank: number; token: string };
+    const queue: Entry[] = [];
+    const before = (a: Entry, b: Entry): boolean => a.rank < b.rank || (a.rank === b.rank && a.pos < b.pos);
+    const push = (entry: Entry): void => {
+      queue.push(entry);
+      for (let index = queue.length - 1; index > 0;) {
+        const parent = (index - 1) >> 1;
+        if (!before(queue[index]!, queue[parent]!)) break;
+        [queue[index], queue[parent]] = [queue[parent]!, queue[index]!];
+        index = parent;
+      }
+    };
+    const pop = (): Entry | undefined => {
+      const top = queue[0];
+      const last = queue.pop();
+      if (queue.length && last) {
+        queue[0] = last;
+        for (let index = 0; ;) {
+          const left = 2 * index + 1;
+          const right = left + 1;
+          let smallest = index;
+          if (left < queue.length && before(queue[left]!, queue[smallest]!)) smallest = left;
+          if (right < queue.length && before(queue[right]!, queue[smallest]!)) smallest = right;
+          if (smallest === index) break;
+          [queue[index], queue[smallest]] = [queue[smallest]!, queue[index]!];
+          index = smallest;
+        }
+      }
+      return top;
+    };
+    for (let index = 0; index + 1 < symbols.length; index += 1) {
+      const merge = this.mergedPair(symbols[index]!.token, symbols[index + 1]!.token);
+      if (merge) push({ pos: index, ...merge });
+    }
+    const skipped: Entry[] = [];
+    for (let top = pop(); top; top = pop()) {
+      if (Math.random() < dropout) {
+        skipped.push(top);
+        continue;
+      }
+      for (const entry of skipped.splice(0)) push(entry);
+      const current = symbols[top.pos]!;
+      if (!current.alive || next[top.pos] === -1) continue;
+      const nextPos = next[top.pos]!;
+      // Skip expired entries: the pair at this position must still produce this token.
+      if (this.mergedPair(current.token, symbols[nextPos]!.token)?.token !== top.token) continue;
+      current.token = top.token;
+      symbols[nextPos]!.alive = false;
+      next[top.pos] = next[nextPos]!;
+      if (next[top.pos]! >= 0) prev[next[top.pos]!] = top.pos;
+      if (prev[top.pos]! >= 0) {
+        const merge = this.mergedPair(symbols[prev[top.pos]!]!.token, current.token);
+        if (merge) push({ pos: prev[top.pos]!, ...merge });
+      }
+      if (next[top.pos]! >= 0) {
+        const merge = this.mergedPair(current.token, symbols[next[top.pos]!]!.token);
+        if (merge) push({ pos: top.pos, ...merge });
+      }
+    }
+    return symbols.filter((symbol) => symbol.alive).map((symbol) => symbol.token);
   }
 
   tokenToId(token: string): number | undefined { return this.toId.get(token); }
