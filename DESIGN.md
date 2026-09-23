@@ -57,9 +57,10 @@ core so that owned models train, save and load with zero native dependencies:
   supports it; no toolchain is needed to install or build the package). On Node
   the kernels share one memory with a `worker_threads` pool sized to the
   available parallelism; the calling thread takes part and blocks until a job
-  is done, so the API stays synchronous. Large results are returned in
-  `SharedArrayBuffer`-backed `Float32Array`s that every thread fills in
-  parallel. `TENSORCODE_THREADS` / `setNumThreads(n)` set the thread count
+  is done, so the API stays synchronous. Results are copied out of kernel
+  memory on the calling thread into ordinary `Float32Array`s (workers never
+  hold references to results, which their rarely collected heaps would keep
+  alive). `TENSORCODE_THREADS` / `setNumThreads(n)` set the thread count
   (`1`: no workers); `TENSORCODE_BACKEND=js` / `setBackend('js')` use only the
   JavaScript kernels, which remain the fallback for float64 and for runtimes
   without WebAssembly SIMD or workers. Products reduce in float32 (four lanes,

@@ -26,9 +26,6 @@ const MAX_PAGES = 65536;
 export const ARGS = PAGE;
 const ARGS_WORDS = 64;
 const HEAP_START = PAGE + 4096;
-/** Results at least this long (floats) are copied out by every thread into shared memory. */
-const COPY_PARALLEL = 1 << 20;
-const COPY_CHUNK = 1 << 18;
 const ALIGN = 64;
 
 export const enum Kernel {
@@ -38,8 +35,8 @@ export const enum Kernel {
   Attention = 3,
   Unary = 4,
   LayerNorm = 5,
-  /** Copy kernel memory into a shared output buffer (JavaScript, see ``copyOut``). */
-  CopyOut = 6,
+  /** Unused (results are copied out on the calling thread, see ``copyOut``). */
+  Reserved = 6,
   SwapAxes = 7,
   Binary = 8,
   /**
@@ -146,32 +143,14 @@ export const MAX_TASKS = Number(INDEX_MASK);
  * stale worker can never run a task with another job's arguments.
  */
 const WORKER_SOURCE = `
-const { workerData, receiveMessageOnPort } = require('node:worker_threads');
-const { module, memory, control, thread, spin, port } = workerData;
+const { workerData } = require('node:worker_threads');
+const { module, memory, control, thread, spin } = workerData;
 const instance = new WebAssembly.Instance(module, { env: { memory } });
 const e = instance.exports;
 // Transpilers may wrap function sources in a name-keeping helper.
 const __name = (target) => target;
 const normalTask = (${makeNormalTask.toString()})(memory, (${createLibm.toString()})());
-// Output buffers of copy jobs arrive on the port; only the newest is kept
-// (so a worker may hold the latest output buffer until the next copy job).
-let target = null;
-let targetId = -1;
-function latest() {
-  for (let message = receiveMessageOnPort(port); message !== undefined; message = receiveMessageOnPort(port)) {
-    targetId = message.message.id;
-    target = message.message.buffer;
-  }
-}
-function copyOut(args, index) {
-  const header = new Uint32Array(memory.buffer, args, 4);
-  const source = header[0], length = header[1], chunk = header[2], id = header[3];
-  while (targetId !== id) latest();
-  const start = index * chunk;
-  const count = Math.min(length, start + chunk) - start;
-  new Float32Array(target, start * 4, count).set(new Float32Array(memory.buffer, source + start * 4, count));
-}
-const kernels = [e.task_gemm_nt, e.task_transpose, e.task_softmax, e.task_attention, e.task_unary, e.task_layernorm, copyOut, e.task_swap_axes, e.task_binary, normalTask];
+const kernels = [e.task_gemm_nt, e.task_transpose, e.task_softmax, e.task_attention, e.task_unary, e.task_layernorm, null, e.task_swap_axes, e.task_binary, normalTask];
 const words = new Int32Array(control);
 const next = new BigInt64Array(control, ${NEXT_OFFSET}, 1);
 for (;;) {
@@ -187,7 +166,6 @@ for (;;) {
     try { kernels[kind](args, index, thread); } catch { Atomics.store(words, ${FAILED}, 1); }
     if (Atomics.add(words, ${DONE}, 1) + 1 === total) Atomics.notify(words, ${DONE});
   }
-  latest();
   let count = 0;
   while (Atomics.load(words, ${WAKE}) === wake && count < spin) count += 1;
   if (Atomics.load(words, ${WAKE}) === wake) Atomics.wait(words, ${WAKE}, wake);
@@ -199,38 +177,22 @@ class Pool {
   readonly next: BigInt64Array;
   private generation = 0n;
   private readonly workers: { terminate(): unknown }[] = [];
-  private readonly ports: { postMessage(value: unknown): void; close(): void }[] = [];
-  private copyId = 0;
 
   constructor(module: WasmModule, memory: WasmMemory, threads: number, workerThreads: typeof import('node:worker_threads')) {
     const control = new SharedArrayBuffer(CONTROL_BYTES);
     this.words = new Int32Array(control);
     this.next = new BigInt64Array(control, NEXT_OFFSET, 1);
     for (let thread = 1; thread < threads; thread += 1) {
-      const channel = new workerThreads.MessageChannel();
       const worker = new workerThreads.Worker(WORKER_SOURCE, {
         eval: true,
-        workerData: { module, memory, control, thread, spin: 20_000, port: channel.port2 },
-        transferList: [channel.port2],
+        workerData: { module, memory, control, thread, spin: 20_000 },
         stdout: false,
         stderr: false,
       });
       worker.unref();
       worker.on('error', () => {});
-      channel.port1.unref();
       this.workers.push(worker);
-      this.ports.push(channel.port1);
     }
-  }
-
-  /**
-   * Hand ``buffer`` to every worker for the next copy job; returns its id.
-   * Workers keep only the newest buffer they received.
-   */
-  shareOutput(buffer: SharedArrayBuffer): number {
-    this.copyId = (this.copyId + 1) | 0;
-    for (const port of this.ports) port.postMessage({ id: this.copyId, buffer });
-    return this.copyId;
   }
 
   get size(): number {
@@ -247,9 +209,7 @@ class Pool {
     this.generation = (this.generation + 1n) & GENERATION_MASK;
     Atomics.store(next, 0, (this.generation << GENERATION_SHIFT) | (BigInt(tasks) << INDEX_BITS));
     Atomics.add(words, WAKE, 1);
-    // Copy jobs wake everyone so every worker drains its port (queued
-    // messages would keep their output buffers alive).
-    Atomics.notify(words, WAKE, kind === Kernel.CopyOut ? this.workers.length : Math.min(tasks - 1, this.workers.length));
+    Atomics.notify(words, WAKE, Math.min(tasks - 1, this.workers.length));
     let failure: unknown = null;
     for (;;) {
       const value = Atomics.load(next, 0);
@@ -272,9 +232,7 @@ class Pool {
 
   terminate(): void {
     for (const worker of this.workers) void worker.terminate();
-    for (const port of this.ports) port.close();
     this.workers.length = 0;
-    this.ports.length = 0;
   }
 }
 
@@ -355,7 +313,7 @@ export class Engine {
     const exports = instance.exports as Record<string, TaskFunction>;
     this.kernels = [
       exports.task_gemm_nt!, exports.task_transpose!, exports.task_softmax!, exports.task_attention!, exports.task_unary!,
-      exports.task_layernorm!, (args, task) => this.copyTask(args, task), exports.task_swap_axes!, exports.task_binary!,
+      exports.task_layernorm!, () => { throw new Error('reserved kernel'); }, exports.task_swap_axes!, exports.task_binary!,
       makeNormalTask(memory, createLibm()),
     ];
     this.f32 = new Float32Array(memory.buffer);
@@ -427,35 +385,15 @@ export class Engine {
   }
 
   /**
-   * Copy ``length`` floats at ``pointer`` into a new array. Large results go
-   * to a ``SharedArrayBuffer`` that every thread fills (and page-faults) in
-   * parallel; small ones are sliced on the calling thread.
+   * Copy ``length`` floats at ``pointer`` into a new array, on the calling
+   * thread. (Filling a ``SharedArrayBuffer`` from every thread was faster, but
+   * each worker kept a reference to every output buffer until its own garbage
+   * collection, which idle workers rarely run, so gigabytes of dead results
+   * stayed resident.)
    */
   copyOut(pointer: number, length: number): Float32Array {
     const base = pointer >>> 2;
-    const pool = length >= COPY_PARALLEL ? this.ensurePool() : null;
-    if (!pool) return this.heap.slice(base, base + length);
-    const buffer = new SharedArrayBuffer(length * 4);
-    this.copyTarget = buffer;
-    try {
-      const id = pool.shareOutput(buffer);
-      this.run(Kernel.CopyOut, [pointer, length, COPY_CHUNK, id], Math.ceil(length / COPY_CHUNK), true);
-    } finally {
-      this.copyTarget = null;
-    }
-    return new Float32Array(buffer);
-  }
-
-  private copyTarget: SharedArrayBuffer | null = null;
-
-  private copyTask(args: number, task: number): void {
-    const u32 = this.heapU32;
-    const source = u32[args >>> 2]!;
-    const length = u32[(args >>> 2) + 1]!;
-    const chunk = u32[(args >>> 2) + 2]!;
-    const start = task * chunk;
-    const count = Math.min(length, start + chunk) - start;
-    new Float32Array(this.copyTarget!, start * 4, count).set(this.heap.subarray((source >>> 2) + start, (source >>> 2) + start + count));
+    return this.heap.slice(base, base + length);
   }
 
   get heapU32(): Uint32Array {
