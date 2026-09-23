@@ -1,8 +1,11 @@
 /**
- * Bit-exact floating-point kernels for PyTorch-compatible random sampling.
+ * Bit-exact C math library functions, shared by the PyTorch-compatible
+ * samplers (``random.ts``) and the torchvision/Pillow resampling filters
+ * (``_internal/image/resample.ts``, ``_internal/vec/imageProcessing.ts``).
  *
- * PyTorch's CPU samplers call the C math library (``logf``, ``sinf``,
- * ``cosf``, ``log``, ``log1p``, ``sin``, ``cos``) and ``std::fma``. JavaScript's
+ * PyTorch's CPU samplers and resize kernels and Pillow's filters call the C
+ * math library (``logf``, ``sinf``, ``cosf``, ``log``, ``log1p``, ``sin``,
+ * ``cos``) and ``std::fma``. JavaScript's
  * ``Math`` functions round differently in roughly one case in a hundred, so
  * these are exact ports of the reference platform's implementations: GNU libc
  * 2.39 on AArch64, the platform the Python reference package is verified on.

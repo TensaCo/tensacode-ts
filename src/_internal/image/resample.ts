@@ -9,7 +9,7 @@
  */
 import { ValueError } from '../../errors.js';
 import { RasterImage, type RasterData, type RasterMode } from './raster.js';
-import { fma, glibcCos, glibcSin } from './fpmath.js';
+import { cos as glibcCos, fma, sin as glibcSin } from '../../nn/randomMath.js';
 
 /** ``PIL.Image.Resampling`` codes. */
 export const Resampling = Object.freeze({ NEAREST: 0, LANCZOS: 1, BILINEAR: 2, BICUBIC: 3, BOX: 4, HAMMING: 5 });

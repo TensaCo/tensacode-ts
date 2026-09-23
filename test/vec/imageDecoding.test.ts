@@ -18,7 +18,7 @@ import {
 import { ImageProcessor, resizeImage } from '../../src/_internal/vec/imageProcessing.js';
 import { inflateRaw, inflateZlib, setNativeInflate } from '../../src/_internal/image/inflate.js';
 import { decodeBase64 } from '../../src/_internal/image/load.js';
-import { fma, glibcCos, glibcSin, glibcSinf } from '../../src/_internal/image/fpmath.js';
+import { cos as glibcCos, fma, sin as glibcSin, sinf as glibcSinf } from '../../src/nn/randomMath.js';
 import { fixtureBytes, fixtureJson } from '../helpers/fixtures.js';
 
 const directory = new URL('../fixtures/image/', import.meta.url).pathname;

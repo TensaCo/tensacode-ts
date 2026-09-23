@@ -25,7 +25,7 @@ import { IndexError, NotImplementedError, ValueError } from '../../errors.js';
 export { IndexError };
 import { deepCopy, isPlainObject, jsonEqual, type JsonObject, type JsonValue } from '../json.js';
 import { RasterImage } from '../image/raster.js';
-import { fma, fmaf, glibcSin, glibcSinf } from '../image/fpmath.js';
+import { fma, fmaf, sin as glibcSin, sinf as glibcSinf } from '../../nn/randomMath.js';
 import { torchvisionDecode, type DecodedArray } from '../image/torchvision.js';
 import { fetchSourceBytes, sourceBytes } from '../image/load.js';
 
