@@ -130,6 +130,17 @@ deliberate. See [Parity with Python](docs/parity.md) for what remains.
   (for example a `BertProcessing` post-processor or a `do_lower_case` flag the
   normalizer does not follow) now give Python's backend JSON, and
   `Scene.fromFoundation` persists the tokenizer Python persists.
+- A `tokenizer.json` with a BPE `dropout` loads and samples merges as the Rust
+  `tokenizers` library does, instead of raising.
+- Chat templates: `escape` escapes HTML and tuples render as tuples, as in
+  jinja2. The `max`, `min`, `sum`, `dictsort`, `format`, `batch`, `truncate`,
+  `center` and `forceescape` filters, the `divisibleby` and comparison tests,
+  and `filter`, `with` and `raw` blocks are supported.
+- Generation settings read from a file keep their Python number kind, so
+  `"repetition_penalty": 2` or `"top_k": 5.0` raise transformers' messages.
+  Too few image features raise torch's `RuntimeError`.
+- Generated model cards import tools from `tensorcode/tools` (and operations
+  from their entry points) instead of `tensorcode`, which does not export them.
 
 ## 0.4.0-alpha.3
 
