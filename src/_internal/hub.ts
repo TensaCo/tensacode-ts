@@ -53,7 +53,8 @@ export class FileNotFoundError extends Error {
   }
 }
 
-function env(name: string): string | undefined {
+/** A nonempty environment variable, or ``undefined``. */
+export function env(name: string): string | undefined {
   const processLike = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
   const value = processLike?.env?.[name];
   return value === undefined || value === '' ? undefined : value;
@@ -134,7 +135,8 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-async function isDirectory(path: string): Promise<boolean> {
+/** Whether ``path`` exists and is a directory. */
+export async function isDirectory(path: string): Promise<boolean> {
   try {
     return (await stat(path)).isDirectory();
   } catch {

@@ -22,7 +22,7 @@ export class ViTPatchEmbeddings extends Module {
     this.imageSize = config.number('image_size');
     this.patchSize = config.number('patch_size');
     this.channels = config.number('num_channels');
-    this.numPatches = (this.imageSize / this.patchSize) ** 2;
+    this.numPatches = Math.floor(this.imageSize / this.patchSize) ** 2;
     this.projection = this.registerModule('projection', new Conv2d(this.channels, config.number('hidden_size'), this.patchSize, { stride: this.patchSize }));
   }
 

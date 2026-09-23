@@ -86,10 +86,17 @@ export class Tokenizer {
 
   /** Add a special token (as transformers does for missing special tokens). Returns its id. */
   addSpecialToken(content: string): number {
-    const existing = this.tokenToId(content);
+    const added = this.addedByContent.get(content);
+    if (added) {
+      added.special = true;
+      return added.id;
+    }
+    // Like ``tokenizers``' AddedVocabulary: an in-vocabulary token becomes a
+    // special added token that keeps the model's id (so it is matched whole and
+    // removed by ``skipSpecialTokens``).
+    const existing = this.model.tokenToId(content);
     if (existing !== undefined) {
-      const added = this.addedByContent.get(content);
-      if (added) added.special = true;
+      this.registerAdded({ id: existing, content, singleWord: false, lstrip: false, rstrip: false, normalized: false, special: true });
       return existing;
     }
     let id = this.model.vocabSize;

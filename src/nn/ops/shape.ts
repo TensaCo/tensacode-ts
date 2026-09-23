@@ -1,7 +1,7 @@
 /** Shape manipulation, indexing, joining and ordering operations. */
 import { allocate, promoteTypes, type Storage } from '../dtype.js';
 import {
-  broadcastIndexMap, formatShape, inferShape, normalizeDim, numelOf, shapesEqual, stridesOf, type Shape,
+  broadcastIndexMap, formatShape, inferShape, normalizeDim, numelOf, shapesEqual, stridesOf,
 } from '../shape.js';
 import { Tensor, attachGrad, fromStorage, aliasWithShape } from '../tensor.js';
 import { extents, sumToShape } from './reduce.js';

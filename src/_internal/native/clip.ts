@@ -169,7 +169,7 @@ class CLIPVisionEmbeddings extends Module {
     this.class_embedding = this.registerParameter('class_embedding', newParameter([hidden], (value) => init.normal_(value)));
     this.patch_embedding = this.registerModule('patch_embedding',
       new Conv2d(config.number('num_channels'), hidden, this.patchSize, { stride: this.patchSize, bias: false }));
-    const patches = (this.imageSize / this.patchSize) ** 2;
+    const patches = Math.floor(this.imageSize / this.patchSize) ** 2;
     this.position_embedding = this.registerModule('position_embedding', new Embedding(patches + 1, hidden));
   }
 

@@ -100,6 +100,12 @@ export const PYTHON_FLOAT_KEYS = new Set<string>([
   'summary_last_dropout',
   // PyTorch module attributes (``vars(module)``)
   'norm_type', 'p', 'eps',
+  // transformers generation settings (``GenerationConfig``)
+  'temperature', 'top_p', 'repetition_penalty', 'length_penalty',
+  // transformers image processor settings
+  'image_mean', 'image_std', 'rescale_factor',
+  // provider settings (``timeout=30.0``)
+  'timeout',
   // TensorCode configurations
   'min_temperature', 'max_temperature', 'min_support', 'max_contradiction', 'max_unknown',
   'coordinate_stride', 'coordinate_offset',

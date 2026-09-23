@@ -34,11 +34,16 @@ export interface SafetensorsContents {
   metadata: Record<string, string> | null;
 }
 
-function encodeValues(tensor: Tensor): Uint8Array {
+/** Raw little-endian bytes of a tensor (``tensor.contiguous().view(torch.uint8)``). */
+export function tensorBytes(tensor: Tensor): Uint8Array {
   const size = itemSize(tensor.dtype);
   const bytes = new Uint8Array(tensor.numel * size);
-  const view = new DataView(bytes.buffer);
   const data = tensor.data;
+  if (tensor.dtype === 'float32' && data instanceof Float32Array) {
+    bytes.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    return bytes;
+  }
+  const view = new DataView(bytes.buffer);
   for (let index = 0; index < data.length; index += 1) {
     const value = data[index]!;
     const offset = index * size;
@@ -112,7 +117,7 @@ export function serializeSafetensors(
     parts.push(`"__metadata__":${JSON.stringify(metadata)}`);
   }
   for (const [name, value] of entries) {
-    const bytes = encodeValues(value);
+    const bytes = tensorBytes(value);
     buffers.push(bytes);
     parts.push(`${JSON.stringify(name)}:${JSON.stringify({
       dtype: TO_SAFE[value.dtype], shape: [...value.shape], data_offsets: [offset, offset + bytes.byteLength],

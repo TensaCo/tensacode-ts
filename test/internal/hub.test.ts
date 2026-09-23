@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FileNotFoundError, HubError, globMatch, resolveArtifactDirectory, snapshotDownload } from '../../src/_internal/hub.js';
 import { ConfigOperation, validatedConfig } from '../../src/_internal/operationConfig.js';
 import { ValueError } from '../../src/errors.js';
@@ -25,6 +25,10 @@ function fakeHub(files: Record<string, string>, calls: string[]): typeof fetch {
 }
 
 describe('Hugging Face Hub client', () => {
+  // These tests exercise the (faked) network path; ignore a developer's offline setting.
+  beforeEach(() => vi.stubEnv('HF_HUB_OFFLINE', ''));
+  afterEach(() => vi.unstubAllEnvs());
+
   it('matches fnmatch-style patterns', () => {
     expect(globMatch('*.safetensors', 'model.safetensors')).toBe(true);
     expect(globMatch('tensorcode_config.json', 'tensorcode_config.json')).toBe(true);
