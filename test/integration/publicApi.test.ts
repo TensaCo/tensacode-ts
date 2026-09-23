@@ -61,7 +61,7 @@ describe('package entry points', () => {
     expect(await names('../../src/training/index.js')).toEqual(
       ['TemperatureCalibration', 'Trainer', 'evaluateCalibration', 'fitThreshold', 'loadExperience']);
     expect(await names('../../src/integrations/index.js')).toEqual(
-      ['JevModel', 'LocalModel', 'OpenAICompatibleModel', 'ProviderError', 'ProviderHTTPError', 'ProviderProtocolError', 'ProviderTimeout']);
+      ['JevModel', 'LocalModel', 'OpenAICompatibleModel', 'ProviderError', 'ProviderHTTPError', 'ProviderProtocolError', 'ProviderTimeout', 'SynchronousCallUnavailable']);
     const vecNames = await names('../../src/ops/vec/index.js');
     for (const name of ['Latent', 'Space', 'Transform', 'Classify', 'Score', 'Decide', 'Retrieve', 'TextEncoder',
       'ImageEncoder', 'VocabularyEncoder', 'PatchEncoder', 'TextDecoder', 'ImageDecoder', 'Decode']) {
