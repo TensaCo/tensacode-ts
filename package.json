@@ -1,6 +1,6 @@
 {
   "name": "tensorcode",
-  "version": "0.4.0-alpha.3",
+  "version": "0.4.0-alpha.4",
   "description": "Composable cognitive operations and traceable, trainable TypeScript programs",
   "keywords": [
     "tensorcode",
@@ -13,7 +13,7 @@
   ],
   "type": "module",
   "license": "MIT",
-  "author": "Jacob Valdez <jacob.valdez@tensaco.ai>",
+  "author": "Jacob Valdez <jacobfv123@gmail.com>",
   "homepage": "https://tensorcode.dev",
   "repository": {
     "type": "git",
@@ -83,6 +83,7 @@
     "dist",
     "docs",
     "README.md",
+    "CHANGELOG.md",
     "DESIGN.md",
     "LICENSE"
   ],
