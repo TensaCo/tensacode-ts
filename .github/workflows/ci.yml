@@ -46,6 +46,7 @@ jobs:
           node examples/supportTriage.ts
           node examples/traceAndTrain.ts
           node examples/pretrainedLifecycle.ts
+          node examples/learnActionOutcomes.ts --output "$RUNNER_TEMP/action-outcomes"
       - name: Package contents
         if: matrix.node == '24.x'
         run: npm pack --dry-run

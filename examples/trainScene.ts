@@ -21,7 +21,7 @@ import { Adam, F, PythonRandom, manualSeed, noGrad, tensor, zeros, type Tensor }
 import { Scene, type SceneInputs } from 'tensorcode/tools';
 import { Trainer } from 'tensorcode/training';
 // The TypeScript counterpart of ``PIL.Image.open`` (Pillow-exact decoding and resampling).
-import { openImageBytes } from '../dist/_internal/image/raster.js';
+import { openImage } from 'tensorcode/ops/vec';
 
 type Row = [SceneInputs, string];
 
@@ -31,7 +31,7 @@ function readRecords(path: string, size: number): Row[] {
     if (!line.trim()) continue;
     const row = JSON.parse(line);
     const imagePath = isAbsolute(row.image_path) ? row.image_path : join(dirname(path), row.image_path);
-    const image = openImageBytes(new Uint8Array(readFileSync(imagePath))).convert('RGB').resize([size, size]);
+    const image = openImage(imagePath).convert('RGB').resize([size, size]);
     const pixels = image.toTensor().to('float32').div(255);
     records.push([{ pixels, question: row.question, source_id: row.source_id, candidates: row.candidates }, row.target]);
   }

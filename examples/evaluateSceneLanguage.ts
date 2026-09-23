@@ -21,7 +21,7 @@ import { parseArgs } from 'node:util';
 import { manualSeed, noGrad, zeros, type Tensor } from 'tensorcode/nn';
 import { Scene } from 'tensorcode/tools';
 // The TypeScript counterpart of ``PIL.Image.open`` (Pillow-exact decoding and resampling).
-import { openImageBytes, type RasterImage } from '../dist/_internal/image/raster.js';
+import { openImage, type RasterImage } from 'tensorcode/ops/vec';
 
 type Row = { image_path: string; source_id: string; question: string; target: string | number };
 
@@ -48,7 +48,7 @@ function readRows(path: string, limit: number): [Row, Tensor][] {
     if (!line.trim()) continue;
     const row = JSON.parse(line) as Row;
     const location = isAbsolute(row.image_path) ? row.image_path : join(dirname(path), row.image_path);
-    const image = thumbnail(openImageBytes(new Uint8Array(readFileSync(location))).convert('RGB'), [1024, 1024]);
+    const image = thumbnail(openImage(location).convert('RGB'), [1024, 1024]);
     result.push([row, image.toTensor().to('float32').div(255)]);
   }
   if (result.length < 2) throw new Error('at least two images are required for shuffle evaluation');
