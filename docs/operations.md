@@ -194,8 +194,8 @@ runs on a worker thread), so `op.call` and `text.ask` work with them;
 in that worker thread (loaded from the `fromPretrained` arguments, or from an
 explicit `worker: { module, exportName }` loader for a supplied model). In a
 browser main thread, which cannot block, the blocking methods raise
-`NotImplementedError`, and a provider built with an injected `fetch` function
-is asynchronous only. Redirects,
+`SynchronousCallUnavailable` (a `NotImplementedError`), and a provider built
+with an injected `fetch` function is asynchronous only. Redirects,
 refusals and truncated responses raise `ProviderError` subclasses:
 `ProviderHTTPError` (with `.status`), `ProviderTimeout` and
 `ProviderProtocolError`. Credentials never appear in configuration or error

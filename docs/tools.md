@@ -14,7 +14,12 @@ model = await Investigator.fromPretrained('./model', { device: 'cpu' });
 ```
 
 Construction does not download anything, and it does not give the model any
-pretrained competence. Tools are `tensorcode/nn` modules, so they support
+pretrained competence. Tool configurations accept only their documented
+fields: an unknown or obsolete field, whether passed to a constructor or saved
+in an artifact, raises a `ValueError` naming it and listing the valid fields
+(`Unknown Planner configuration fields: ['colour']; valid fields: [...]`). The
+accepted fields are `Tool.configFields` (`Scene.rankingFields` and
+`Scene.languageFields` for Scene's two modes). Tools are `tensorcode/nn` modules, so they support
 `parameters()`, `train()`, `eval()`, `stateDict()` and `loadStateDict()`. Call
 a tool with `tool.call(inputs)`. This guide mirrors the Python
 [tools guide](https://tensorcode.dev/docs/). Receipts, configurations and

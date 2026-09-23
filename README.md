@@ -19,7 +19,7 @@ Python package. Tracing records which operation produced which value, so
 supervised local tensor paths can be replayed and trained. Tracing does not make
 arbitrary JavaScript or remote model calls differentiable.
 
-> **Status: 0.4.0 alpha** (Python `0.4.0a3`). APIs may change between alphas.
+> **Status: 0.4.0 alpha** (Python `0.4.0a4`). APIs may change between alphas.
 > Importing any entry point performs no I/O and loads no model weights. The
 > measured behavior and its limits are documented at
 > [tensorcode.dev/docs](https://tensorcode.dev/docs/). Consistent benefits of
@@ -116,20 +116,22 @@ network returns a `Promise`. Pure computation is synchronous.
 | Experience files (`tensorcode.experience`) | Interchangeable | Operation fingerprints equal Python's for the same configuration |
 | Model artifacts (`savePretrained` / `fromPretrained`, Hub) | Interchangeable | Python artifacts load in TS and re-save with a byte-identical manifest. Weights re-save byte-identically except that tied-alias metadata order varies, because Python itself writes that order nondeterministically. The Hub cache layout is shared |
 | Vector operations (`ops.vec`) | Yes | Linear, MLP and native BERT/RoBERTa/DistilBERT transformer variants; T5 text and ViT image encoders |
+| Images | Yes | PNG, JPEG, GIF, WebP and BMP decode to torchvision's and Pillow's pixels; Pillow's modes, `convert` and `resize`; `ViTImageProcessor` inputs |
 | `ImageDecoder` (latent diffusion) | Yes | Every diffusers UNet2DConditionModel/AutoencoderKL block family it can run (cross-attention, attention, simple cross-attention, K-diffusion), and DDIM. `context.seed` and `context.noise` both give samples identical to Python's |
 | Text operations (`ops.text`) | Yes | Owned T5 models (generation and likelihood decoding) and external providers. Providers block in `complete` like Python's (worker thread) and have async `acomplete` |
 | Graph operations | Symbolic stubs | Same as Python |
-| `Chatbot`, `Investigator`, `Decision`, `Planner` | Yes | Including cognitive sessions, episodic memory, verifiers and plan execution |
+| `Chatbot`, `Investigator`, `Decision`, `Planner` | Yes | Including cognitive sessions, episodic memory, verifiers, plan execution and configuration-field validation |
 | `Scene` ranking mode | Yes | CLIP bootstrap via `Scene.fromFoundation` |
-| `Scene` language mode (Idefics3/SmolVLM) | Yes | `Scene.fromLanguageFoundation` and `interpret` with greedy decoding; the processor (image splitting, LANCZOS, prompt expansion) and saved processor assets match Python byte for byte. A SmolVLM-256M interpretation takes seconds on a multi-core CPU |
+| `Scene` language mode (Idefics3/SmolVLM) | Yes | `Scene.fromLanguageFoundation` and `interpret` with transformers' `generate` (beam search, guidance, watermarking, every logits processor); the processor and saved processor assets match Python byte for byte. A SmolVLM-256M interpretation takes seconds on a multi-core CPU |
 | `Trainer`, checkpoints | Yes | SGD, Adam, AdamW. Directory and standalone checkpoints are interchangeable, including PyTorch and CPython random states |
-| Native architectures | ALBERT, BERT, RoBERTa, Electra, DistilBERT, DeBERTa-v2, T5, ViT, CLIP, Llama, Idefics3 | transformers 5.17 parameter names; safetensors weights only. Python loads any transformers `AutoModel` for text foundations; TypeScript implements these |
-| Tokenizers | `tokenizer.json` runtime | WordPiece, BPE, Unigram, WordLevel |
-| Integrations | OpenAI-compatible, Jev, Transformers.js `LocalModel` | No implicit retries or redirects |
-| Compute | CPU: WebAssembly SIMD kernels on worker threads, no native dependencies | Random streams equal PyTorch's: `manualSeed(n)` gives Python's fresh weights and dropout masks bit for bit |
+| Native architectures | ALBERT, BERT, RoBERTa, Electra, DistilBERT, DeBERTa-v2, T5, ViT, CLIP, Llama, Idefics3 | transformers 5.17 parameter names; safetensors and `pytorch_model.bin` weights (weights-only unpickler), as transformers loads them. Python loads any transformers `AutoModel` for text foundations; TypeScript implements these |
+| Tokenizers | `tokenizer.json` runtime | WordPiece, BPE, Unigram, WordLevel, plus transformers 5's class rebuilds; foundations need a `tokenizer.json` |
+| Integrations | OpenAI-compatible, Jev, Transformers.js `LocalModel` | Blocking `complete` like Python's, plus `acomplete`. No implicit retries or redirects |
+| Random numbers | Bitwise | `manualSeed(n)` is `torch.manual_seed(n)`: fresh weights, dropout masks and sampled tokens equal Python's |
+| Compute | CPU: WebAssembly SIMD kernels on worker threads, no native dependencies | No GPU. Results agree with PyTorch within float tolerance |
 
 [Parity with Python](docs/parity.md) explains how parity is checked, which files
-move between the two languages and every deliberate difference.
+move between the two languages and the few remaining differences.
 [DESIGN.md](DESIGN.md) maps each Python module to its TypeScript file.
 
 ## Guides
@@ -143,7 +145,8 @@ move between the two languages and every deliberate difference.
   calibration.
 - [Examples](examples/README.md): runnable programs.
 - [Parity with Python](docs/parity.md): what matches, what is interchangeable
-  and what differs on purpose.
+  and what still differs.
+- [Changelog](CHANGELOG.md).
 - Full documentation, validation results and the Python guides:
   [tensorcode.dev/docs](https://tensorcode.dev/docs/).
 

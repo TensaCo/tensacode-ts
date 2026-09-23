@@ -1,19 +1,20 @@
 # TensorCode for TypeScript — design
 
-This package ports the Python `tensorcode` library (v0.4.0a3, `../python`) to
-TypeScript with **reasonable parity**: the same operations, tools, tracing,
-training and artifact formats, expressed idiomatically. Product site and
+This package ports the Python `tensorcode` library (v0.4.0a4, `../python`) to
+TypeScript with **full parity** apart from the few
+[remaining differences](#remaining-differences): the same operations, tools,
+tracing, training and artifact formats, expressed idiomatically. Product site and
 documentation: <https://tensorcode.dev> (docs at <https://tensorcode.dev/docs/>).
 
 The Python sources and `docs/*.md` remain the behavioral specification. When this
 document and the Python behavior disagree on something not listed under
-[deliberate differences](#deliberate-differences), Python wins.
+[remaining differences](#remaining-differences), Python wins.
 
 ## Package
 
 | Item | Decision |
 |---|---|
-| npm name | `tensorcode` (repository `tensacode-ts`), version `0.4.0-alpha.3` (Python `0.4.0a3`) |
+| npm name | `tensorcode` (repository `tensacode-ts`), version `0.4.0-alpha.4` (Python `0.4.0a4`) |
 | Modules | ESM only (`"type": "module"`, NodeNext resolution, `.js` import suffixes) |
 | Language | TypeScript `strict`, `noImplicitOverride`, `verbatimModuleSyntax`, target ES2022 |
 | Build | `npm run build` → `tsc -p tsconfig.build.json` → `dist/` (JS + `.d.ts` + maps) |
@@ -106,7 +107,10 @@ them natively with transformers **5.17** parameter names and numerics:
 | `t5` | `seq2seq` (`T5ForConditionalGeneration`), `encoder` | teacher-forced loss, KV-cached decoding, greedy / sampling / beam search matching `generate()` |
 | `vit` | base (`ViTModel`, 5.17 layout `layers.N.attention.q_proj`) | legacy checkpoint key renames on load |
 | `clip` | `CLIPModel` | 5.17 `get_*_features` return projected pooler outputs |
-| `deberta-v2` | base, sequence classification | **extension point** (`debertaV2.ts`, module *training*) — NLI verifiers such as `cross-encoder/nli-deberta-v3-small` |
+| `deberta-v2` | base, sequence classification | `debertaV2.ts` — NLI verifiers such as `cross-encoder/nli-deberta-v3-small` |
+| `albert` | base, sequence classification | factorized embeddings, shared layers |
+| `llama` | causal language model (Idefics3 text model) | grouped-query attention (`enableGqa`), every RoPE type, KV-cached decoding |
+| `idefics3` | `Idefics3ForConditionalGeneration` (image-text-to-text) | SmolVLM; see Scene language mode below |
 
 - `NativeConfig` emulates `AutoConfig.for_model(...)` + `to_dict()` /
   `to_json_string()` from tables generated out of transformers
@@ -298,22 +302,22 @@ others with `ValueError`.
 - Helpers: `test/helpers/gradcheck.ts` (`gradcheck`, `expectClose`,
   `randomTensor`), `test/helpers/fixtures.ts`, `test/helpers/hub.ts`.
 
-## Deliberate differences
+## Implementation notes
 
-- **Numerics.** CPU compute with no native dependencies (WebAssembly SIMD
-  kernels on worker threads, see the compute backend above); no GPU and no
-  mixed-precision kernels (float16/bfloat16 are computed in float32). Random streams equal PyTorch's on the reference platform (AArch64,
-  glibc 2.39). PyTorch on x86-64 with AVX2 fills `normal_` with a different
-  vectorized kernel, so Python's own float32 normal samples differ there.
-- **Weights.** Only safetensors checkpoints (no `pytorch_model.bin`/pickle). A
-  Hub repository whose `main` has only PyTorch weights loads `model.safetensors`
-  from its open SFconvertbot conversion PR based on `main`, as transformers
-  does; when there is none, TypeScript asks the safetensors conversion Space to
-  open it (transformers' `spawn_conversion`) and looks again, raising
-  transformers' error if it still does not exist. Offline mode, a pinned
-  revision and `DISABLE_SAFETENSORS_CONVERSION` skip the lookup. Where Python
-  can still load the `.bin` weights (it converts in a background thread),
-  TypeScript needs the converted file.
+- **Weights.** `loadNativeFoundation` resolves weights like transformers'
+  `_get_resolved_checkpoint_files`: safetensors (single or sharded) first;
+  otherwise `pytorch_model.bin` (single or sharded) through a weights-only
+  unpickler (`native/torchCheckpoint.ts`: both `torch.save` formats; only
+  containers, primitives and tensor rebuilders; any other global raises, as
+  `torch.load(weights_only=True)` does). Call sites where Python passes
+  `use_safetensors=True` (`useSafetensors: true`) instead load a Hub
+  repository's open `SFconvertbot` conversion pull request based on `main`,
+  asking the conversion Space to open one when there is none (transformers'
+  `spawn_conversion`); otherwise transformers' background conversion is started
+  after loading the PyTorch weights. Offline mode, a pinned revision and
+  `DISABLE_SAFETENSORS_CONVERSION` skip the conversion. transformers' `legacy`
+  key renames (`LayerNorm.gamma`/`beta`) and the ViT renames apply to every
+  checkpoint.
 - **Latent diffusion.** `ops.vec.ImageDecoder` ports diffusers 0.40
   `UNet2DConditionModel`, `AutoencoderKL` and `DDIMScheduler` (float32
   schedules bit-identical to PyTorch) in `src/_internal/native/diffusers.ts`:
@@ -325,8 +329,10 @@ others with `ValueError`.
   `silu`/`swish`/`mish`/`gelu`/`relu` activations, with diffusers' module
   trees and parameter names. Blocks diffusers constructs but cannot run inside
   these models (skip blocks, encoder blocks in a UNet, UNet blocks in a VAE)
-  raise `ValueError`. `context.seed` draws noise
-  from `new Generator(seed)` exactly like `torch.Generator().manual_seed(seed)`.
+  raise `ValueError`. `context.seed` draws noise from `new Generator(seed)`
+  exactly like `torch.Generator().manual_seed(seed)`. `fromFoundation`
+  downloads only the files diffusers loads (component configurations and
+  non-variant safetensors).
 - **Scene language mode.** `Scene.fromLanguageFoundation`/`interpret` port
   `SceneLanguage` over an owned `Idefics3ForConditionalGeneration`
   (`src/_internal/native/idefics3.ts`: SigLIP-style vision tower with
@@ -336,66 +342,36 @@ others with `ValueError`.
   `Idefics3Processor` (`idefics3Processing.ts`: longest-edge LANCZOS resizing,
   image splitting, fused normalization, batches of prompts with any number of
   images, `<image>` prompt expansion, the image tokens it adds to tokenizers
-  that lack them, Jinja chat templates). Generation is transformers 5.17
-  `generate` (`causalGeneration.ts`, `logitsProcessors.ts`): greedy, sampling,
-  beam search and beam sampling, classifier-free guidance, prompt lookup,
-  chunked prefill, token healing, every logits processor and warper,
-  watermarking with PyTorch's `randperm`, and the stopping criteria including
-  `StopStringCriteria`; `interpret` passes `do_sample=False` as Python does.
-  `fromLanguageFoundation` reproduces the processor assets
-  `Idefics3Processor.save_pretrained` writes (so `processor_hashes` equal
-  Python's) for `TokenizersBackend` (including unknown class names),
-  `LlamaTokenizer`, `GPT2Tokenizer`, `T5Tokenizer`, `AlbertTokenizer` and
-  `DebertaV2Tokenizer` (with or without `Fast`); other tokenizer classes raise
-  `NotImplementedError`. A SmolVLM-256M interpretation of a small image (13
-  vision tiles) runs on the WebAssembly kernels in seconds, not minutes.
+  that lack them, Jinja chat templates; the `Fast` and `Pil` class names
+  resolve to the default processor, as in transformers). Generation is
+  transformers 5.17 `generate` (`causalGeneration.ts`, `logitsProcessors.ts`):
+  greedy, sampling, beam search and beam sampling, classifier-free guidance,
+  prompt lookup, chunked prefill, token healing, every logits processor and
+  warper, watermarking with the shared PyTorch-compatible `Generator`, and the
+  stopping criteria including `StopStringCriteria`; `interpret` passes
+  `do_sample=False` as Python does. `fromLanguageFoundation` reproduces the
+  processor assets `Idefics3Processor.save_pretrained` writes (so
+  `processor_hashes` equal Python's).
 - **Images.** `src/_internal/image/` decodes PNG, JPEG (Huffman and arithmetic,
   sequential/progressive/lossless, libjpeg-turbo's ISLOW IDCT, fancy upsampling
   and colour tables), GIF, WebP (VP8, VP8L, ALPH, ANMF) and BMP in pure
   TypeScript (inflate via `node:zlib` when present, a bundled inflater
   otherwise). `torchvision.ts` reproduces `decode_image` read modes and EXIF
   orientation; `raster.ts` and `resample.ts` reproduce `PIL.Image.open`,
-  `convert`, `resize` and `exif_transpose`; `fpmath.ts` holds a correctly
-  rounded FMA and glibc's `sin`/`cos`/`sinf` so float filters match
-  bit for bit. `vec/imageProcessing.ts` is the `ViTImageProcessor` over all of
-  them, with center-crop padding, `do_pad` and PyTorch's `NotImplementedError`
-  for BOX/HAMMING. Graph operations stay symbolic stubs exactly as in Python.
-- **External local models.** `integrations.LocalModel` wraps an explicitly
-  supplied `@huggingface/transformers` model/processor (optional peer, dynamic
-  import). Its blocking `complete` runs the same generation in a worker thread
-  with a model loaded there (`fromPretrained` arguments, or an explicit
-  `worker: { module, exportName }` loader for supplied models).
-- **Callbacks.** JavaScript cannot distinguish closures from module functions, so
-  persisted callbacks (e.g. `combine`) always need explicit `configuration()`.
-- **Tokenizer JSON.** Tokenizer configurations embed the canonical backend JSON
-  (sorted keys), as Python does. Tools built from foundations persist
-  `backend_tokenizer.to_str()` in `tokenizer_json`, `verifier_tokenizer_json`
-  and Scene's `tokenizer.json`/`tokenizer_sha256`; TypeScript writes the same
-  bytes (`rustTokenizerString`: Rust struct field order, vocabularies in id
-  order, `serde_json` float formatting, unescaped non-ASCII text). Wherever Python builds the backend with Rust
-  `Tokenizer.from_str`/`from_file` (tokenizer configurations, tool
-  `tokenizer_json`, generic fast tokenizers), TypeScript reproduces the Rust
-  `serde_json` float parsing, which can move Unigram scores by one ULP
-  (`rustJsonF64`). Class-specific transformers tokenizers (T5, DeBERTa-v2,
-  ALBERT, ...) rebuild their vocabulary exactly and are loaded exactly; for
-  `T5Tokenizer`, `DebertaV2Tokenizer`, `AlbertTokenizer`, `GPT2Tokenizer` and `LlamaTokenizer` the pipeline that
-  transformers 5 rebuilds from `tokenizer_config.json` flags is reproduced as
-  well (`src/_internal/tokenizers/serialization.ts`). Embedded
-  tokenizer JSON, configurations and fingerprints of real foundations (for
-  example `google/flan-t5-small`) therefore equal Python's.
-- **Python examples.** `examples/` ports every Python example that does not
-  require the CUDA training host (see `examples/README.md`); the optional
-  ViT/Stable Diffusion image path of `pretrained_latent_lifecycle.py` is not
-  ported.
+  `convert`, `resize` and `exif_transpose`. The float filters use the same
+  glibc ports as the samplers (`nn/randomMath.ts`), so they match bit for bit.
+  `vec/imageProcessing.ts` is the `ViTImageProcessor` over all of them, with
+  center-crop padding, `do_pad` and PyTorch's `NotImplementedError` for
+  BOX/HAMMING. 16-bit images decode to `uint16` tensors.
 - **Blocking providers.** HTTP (`OpenAICompatibleModel`, `JevModel`) and local
   providers have Python's blocking `complete` (and `completeQuestions` /
   `completeBatch`), so `op.call` and `ask` work with them: the request runs on
   a worker thread while the caller blocks on `Atomics.wait`
-  (`src/integrations/blocking.ts`). Environments that cannot block a thread on
-  I/O (browsers, edge runtimes) raise `NotImplementedError` there and keep
-  `acall`/`aask`. An injected `fetch` function cannot cross threads, so a
-  provider built with one is asynchronous only. A redirect raises
-  `ProviderHTTPError` with its 3xx `.status`, as in Python.
+  (`src/integrations/blocking.ts`). `LocalModel.complete` runs the same
+  generation in a worker thread with a model loaded there (`fromPretrained`
+  arguments, or an explicit `worker: { module, exportName }` loader for
+  supplied models). A redirect raises `ProviderHTTPError` with its 3xx
+  `.status`, as in Python.
 - **Plan actions** receive `(state, args)`. Plan validation binds step
   arguments like `inspect.signature(action).bind(None, **arguments)`, with
   Python's `TypeError` messages, against the properties the action destructures
@@ -403,8 +379,46 @@ others with `ValueError`.
   observations and policy errors record Python exception names (`Error` →
   `RuntimeError`, `RangeError` → `ValueError`, system errors by `code`;
   `src/_internal/pythonErrors.ts`).
+- **Tool configurations.** Tools reject unknown fields with Python 0.4.0a4's
+  message (`rejectUnknownToolFields` in `_internal/pretrained.ts`; field lists
+  as static `configFields`, `cognitionFields`, `rankingFields`,
+  `languageFields`).
+- **Tokenizer JSON.** Tokenizer configurations embed the canonical backend JSON
+  (sorted keys), as Python does. Tools built from foundations persist
+  `backend_tokenizer.to_str()` in `tokenizer_json`, `verifier_tokenizer_json`
+  and Scene's `tokenizer.json`/`tokenizer_sha256`; TypeScript writes the same
+  bytes (`rustTokenizerString`: Rust struct field order, vocabularies in id
+  order, `serde_json` float formatting, unescaped non-ASCII text). Wherever
+  Python builds the backend with Rust `Tokenizer.from_str`/`from_file`,
+  TypeScript reproduces the Rust `serde_json` float parsing, which can move
+  Unigram scores by one ULP (`rustJsonF64`). For `T5Tokenizer`,
+  `DebertaV2Tokenizer`, `AlbertTokenizer`, `GPT2Tokenizer` and
+  `LlamaTokenizer` the pipeline that transformers 5 rebuilds from
+  `tokenizer_config.json` flags is reproduced as well
+  (`src/_internal/tokenizers/serialization.ts`).
 - **Threads.** Python's `RLock`s become single-threaded execution plus a promise
   queue that serializes session persistence.
+
+## Remaining differences
+
+[Parity with Python](docs/parity.md#remaining-differences) lists them for
+users. In short:
+
+- CPU only (no CUDA/GPU); computed results agree with PyTorch within float
+  tolerance; bit-exact random streams and resampling follow the AArch64
+  reference platform, as PyTorch's own do.
+- Native architectures are the listed ones, and foundations need a
+  `tokenizer.json`.
+- Scene language processor assets cover the listed tokenizer classes; other
+  image processor classes raise `NotImplementedError`.
+- `openImage` reads PNG, JPEG, GIF, WebP and BMP only.
+- Blocking provider calls need a thread that can block; `LocalModel` runs
+  Transformers.js, not PyTorch.
+- Only `SFconvertbot` conversion pull requests load on public repositories.
+- Saved callbacks need an explicit `configuration()`; unmarked whole numbers
+  in user code follow the field's Python type.
+- The CUDA-host examples and the Stable Diffusion path of
+  `pretrained_latent_lifecycle.py` are not ported.
 
 ## Interoperability guarantees
 
