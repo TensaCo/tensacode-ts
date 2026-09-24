@@ -20,4 +20,4 @@ export { float, int, orderedObject } from './_internal/json.js';
 export type { PythonFloat, PythonInt } from './_internal/json.js';
 
 /** Package version (Python ``tensorcode.__version__ == '0.4.0a4'``). */
-export const version = '0.4.0-alpha.4';
+export const version = '0.4.0-alpha.5';

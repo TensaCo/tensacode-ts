@@ -6,7 +6,13 @@ APIs. The Python package is the reference implementation: where the two
 disagree on something [Parity with Python](docs/parity.md) does not list,
 Python's behavior is correct.
 
-## 0.4.0-alpha.4 (unreleased)
+## 0.4.0-alpha.5
+
+Same code as 0.4.0-alpha.4, which the release workflow published under the `next`
+dist-tag. This release makes it `latest`; the workflow now publishes pre-releases
+as `latest` until a stable version exists. Matches Python `0.4.0a4`.
+
+## 0.4.0-alpha.4
 
 This release closes most of the differences 0.4.0-alpha.3 listed as
 deliberate. See [Parity with Python](docs/parity.md) for what remains.

@@ -14,7 +14,7 @@ document and the Python behavior disagree on something not listed under
 
 | Item | Decision |
 |---|---|
-| npm name | `tensorcode` (repository `tensacode-ts`), version `0.4.0-alpha.4` (Python `0.4.0a4`) |
+| npm name | `tensorcode` (repository `tensacode-ts`), version `0.4.0-alpha.5` (Python `0.4.0a4`) |
 | Modules | ESM only (`"type": "module"`, NodeNext resolution, `.js` import suffixes) |
 | Language | TypeScript `strict`, `noImplicitOverride`, `verbatimModuleSyntax`, target ES2022 |
 | Build | `npm run build` → `tsc -p tsconfig.build.json` → `dist/` (JS + `.d.ts` + maps) |
