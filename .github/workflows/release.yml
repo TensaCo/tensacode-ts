@@ -33,7 +33,9 @@ jobs:
       - run: npm ci
       - name: Publish
         run: |
-          tag=latest; [[ "$GITHUB_REF_NAME" == *-* ]] && tag=next
+          # Pre-releases go to `next` only once a stable version exists; until then they are `latest`.
+          tag=latest
+          if [[ "$GITHUB_REF_NAME" == *-* ]] && npm view tensorcode versions --json 2>/dev/null | node -e 'const v=JSON.parse(require("fs").readFileSync(0,"utf8")||"[]");process.exit([].concat(v).some(x=>!x.includes("-"))?0:1)'; then tag=next; fi
           npm publish --access public --tag "$tag"
       - name: GitHub release
         run: |
