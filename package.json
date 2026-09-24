@@ -17,10 +17,10 @@
   "homepage": "https://tensorcode.dev",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tensaco/tensacode-ts.git"
+    "url": "git+https://github.com/TensaCo/tensacode-ts.git"
   },
   "bugs": {
-    "url": "https://github.com/tensaco/tensacode-ts/issues"
+    "url": "https://github.com/TensaCo/tensacode-ts/issues"
   },
   "engines": {
     "node": ">=20.16"
