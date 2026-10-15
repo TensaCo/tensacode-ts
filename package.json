@@ -89,6 +89,10 @@
     "./program/operation": {
       "types": "./dist/program/operation.d.ts",
       "import": "./dist/program/operation.js"
+    },
+    "./algorithm": {
+      "types": "./dist/algorithm/index.d.ts",
+      "import": "./dist/algorithm/index.js"
     }
   },
   "files": [

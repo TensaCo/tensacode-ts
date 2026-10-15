@@ -294,3 +294,12 @@ port in [examples](../examples/README.md) that reproduces its results.
 
 The design notes in [DESIGN.md](../DESIGN.md) map every Python module to its
 TypeScript file.
+
+## Algorithm substrates
+
+The version-1 `tensorcode.algorithm` artifact is shared with Python. TypeScript
+supports the tensor instruction set, explicit simultaneous state, native autograd,
+ALG.0/1/2 execution and current-parameter export. Cross-language tests execute the
+recorded robotics policy and a native-attention graph imported by Python.
+Python currently supplies the AST frontend, pretrained structural-bias adapter,
+native-module import and standalone source export; these are not TypeScript APIs.
