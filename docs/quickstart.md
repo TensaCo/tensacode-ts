@@ -1,5 +1,9 @@
 # Quickstart
 
+This quickstart covers learned tools. For deterministic code compilation and
+trainable numerical circuits, start with [compiled programs](program.md).
+
+
 Install from npm (Node.js 20.16 or newer):
 
 ```bash

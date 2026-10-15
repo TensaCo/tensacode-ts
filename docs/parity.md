@@ -1,13 +1,23 @@
 # Parity with Python
 
-The TypeScript package is a port of the Python `tensorcode` package (version
-`0.4.0a4`). It has the same operations, tools, tracing, training and artifact
+The TypeScript package is a port of the Python `tensorcode` package. It has the same operations, tools, tracing, training and artifact
 formats. The Python package is the reference: where the two disagree on
 something the [remaining differences](#remaining-differences) do not list,
 Python's behavior is the correct one and the difference is a bug.
 
 This page says how parity is checked, what matches, what you can move between
 the two languages and the few places where they still differ.
+
+## Compiled program parity
+
+Both SDKs read version-1 numerical IR and event snapshots. Source syntax is
+language-specific; the shared contract begins at the circuit. Python uses the
+CPU reference evaluator and a scalar PyTorch gradient bridge. TypeScript adds
+WASM forward execution and restricted stateless float32 WebGPU, whose outputs
+are checked against CPU with explicit tolerances. This does not make all neural
+models GPU-backed or promise bit-identical floating math across every backend.
+Program JSON is separate from pretrained model directories and experience files.
+See [compiled programs](program.md) for imports, domain checks and transport limits.
 
 ## How parity is checked
 
@@ -20,7 +30,9 @@ the two languages and the few places where they still differ.
   images, native model outputs, generation, tool receipts and error messages,
   training losses, experience files, checkpoints and session files.
 - **Ported tests.** The suite in `test/` ports the Python tests area by area.
-  It runs with `npm test` and needs neither Python nor network access.
+  It runs with `npm test`. Most tests use stored fixtures; program interchange
+  tests additionally need `python3` and the sibling `../python/src` checkout.
+  Those tests execute both languages locally without model downloads.
 - **Gradient checks.** Every differentiable operation in the numerical core is
   checked against finite differences.
 - **Real checkpoints.** Tests that need a cached Hugging Face checkpoint (for

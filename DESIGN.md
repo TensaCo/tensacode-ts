@@ -1,6 +1,6 @@
 # TensorCode for TypeScript — design
 
-This package ports the Python `tensorcode` library (v0.4.0a4, `../python`) to
+This package ports the Python `tensorcode` library (in `../python`) to
 TypeScript with **full parity** apart from the few
 [remaining differences](#remaining-differences): the same operations, tools,
 tracing, training and artifact formats, expressed idiomatically. Product site and
@@ -14,17 +14,36 @@ document and the Python behavior disagree on something not listed under
 
 | Item | Decision |
 |---|---|
-| npm name | `tensorcode` (repository `tensacode-ts`), version `0.4.0-alpha.5` (Python `0.4.0a4`) |
+| npm name | `tensorcode` (repository `tensacode-ts`), version `0.4.0-alpha.5` (Python `0.4.0a5`) |
 | Modules | ESM only (`"type": "module"`, NodeNext resolution, `.js` import suffixes) |
 | Language | TypeScript `strict`, `noImplicitOverride`, `verbatimModuleSyntax`, target ES2022 |
 | Build | `npm run build` → `tsc -p tsconfig.build.json` → `dist/` (JS + `.d.ts` + maps) |
 | Tests | `npm test` → vitest (`test/**/*.test.ts`), forked pool, 60 s default timeout |
 | Runtime | Node ≥ 20.16 (uses `fetch`, `AsyncLocalStorage`, `Intl.Segmenter`, `node:fs`) |
-| Dependencies | **none at runtime**. Optional peer `@huggingface/transformers` is only for the explicit external `integrations.LocalModel`, loaded lazily |
-| Entry points | `tensorcode` (root: tracing only, mirrors Python `tensorcode`), `tensorcode/nn`, `tensorcode/ops`, `tensorcode/ops/{vec,text,graph}`, `tensorcode/tools`, `tensorcode/tools/*`, `tensorcode/training`, `tensorcode/training/*`, `tensorcode/integrations` |
+| Dependencies | `typescript` is a runtime dependency for source parsing; the numerical engine has no native dependencies. Optional peer `@huggingface/transformers` is only for the explicit external `integrations.LocalModel`, loaded lazily |
+| Entry points | `tensorcode` (root: tracing only, mirrors Python `tensorcode`), `tensorcode/nn`, `tensorcode/ops`, `tensorcode/ops/{vec,text,graph}`, `tensorcode/tools`, `tensorcode/tools/*`, `tensorcode/training`, `tensorcode/training/*`, `tensorcode/integrations`, `tensorcode/program`, `tensorcode/program/runtime`, `tensorcode/program/operation` |
 
 Importing any entry point performs no I/O and loads no model weights (Python:
 "importing the core package does not import PyTorch or access the network").
+
+## Compiled programs (`src/program`)
+
+`compile.ts` parses a bounded TypeScript subset; `scope.ts` checks lexical
+constraints. `core.ts` owns the version-1 scalar SSA artifact, builder, checked
+reference evaluator, gradients and optimization. Every node has scalar shape
+`[]`; arrays are explicitly expanded into scalar wires. `analysis.ts` reports
+conservative intervals, and `verification.ts` checks finite-domain replacements.
+
+`tensor.ts` connects first-order program derivatives to native autograd;
+`operation.ts` supplies the JSON-configured ProgramOperation for Trainer replay.
+`runtime.ts` manages transactional event state and portable snapshots. `wasm.ts`
+emits lazy scalar WebAssembly; `webgpu.ts` emits stateless float32 WGSL and checks
+each batch against CPU results. This GPU path is separate from `src/nn` models.
+See [compiled programs](docs/program.md) for numeric contracts and limitations.
+
+The parser-free `tensorcode/program/runtime` export maps to core.ts; the event
+Runtime class is exported by the full `tensorcode/program` entry. Full tests need
+`python3` and the sibling `../python/src` checkout for live artifact interchange.
 
 ## Numerical core (`src/nn`)
 

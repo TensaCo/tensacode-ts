@@ -77,7 +77,19 @@
       "types": "./dist/integrations/index.d.ts",
       "import": "./dist/integrations/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./program": {
+      "types": "./dist/program/index.d.ts",
+      "import": "./dist/program/index.js"
+    },
+    "./program/runtime": {
+      "types": "./dist/program/core.d.ts",
+      "import": "./dist/program/core.js"
+    },
+    "./program/operation": {
+      "types": "./dist/program/operation.d.ts",
+      "import": "./dist/program/operation.js"
+    }
   },
   "files": [
     "dist",
@@ -109,7 +121,10 @@
   "devDependencies": {
     "@huggingface/transformers": "^4.3.0",
     "@types/node": "^22.10.0",
-    "typescript": "~5.9.3",
+    "esbuild": "^0.28.2",
     "vitest": "^4.1.11"
+  },
+  "dependencies": {
+    "typescript": "~5.9.3"
   }
 }

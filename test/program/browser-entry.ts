@@ -1,0 +1,21 @@
+import { Builder, compile, int32, float32, Runtime, WebGPUProgram } from '../../src/program/index.js';
+const root = globalThis as unknown as { smoke: Promise<unknown>; navigator: { gpu?: { requestAdapter(): Promise<{ requestDevice(): Promise<import('../../src/program/webgpu.js').GPUDeviceLike> } | null> } } };
+root.smoke = (async () => {
+  const p = compile('(a) => a > 4 ? 10 : 12', { inputs: { a: int32({ min: -128, max: 127 }) } });
+  const wasm = p.toWasm();
+  for (let a = -128; a <= 127; a++) if (wasm.run({ a }).result !== p.run({ a }).result) throw new Error('browser WASM mismatch');
+  const b = new Builder(), s = b.state('s', 0), x = b.input('x'); b.update(s, s.add(x));
+  const runtime = new Runtime(b.build(s)); runtime.dispatch({ x: 4 });
+  if (Runtime.restore(runtime.snapshot()).state.s !== 4) throw new Error('browser snapshot mismatch');
+  const adapter = await root.navigator.gpu?.requestAdapter();
+  if (!adapter) return { cpu: true, wasm: true, state: true, gpu: 'unavailable' };
+  const gpuBuilder = new Builder({ dtype: 'float32' }), a = gpuBuilder.input('a', float32());
+  const gpu = new WebGPUProgram(gpuBuilder.build(gpuBuilder.select(a.gt(4), 10, 12)));
+  const device = await adapter.requestDevice();
+  const result = await gpu.runBatch(device, [{ a: 4 }, { a: 4.5 }, { a: 5 }], { atol: 0, rtol: 0 });
+  if (JSON.stringify(result) !== JSON.stringify([{ result: 12 }, { result: 10 }, { result: 10 }])) throw new Error('GPU mismatch');
+  const affine = new WebGPUProgram(gpuBuilder.build(gpuBuilder.affine([a, a], [2, 3], 1)));
+  const affineResult = await affine.runBatch(device, [{ a: 2 }], { atol: 0, rtol: 0 });
+  if (affineResult[0]?.result !== 11) throw new Error('GPU affine mismatch');
+  return { cpu: true, wasm: true, state: true, gpu: true };
+})();

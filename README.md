@@ -5,10 +5,17 @@
 **Source:** [GitHub](https://github.com/TensaCo/tensacode-ts) ·
 **Python package:** [tensacode-py](https://github.com/TensaCo/tensacode-py)
 
+TensorCode represents deterministic rules and learned behavior in one SDK.
+Compile a bounded numerical function to run without training, or compose its
+circuit with explicitly trainable parameters. The source compiler and existing
+operation tracing serve different purposes: compilation captures supported
+arithmetic and control flow; tracing records calls between operations.
+
 TensorCode builds trainable programs from callable operations and small tools
 that own their models. This is the TypeScript port of the Python `tensorcode`
 package. It has the same operations, tools, tracing, training and artifact
-formats, and it runs in Node.js with **no runtime dependencies**.
+formats. Its numerical engine has no native dependencies; source compilation
+uses the bundled npm dependency `typescript`.
 
 You can compose encoders, scorers and decoders (`tensorcode/ops/*`) or use a
 complete tool such as `Investigator`, `Planner` or `Chatbot`
@@ -19,7 +26,7 @@ Python package. Tracing records which operation produced which value, so
 supervised local tensor paths can be replayed and trained. Tracing does not make
 arbitrary JavaScript or remote model calls differentiable.
 
-> **Status: 0.4.0 alpha** (Python `0.4.0a4`). APIs may change between alphas.
+> **Status: 0.4.0 alpha** (both SDKs). APIs may change between alphas.
 > Importing any entry point performs no I/O and loads no model weights. The
 > measured behavior and its limits are documented at
 > [tensorcode.dev/docs](https://tensorcode.dev/docs/). Consistent benefits of
@@ -36,6 +43,31 @@ npm install tensorcode
 The package is ESM-only (`import`, not `require`) and ships its own type
 declarations. The optional peer `@huggingface/transformers` is only needed for
 `integrations.LocalModel`.
+
+## Compile a rule without training
+
+The compiler described here is available in this source checkout. Install the
+checkout when trying these APIs; this guide does not establish which published
+package release contains them.
+
+```ts
+import { compile, int32 } from 'tensorcode/program';
+
+const choose = compile((a: number) => a > 4 ? 10 : 12, {
+  inputs: { a: int32({ min: -128, max: 127 }) },
+  semantics: 'exact',
+});
+console.log(choose.run({ a: 5 })); // { result: 10 }
+console.log(choose.verify()); // passed: true, cases: 256, exhaustive: true
+```
+
+Run `npm install` in this repository to build the checkout before running it.
+
+The declared integer range makes checking all 256 possible inputs practical.
+Floating inputs require explicit verification cases. Compilation rejects syntax
+outside its bounded subset; it is not a compiler for arbitrary application code.
+The [program guide](docs/program.md) continues with learned corrections, state,
+gradient policies and cross-language artifacts.
 
 ## 30-second example
 
@@ -89,6 +121,9 @@ resumable training checkpoints and loading in a fresh process.
 | Entry point | Python module | Contents |
 |---|---|---|
 | `tensorcode` | `tensorcode` | `trace()`, `Trace`, `InputRef`, `OutputRef`, `version`, error classes |
+| `tensorcode/program` | `tensorcode.program` | Source compiler, builder, runtime, verification and backend adapters |
+| `tensorcode/program/runtime` | `tensorcode.program.core` | Parser-free core: Program, Builder and domains; not the event Runtime class |
+| `tensorcode/program/operation` | `tensorcode.program.operation` | ProgramOperation for tracing and Trainer |
 | `tensorcode/ops` | `tensorcode.ops` | The `Operation` contract (`op.call(value, { context })`, `await op.acall(...)`) and `ModuleOperation` |
 | `tensorcode/ops/vec` | `tensorcode.ops.vec` | `Space`, `Latent`, `Transform`, `Classify`, `Score`, `Decide`, `Retrieve`, `Decode`, `VocabularyEncoder`, `PatchEncoder`, `TextEncoder`, `ImageEncoder`, `TextDecoder` |
 | `tensorcode/ops/text` | `tensorcode.ops.text` | `Message`, message encoders, owned and provider-backed `Transform`, `Classify`, `Decide`, `Score`, `Retrieve`, and `ask` |
@@ -106,7 +141,7 @@ The TypeScript API uses camelCase (`savePretrained`, `fromPretrained`,
 `Trainer.fromTool`, `loadExperience`). Persisted data keeps Python's snake_case
 (`selected_id`, `tensorcode_config.json` fields, experience files), so the two
 implementations can share artifacts. Anything that touches the filesystem or
-network returns a `Promise`. Pure computation is synchronous.
+network returns a `Promise`. CPU computation is synchronous; program WebGPU batch execution is asynchronous.
 
 ## Parity with Python
 
@@ -128,13 +163,18 @@ network returns a `Promise`. Pure computation is synchronous.
 | Tokenizers | `tokenizer.json` runtime | WordPiece, BPE, Unigram, WordLevel, plus transformers 5's class rebuilds (BERT, RoBERTa, CLIP, T5, DeBERTa-v2, ALBERT, GPT2, Llama), slow `vocab.txt`/`vocab.json`+`merges.txt` vocabularies and class-default tokenizers |
 | Integrations | OpenAI-compatible, Jev, Transformers.js `LocalModel` | Blocking `complete` like Python's, plus `acomplete`. No implicit retries or redirects |
 | Random numbers | Bitwise | `manualSeed(n)` is `torch.manual_seed(n)`: fresh weights, dropout masks and sampled tokens equal Python's |
-| Compute | CPU: WebAssembly SIMD kernels on worker threads, no native dependencies | No GPU. Results agree with PyTorch within float tolerance |
+| Compiled programs | Shared version-1 scalar IR | Source subsets differ; Python uses the reference runtime, TypeScript also offers WASM and restricted WebGPU |
+| Compute | CPU: WebAssembly SIMD kernels on worker threads, no native dependencies | Native neural models run on CPU. A separate compiled-program backend supports stateless float32 WebGPU; neural results agree with PyTorch within float tolerance |
 
 [Parity with Python](docs/parity.md) explains how parity is checked, which files
 move between the two languages and the few remaining differences.
 [DESIGN.md](DESIGN.md) maps each Python module to its TypeScript file.
 
+
 ## Guides
+
+- [Compiled programs](docs/program.md): compile known rules, check their outputs,
+  add trainable parameters, and persist state and portable circuits.
 
 - [Quickstart](docs/quickstart.md): the offline training lifecycle, end to end.
 - [Operations](docs/operations.md): vector, text and graph operations, providers
@@ -156,7 +196,7 @@ move between the two languages and the few remaining differences.
 npm install          # also builds dist/ through the prepare script
 npm run typecheck    # tsc --noEmit over src and tests
 npm run build        # tsc -> dist/
-npm test             # vitest; needs neither Python nor network
+npm test             # vitest; program interoperability tests need python3 and ../python/src
 node examples/investigatorQuickstart.ts
 ```
 

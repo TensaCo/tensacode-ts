@@ -13,6 +13,21 @@ autograd core. This guide mirrors the Python
 standalone checkpoint files are interchangeable between the two packages. See
 the [quickstart](quickstart.md) for a complete runnable program.
 
+## Train compiled parameters
+
+A compiled program joins this same training interface through `ProgramOperation`
+from `tensorcode/program/operation`. Construct it from the program's JSON
+artifact and register it as a named operation with
+`Trainer.fromOps`. Its parameters participate in replay and trainer checkpoints;
+state and host calls are rejected to keep replay pure.
+
+For a direct optimizer example that adds a learned correction to a fixed rule,
+see [compiled programs](program.md). Export the trained operation's `artifact()`
+to retain updated weights. `configuration()` describes its original construction;
+use the original configuration when recreating operation bindings for checkpoint
+resume. A trained export is a new artifact, not a replacement for a trainer's
+optimizer state and experience bindings.
+
 ## Train an owned tool
 
 ```ts
