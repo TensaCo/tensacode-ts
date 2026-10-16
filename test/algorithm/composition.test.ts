@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { fixtureJson } from "../helpers/fixtures.js";
 import {
   Algorithm,
   compileSchedule,
@@ -24,20 +24,15 @@ it("compiles dependency scheduling on all substrates", () => {
   expect(() => compileSchedule({ a: [], b: ["a", "a"] })).toThrow(/duplicate/);
   expect(() => compileSchedule({})).toThrow();
 });
-it("replays real Python kitting decisions in TypeScript", () => {
-  const base = new URL(
-    "../../../python/docs/results/robotics/kitting/",
-    import.meta.url,
-  );
-  const a = Algorithm.fromJSON(
-    readFileSync(new URL("policy.json", base), "utf8"),
-  );
-  const cases = JSON.parse(
-    readFileSync(new URL("alg2-decisions.json", base), "utf8"),
-  ) as { inputs: Inputs; outputs: Record<string, number[]> }[];
+it("replays exhaustive Python scheduler decisions in TypeScript", () => {
+  const payload = fixtureJson<{
+    artifact: string;
+    cases: { inputs: Inputs; outputs: Record<string, number[]> }[];
+  }>("algorithm_schedule.json");
+  const a = Algorithm.fromJSON(payload.artifact);
   for (const target of ["alg0", "alg1", "alg2"] as const) {
     const m = a.compile(target);
-    for (const c of cases)
+    for (const c of payload.cases)
       for (const [key, y] of Object.entries(m.forward(c.inputs)))
         expect(Array.from(y.data)).toEqual(c.outputs[key]);
   }

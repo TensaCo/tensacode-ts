@@ -1,7 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fixtureJson } from "../helpers/fixtures.js";
 import {
   Algorithm,
   AlgorithmBuilder,
@@ -87,65 +85,26 @@ describe("portable algorithm substrates", () => {
     expect(() => a.compile("alg1", { routing: "soft" })).toThrow();
     expect(() => a.run({ x: [1, 2] })).toThrow();
   });
-  it("runs the actual Python robotics policy artifact with cross-language parity", () => {
-    const path = fileURLToPath(
-      new URL(
-        "../../../python/docs/results/robotics/calibration/policy.json",
-        import.meta.url,
-      ),
-    );
-    const artifact = JSON.parse(
-      readFileSync(path, "utf8"),
-    ) as AlgorithmArtifact;
-    const a = new Algorithm(artifact);
-    const inputs = {
-      position: Array.from({ length: 20 }, (_, i) => Math.sin(i) * 0.2),
-      velocity: Array.from({ length: 20 }, (_, i) => Math.cos(i) * 0.4),
-      target: Array(20).fill(0.1),
-      target_velocity: Array(20).fill(0),
-      feedforward: Array(20).fill(0.3),
-    };
-    const python = fileURLToPath(
-      new URL("../../../python/.venv/bin/python", import.meta.url),
-    );
-    const expected = JSON.parse(
-      execFileSync(
-        python,
-        [
-          "-c",
-          "import json,sys; from tensorcode.algorithm import Algorithm; a=Algorithm.from_json(open(sys.argv[1]).read()); print(json.dumps({k:v.tolist() for k,v in a.run(json.loads(sys.argv[2])).items()}))",
-          path,
-          JSON.stringify(inputs),
-        ],
-        { encoding: "utf8" },
-      ),
-    ) as { torque: number[] };
-    for (const t of targets) {
-      const result = a.compile(t).forward(inputs).torque!;
+  it("runs a Python vector feedback artifact with cross-language parity", () => {
+    const payload = fixtureJson<{
+      artifact: AlgorithmArtifact;
+      inputs: Record<string, number[]>;
+      expected: number[];
+    }>("algorithm_feedback.json");
+    const inputs = payload.inputs;
+    const a = new Algorithm(payload.artifact);
+    for (const target of targets) {
+      const result = a.compile(target).forward(inputs).result!;
       for (let i = 0; i < 20; i++)
-        expect(result.data[i]).toBeCloseTo(expected.torque[i]!, 10);
+        expect(result.data[i]).toBeCloseTo(payload.expected[i]!, 10);
     }
   });
   it("imports a native Python attention graph including masks", () => {
-    const python = fileURLToPath(
-      new URL("../../../python/.venv/bin/python", import.meta.url),
-    );
-    const payload = JSON.parse(
-      execFileSync(
-        python,
-        [
-          "-c",
-          `import json,torch
-from tensorcode.algorithm import from_attention
-torch.manual_seed(9)
-m=torch.nn.MultiheadAttention(4,2,batch_first=True,dropout=0.).double()
-a=from_attention(m,tokens=3,causal=True)
-x=torch.randn(3,4,dtype=torch.float64)
-print(json.dumps({'algorithm':a.graph(),'x':x.tolist(),'expected':a.run({'x':x.numpy()})['result'].tolist()}))`,
-        ],
-        { encoding: "utf8" },
-      ),
-    ) as { algorithm: AlgorithmArtifact; x: number[][]; expected: number[][] };
+    const payload = fixtureJson<{
+      algorithm: AlgorithmArtifact;
+      x: number[][];
+      expected: number[][];
+    }>("algorithm_attention.json");
     const a = new Algorithm(payload.algorithm);
     for (const t of targets) {
       const y = a.compile(t).forward({ x: payload.x }).result!;
