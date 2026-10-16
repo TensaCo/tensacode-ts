@@ -1,9 +1,9 @@
 /**
  * Evaluate a supplied local vision-language model on one image (Python
- * ``examples/local_multimodal.py``; not a benchmark).
+ * ``examples/vision/local_multimodal.py``; not a benchmark).
  *
  *     npm run build
- *     node examples/localMultimodal.ts --image candy.jpg --source "https://example.org/candy.jpg" --output report.json
+ *     node examples/vision/localMultimodal.ts --image candy.jpg --source "https://example.org/candy.jpg" --output report.json
  *
  * Install the optional peer `@huggingface/transformers` and make the model
  * available locally first (this script never downloads images or weights:

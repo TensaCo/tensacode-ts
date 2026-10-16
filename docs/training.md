@@ -123,8 +123,8 @@ code, `await session.run(async () => ...)` keeps capturing across `await`s.
 `fromOps` binds an already-built program and does not change its module modes.
 An operation trainer does not infer an objective, so use `trace()` and
 `supervise()` as shown above. See
-[`examples/traceAndTrain.ts`](../examples/traceAndTrain.ts) and
-[`examples/ownedVectorLifecycle.ts`](../examples/ownedVectorLifecycle.ts).
+[`examples/vectors/traceAndTrain.ts`](../examples/vectors/traceAndTrain.ts) and
+[`examples/vectors/ownedVectorLifecycle.ts`](../examples/vectors/ownedVectorLifecycle.ts).
 
 ## Capture and supervision
 

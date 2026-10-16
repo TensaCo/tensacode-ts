@@ -113,7 +113,7 @@ start untrained. The advanced `X.fromModule(module, options)` factories wrap a
 rebuilt safely from data-only artifacts, so saving one throws instead of
 silently dropping its behavior.
 
-See [`examples/ownedVectorLifecycle.ts`](../examples/ownedVectorLifecycle.ts)
+See [`examples/vectors/ownedVectorLifecycle.ts`](../examples/vectors/ownedVectorLifecycle.ts)
 for a complete train → save → reload → resume program.
 
 ## Messages and model providers (`tensorcode/ops/text`)

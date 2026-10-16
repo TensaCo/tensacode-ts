@@ -4,7 +4,7 @@
  * reviewed experience, save the model and reload it for prediction.
  *
  *     npm run build
- *     node examples/investigatorQuickstart.ts   # Node >= 22.18 runs .ts directly
+ *     node examples/cognition/investigatorQuickstart.ts   # Node >= 22.18 runs .ts directly
  *
  * Runs offline on CPU in about a second. Two authored cases demonstrate the
  * lifecycle; they are not an evaluation of investigation competence.

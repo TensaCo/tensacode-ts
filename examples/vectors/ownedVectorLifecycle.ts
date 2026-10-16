@@ -1,12 +1,12 @@
 /**
  * Offline owned vector-operation lifecycle (Python
- * examples/owned_vector_lifecycle.py): compose a VocabularyEncoder and a
+ * examples/vectors/owned_vector_lifecycle.py): compose a VocabularyEncoder and a
  * Classify head, trace and supervise a prediction, persist the experience,
  * train with `Trainer.fromOps`, save each operation, reload them, and resume
  * training from the checkpoint.
  *
  *     npm run build
- *     node examples/ownedVectorLifecycle.ts [--epochs 5]
+ *     node examples/vectors/ownedVectorLifecycle.ts [--epochs 5]
  *
  * Two authored cases do not measure quality.
  */

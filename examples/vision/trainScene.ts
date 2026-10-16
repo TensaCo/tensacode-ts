@@ -1,10 +1,10 @@
 /**
  * Train and evaluate an owned scene ranker on supplied image-and-candidate
- * JSONL (Python ``examples/train_scene.py``).
+ * JSONL (Python ``examples/vision/train_scene.py``).
  *
  *     npm run build
- *     node examples/trainScene.ts --train scenes-train.jsonl --test scenes-test.jsonl --model /tmp/scene-model
- *     node examples/trainScene.ts --test scenes-test.jsonl --model /tmp/scene-model     # evaluate a saved model
+ *     node examples/vision/trainScene.ts --train scenes-train.jsonl --test scenes-test.jsonl --model /tmp/scene-model
+ *     node examples/vision/trainScene.ts --test scenes-test.jsonl --model /tmp/scene-model     # evaluate a saved model
  *
  * Each record: `image_path`, `source_id`, `question`, `candidates: [{id, text}]`,
  * `target` (a candidate ID). Images must be caller-licensed files; they are

@@ -1,12 +1,12 @@
 /**
  * Learn revisable interpretations from caller-reviewed evidence sequences
- * (Python ``examples/hypothesis_learning.py``).
+ * (Python ``examples/cognition/hypothesis_learning.py``).
  *
  *     npm run build
- *     node examples/hypothesisLearning.ts collect --input reviewed.jsonl --artifacts /tmp/hypotheses \
+ *     node examples/cognition/hypothesisLearning.ts collect --input reviewed.jsonl --artifacts /tmp/hypotheses \
  *       --hypothesis database --hypothesis network
- *     node examples/hypothesisLearning.ts train --artifacts /tmp/hypotheses --epochs 30
- *     node examples/hypothesisLearning.ts predict --input cases.jsonl --artifacts /tmp/hypotheses
+ *     node examples/cognition/hypothesisLearning.ts train --artifacts /tmp/hypotheses --epochs 30
+ *     node examples/cognition/hypothesisLearning.ts predict --input cases.jsonl --artifacts /tmp/hypotheses
  *
  * JSONL: `{"case_id": "...", "evidence": [{"source_id": "...", "text": "...",
  * "target": "reviewed hypothesis", "reviewer": "..."}, ...]}`. Prediction

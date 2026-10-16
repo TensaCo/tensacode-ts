@@ -4,8 +4,8 @@
  * process.
  *
  *     npm run build
- *     node examples/traceAndTrain.ts            # Node >= 22.18 runs .ts directly
- *     npx tsx examples/traceAndTrain.ts         # or with tsx
+ *     node examples/vectors/traceAndTrain.ts            # Node >= 22.18 runs .ts directly
+ *     npx tsx examples/vectors/traceAndTrain.ts         # or with tsx
  *
  * The second phase (`resume`) is started automatically in a child process: it
  * constructs fresh, randomly initialized operations, restores the checkpoint

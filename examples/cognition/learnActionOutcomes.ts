@@ -1,9 +1,9 @@
 /**
  * Measured feedback in an explicitly authored, tiny service-recovery
- * simulation (Python ``examples/learn_action_outcomes.py``).
+ * simulation (Python ``examples/cognition/learn_action_outcomes.py``).
  *
  *     npm run build
- *     node examples/learnActionOutcomes.ts --output /tmp/action-outcome-run --epochs 18
+ *     node examples/cognition/learnActionOutcomes.ts --output /tmp/action-outcome-run --epochs 18
  *
  * This is a mechanism demonstration, not real-world competence or causal
  * inference. The environment, actions, telemetry semantics, exploration and

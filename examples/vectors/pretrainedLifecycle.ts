@@ -4,8 +4,8 @@
  * and (optionally) `pushToHub`.
  *
  *     npm run build
- *     node examples/pretrainedLifecycle.ts
- *     HF_TOKEN=hf_... node examples/pretrainedLifecycle.ts --push your-name/tiny-scorer
+ *     node examples/vectors/pretrainedLifecycle.ts
+ *     HF_TOKEN=hf_... node examples/vectors/pretrainedLifecycle.ts --push your-name/tiny-scorer
  *
  * Artifacts contain `tensorcode_config.json` (format, class identity and JSON
  * configuration), `model.safetensors` and a `README.md` model card. They are

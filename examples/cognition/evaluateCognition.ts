@@ -1,10 +1,10 @@
 /**
  * Evaluate an owned cognitive Chatbot on explicit evidence, with honest
- * controls (Python ``examples/evaluate_cognition.py``).
+ * controls (Python ``examples/cognition/evaluate_cognition.py``).
  *
  *     npm run build
- *     node examples/evaluateCognition.ts --model ./cognitive-chatbot --cases hotpot-cases.jsonl --output report.json
- *     node examples/evaluateCognition.ts --model ./assembled --ranker ./investigator --language-repo google/flan-t5-base \
+ *     node examples/cognition/evaluateCognition.ts --model ./cognitive-chatbot --cases hotpot-cases.jsonl --output report.json
+ *     node examples/cognition/evaluateCognition.ts --model ./assembled --ranker ./investigator --language-repo google/flan-t5-base \
  *       --language-revision REV --verifier-directory ./verifier --cases cases.jsonl --output report.json
  *
  * Real HotpotQA rows use oracle supporting passages. Answer coverage and
@@ -217,7 +217,7 @@ async function assemble(rankerPath: string, languageRepo: string, languageRevisi
   let retrieval: { configuration(): unknown; stateDict(): Map<string, unknown> } | null = null;
   if (options.retrievalPath) {
     // Python imports ``tensorcode._internal.retrieval`` for this step as well.
-    const { RetrievalEncoder } = await import('../dist/_internal/retrieval.js');
+    const { RetrievalEncoder } = await import('../../dist/_internal/retrieval.js');
     retrieval = await RetrievalEncoder.fromFoundation(options.retrievalPath, {
       pooling: 'masked_mean', normalize: true, revision: '1110a243fdf4706b3f48f1d95db1a4f5529b4d41', maxTokens: 256, localFilesOnly: true,
     });

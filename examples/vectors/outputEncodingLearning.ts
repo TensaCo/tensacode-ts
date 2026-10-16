@@ -1,9 +1,9 @@
 /**
  * Collect a text → OUTPUT_ENCODING → text program, train it, and reload its
- * operations (Python ``examples/output_encoding_learning.py``).
+ * operations (Python ``examples/vectors/output_encoding_learning.py``).
  *
  *     npm run build
- *     node examples/outputEncodingLearning.ts --foundation google/flan-t5-small \
+ *     node examples/vectors/outputEncodingLearning.ts --foundation google/flan-t5-small \
  *       --revision 0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab --data reviewed.jsonl --output /tmp/readout-run
  *
  * Supply reviewed JSONL rows `{"text": "input text", "target": "reviewed output"}`.

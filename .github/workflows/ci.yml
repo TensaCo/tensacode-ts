@@ -41,12 +41,12 @@ jobs:
         # Node >= 22.18 runs TypeScript files directly (type stripping).
         if: matrix.node == '24.x'
         run: |
-          node examples/investigatorQuickstart.ts
-          node examples/ownedVectorLifecycle.ts
-          node examples/supportTriage.ts
-          node examples/traceAndTrain.ts
-          node examples/pretrainedLifecycle.ts
-          node examples/learnActionOutcomes.ts --output "$RUNNER_TEMP/action-outcomes"
+          node examples/cognition/investigatorQuickstart.ts
+          node examples/vectors/ownedVectorLifecycle.ts
+          node examples/retrieval/supportTriage.ts
+          node examples/vectors/traceAndTrain.ts
+          node examples/vectors/pretrainedLifecycle.ts
+          node examples/cognition/learnActionOutcomes.ts --output "$RUNNER_TEMP/action-outcomes"
       - name: Package contents
         if: matrix.node == '24.x'
         run: npm pack --dry-run

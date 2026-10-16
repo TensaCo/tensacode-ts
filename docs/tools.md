@@ -48,7 +48,7 @@ optimizer state or collected experience.
 
 `PretrainedModule` (also exported from `tensorcode/tools`) is the base class of
 every tool. Extend it to make your own owned, saveable models; see
-[`examples/pretrainedLifecycle.ts`](../examples/pretrainedLifecycle.ts).
+[`examples/vectors/pretrainedLifecycle.ts`](../examples/vectors/pretrainedLifecycle.ts).
 
 ## Chatbot
 

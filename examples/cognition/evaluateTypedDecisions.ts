@@ -1,11 +1,11 @@
 /**
  * Compare generated-JSON and likelihood decoding for owned typed decisions
- * (Python ``examples/evaluate_typed_decisions.py``).
+ * (Python ``examples/cognition/evaluate_typed_decisions.py``).
  *
  *     npm run build
- *     node examples/evaluateTypedDecisions.ts --foundation google/flan-t5-small \
+ *     node examples/cognition/evaluateTypedDecisions.ts --foundation google/flan-t5-small \
  *       --banking77 banking_data/test.csv --per-class 5 --output typed-decisions.json
- *     node examples/evaluateTypedDecisions.ts --foundation google/flan-t5-small \
+ *     node examples/cognition/evaluateTypedDecisions.ts --foundation google/flan-t5-small \
  *       --candidates response-quality-candidates.jsonl --labels labels-a.jsonl labels-b.jsonl
  *
  * Zero-shot diagnostic of the *decoding mechanism* on a supplied foundation:

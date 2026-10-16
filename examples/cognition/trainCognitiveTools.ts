@@ -1,9 +1,9 @@
 /**
  * Train owned Investigator and Planner models on pinned HotpotQA support
- * annotations, not invented outcomes (Python ``examples/train_cognitive_tools.py``).
+ * annotations, not invented outcomes (Python ``examples/cognition/train_cognitive_tools.py``).
  *
  *     npm run build
- *     node examples/trainCognitiveTools.ts --output /tmp/cognitive-tools --train-count 512 --validation-count 128
+ *     node examples/cognition/trainCognitiveTools.ts --output /tmp/cognitive-tools --train-count 512 --validation-count 128
  *
  * Reads the first official distractor training rows and official validation
  * rows of `hotpotqa/hotpot_qa` at the pinned revision (in shard order, through

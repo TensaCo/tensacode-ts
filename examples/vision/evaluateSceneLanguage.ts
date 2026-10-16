@@ -1,10 +1,10 @@
 /**
  * Evaluate owned scene interpretations with real, blank and shuffled image
- * evidence (Python ``examples/evaluate_scene_language.py``).
+ * evidence (Python ``examples/vision/evaluate_scene_language.py``).
  *
  *     npm run build
- *     node examples/evaluateSceneLanguage.ts --data vsr.jsonl --model ./scene-language --report report.json
- *     node examples/evaluateSceneLanguage.ts --data vsr.jsonl --model ./scene-language \
+ *     node examples/vision/evaluateSceneLanguage.ts --data vsr.jsonl --model ./scene-language --report report.json
+ *     node examples/vision/evaluateSceneLanguage.ts --data vsr.jsonl --model ./scene-language \
  *       --foundation HuggingFaceTB/SmolVLM-256M-Instruct --revision 7e3e67edbbed1bf9888184d9df282b700a323964 --report report.json
  *
  * Input JSONL: `image_path`, `source_id`, `question` (a spatial caption),

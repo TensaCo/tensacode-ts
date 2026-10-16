@@ -1,10 +1,10 @@
 /**
  * Inspect one caller-supplied image with an explicit multimodal model
- * (Python ``examples/image_inspection.py``).
+ * (Python ``examples/vision/image_inspection.py``).
  *
  *     npm run build
- *     node examples/imageInspection.ts photo.png "What is on the table?" --local-model HuggingFaceTB/SmolVLM-256M-Instruct
- *     node examples/imageInspection.ts photo.png "What is on the table?" --base-url http://localhost:8000/v1 --model my-vlm
+ *     node examples/vision/imageInspection.ts photo.png "What is on the table?" --local-model HuggingFaceTB/SmolVLM-256M-Instruct
+ *     node examples/vision/imageInspection.ts photo.png "What is on the table?" --base-url http://localhost:8000/v1 --model my-vlm
  *
  * `--local-model` loads a Transformers.js model (install the optional peer
  * `@huggingface/transformers`; `--allow-download` permits fetching missing

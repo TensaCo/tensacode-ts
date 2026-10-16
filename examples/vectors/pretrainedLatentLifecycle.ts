@@ -1,9 +1,9 @@
 /**
  * Bounded, explicitly supervised text-latent lifecycle on a pretrained model
- * (Python ``examples/pretrained_latent_lifecycle.py``, text path).
+ * (Python ``examples/vectors/pretrained_latent_lifecycle.py``, text path).
  *
  *     npm run build
- *     node examples/pretrainedLatentLifecycle.ts --output /tmp/latent-run
+ *     node examples/vectors/pretrainedLatentLifecycle.ts --output /tmp/latent-run
  *
  * Downloads the pinned `google/flan-t5-small` revision unless it is cached (or
  * pass `--local-files-only`). The four authored pairs demonstrate adapter

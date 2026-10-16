@@ -1,9 +1,9 @@
 /**
  * Bounded research over caller-supplied local text documents (Python
- * ``examples/research_assistant.py``).
+ * ``examples/cognition/research_assistant.py``).
  *
  *     npm run build
- *     node examples/researchAssistant.ts ./handbook "How do I rotate the API key?" \
+ *     node examples/cognition/researchAssistant.ts ./handbook "How do I rotate the API key?" \
  *       --base-url http://localhost:8000/v1 --model local-model
  *
  * A `text.Decide` chooser selects one supplied action per step inside

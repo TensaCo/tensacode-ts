@@ -197,7 +197,7 @@ npm install          # also builds dist/ through the prepare script
 npm run typecheck    # tsc --noEmit over src and tests
 npm run build        # tsc -> dist/
 npm test             # vitest; program interoperability tests need python3 and ../python/src
-node examples/investigatorQuickstart.ts
+node examples/cognition/investigatorQuickstart.ts
 ```
 
 Library code lives in `src/`. Tests in `test/` port the Python suite and check

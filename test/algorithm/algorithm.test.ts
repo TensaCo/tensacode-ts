@@ -90,7 +90,7 @@ describe("portable algorithm substrates", () => {
   it("runs the actual Python robotics policy artifact with cross-language parity", () => {
     const path = fileURLToPath(
       new URL(
-        "../../../python/docs/results/algorithm-robotics/policy.json",
+        "../../../python/docs/results/robotics/calibration/policy.json",
         import.meta.url,
       ),
     );

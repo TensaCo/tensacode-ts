@@ -1,11 +1,11 @@
 /**
  * Structured text operations over an explicit model provider (Python
- * ``examples/support_triage.py`` plus an offline tour).
+ * ``examples/retrieval/support_triage.py`` plus an offline tour).
  *
  *     npm run build
- *     node examples/supportTriage.ts
- *     OPENAI_BASE_URL=http://localhost:8000/v1 OPENAI_MODEL=my-model node examples/supportTriage.ts
- *     node examples/supportTriage.ts --input tickets.jsonl --policy policy.txt \
+ *     node examples/retrieval/supportTriage.ts
+ *     OPENAI_BASE_URL=http://localhost:8000/v1 OPENAI_MODEL=my-model node examples/retrieval/supportTriage.ts
+ *     node examples/retrieval/supportTriage.ts --input tickets.jsonl --policy policy.txt \
  *       --label billing --label incident --label question --base-url http://localhost:8000/v1 --model local-model
  *
  * With `--input`, this is the Python CLI: route real support tickets (UTF-8

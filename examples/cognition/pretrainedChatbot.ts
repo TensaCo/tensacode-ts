@@ -1,10 +1,10 @@
 /**
  * Load an owned TensorCode chatbot from a local artifact or the Hugging Face
- * Hub and talk to it (Python ``examples/pretrained_chatbot.py``).
+ * Hub and talk to it (Python ``examples/cognition/pretrained_chatbot.py``).
  *
  *     npm run build
- *     node examples/pretrainedChatbot.ts /tmp/chatbot-run/model --prompt 'Which evidence should we examine next?'
- *     node examples/pretrainedChatbot.ts jacob-valdez/tensorcode-chatbot-hotpot-001 --local-files-only
+ *     node examples/cognition/pretrainedChatbot.ts /tmp/chatbot-run/model --prompt 'Which evidence should we examine next?'
+ *     node examples/cognition/pretrainedChatbot.ts jacob-valdez/tensorcode-chatbot-hotpot-001 --local-files-only
  *
  * Omit `--prompt` for an interactive session. `--load-session` / `--save-session`
  * restore and persist the conversation (session files are interchangeable with

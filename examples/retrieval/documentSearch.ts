@@ -1,9 +1,9 @@
 /**
  * Search local UTF-8 text files, then answer from cited retrieved excerpts
- * (Python ``examples/document_search.py``).
+ * (Python ``examples/retrieval/document_search.py``).
  *
  *     npm run build
- *     node examples/documentSearch.ts --directory ./handbook --query "Reset MFA?" \
+ *     node examples/retrieval/documentSearch.ts --directory ./handbook --query "Reset MFA?" \
  *       --base-url http://localhost:8000/v1 --model local-model --top-k 3
  *
  * Only visible, non-symlink `.txt` and `.md` files below the explicit

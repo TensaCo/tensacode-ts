@@ -1,10 +1,10 @@
 /**
  * Fine-tune an owned Chatbot on explicit JSONL input/target/source records
- * (Python ``examples/train_chatbot.py``).
+ * (Python ``examples/cognition/train_chatbot.py``).
  *
  *     npm run build
- *     node examples/trainChatbot.ts --train reviewed-train.jsonl --test reviewed-test.jsonl --output /tmp/chatbot-run
- *     node examples/pretrainedChatbot.ts /tmp/chatbot-run/model --prompt 'Which evidence should we examine next?'
+ *     node examples/cognition/trainChatbot.ts --train reviewed-train.jsonl --test reviewed-test.jsonl --output /tmp/chatbot-run
+ *     node examples/cognition/pretrainedChatbot.ts /tmp/chatbot-run/model --prompt 'Which evidence should we examine next?'
  *
  * Each row requires nonempty `id`, `input` and `target`; inputs must contain
  * only evidence available at inference time. The prescribed schedule never

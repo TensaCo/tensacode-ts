@@ -1,11 +1,11 @@
 /**
  * Learn to rank supplied plans from observed outcomes; never execute a plan
- * (Python ``examples/plan_learning.py``).
+ * (Python ``examples/cognition/plan_learning.py``).
  *
  *     npm run build
- *     node examples/planLearning.ts collect --input observed.jsonl --artifacts /tmp/plans
- *     node examples/planLearning.ts train --artifacts /tmp/plans --epochs 100
- *     node examples/planLearning.ts predict --input heldout.jsonl --artifacts /tmp/plans
+ *     node examples/cognition/planLearning.ts collect --input observed.jsonl --artifacts /tmp/plans
+ *     node examples/cognition/planLearning.ts train --artifacts /tmp/plans --epochs 100
+ *     node examples/cognition/planLearning.ts predict --input heldout.jsonl --artifacts /tmp/plans
  *
  * JSONL rows: id, task, evidence=[{id, text}], plans=[{id, text, outcome,
  * source}]. Training outcomes must be finite numbers on a shared scale where

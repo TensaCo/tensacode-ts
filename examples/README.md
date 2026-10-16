@@ -9,11 +9,17 @@ entry points resolve to the local build, so build first:
 
 ```bash
 npm install            # builds dist/ through the prepare script
-node examples/investigatorQuickstart.ts     # Node >= 22.18 runs TypeScript directly
+node examples/cognition/investigatorQuickstart.ts     # Node >= 22.18 runs TypeScript directly
 ```
 
-On older Node versions, run an example with `npx tsx examples/<name>.ts`. To
+On older Node versions, run an example with `npx tsx examples/<topic>/<name>.ts`. To
 typecheck all of them, run `npx tsc -p examples/tsconfig.json`.
+
+## Directory guide
+
+The topic names match the Python examples: `cognition/` for tools and learning,
+`vectors/` for operation and persistence lifecycles, `vision/` for image and scene
+examples, and `retrieval/` for search and triage. Run paths from the repository root.
 
 ## Offline tours
 
@@ -21,11 +27,11 @@ These need no network access or model downloads. CI runs them on Node 24.
 
 | Example | Shows |
 |---|---|
-| [`investigatorQuickstart.ts`](investigatorQuickstart.ts) | The README's 30-second example: an `Investigator` built from configuration, then `Trainer.fromTool` with AdamW, `capture` with explicit provenance, persisted experience files, `fit`, `savePretrained`, `saveCheckpoint`, `fromPretrained` and prediction. |
-| [`ownedVectorLifecycle.ts`](ownedVectorLifecycle.ts) | Composed vector operations (`VocabularyEncoder` → `Classify`): tracing and supervision, `latentCodecs()` experience, `Trainer.fromOps`, per-operation `savePretrained` / `fromPretrained` with identical logits, and resuming from the checkpoint. |
-| [`supportTriage.ts`](supportTriage.ts) | Structured text operations (`Classify`, `Decide`, `Score`) over an explicit provider, several questions at once with `text.ask`, and a traced message composition. Offline, a deterministic keyword provider stands in for a model. Set `OPENAI_BASE_URL` and `OPENAI_MODEL` to call an OpenAI-compatible endpoint instead. With `--input tickets.jsonl --policy policy.txt --label ...` it is Python's `support_triage.py` CLI. |
-| [`traceAndTrain.ts`](traceAndTrain.ts) | A traced `ModuleOperation`, explicit `supervise` targets, `trace.save` / `loadExperience`, `Trainer.fromOps` with an Adam factory, `saveCheckpoint`, and resuming in a **fresh process**. The resumed run restores weights, optimizer, modes, steps, progress and the random generator, then continues exactly. |
-| [`pretrainedLifecycle.ts`](pretrainedLifecycle.ts) | Your own owned model (extending `PretrainedModule` from `tensorcode/tools`) with a declared objective: `Trainer.fromTool`, `capture`, `fit`, and `savePretrained` / `fromPretrained` (`tensorcode_config.json` + `model.safetensors` + model card). `--push <repo>` publishes with `pushToHub`, only when explicitly asked (token from `HF_TOKEN` or `hf auth login`). |
+| [`investigatorQuickstart.ts`](cognition/investigatorQuickstart.ts) | The README's 30-second example: an `Investigator` built from configuration, then `Trainer.fromTool` with AdamW, `capture` with explicit provenance, persisted experience files, `fit`, `savePretrained`, `saveCheckpoint`, `fromPretrained` and prediction. |
+| [`ownedVectorLifecycle.ts`](vectors/ownedVectorLifecycle.ts) | Composed vector operations (`VocabularyEncoder` → `Classify`): tracing and supervision, `latentCodecs()` experience, `Trainer.fromOps`, per-operation `savePretrained` / `fromPretrained` with identical logits, and resuming from the checkpoint. |
+| [`supportTriage.ts`](retrieval/supportTriage.ts) | Structured text operations (`Classify`, `Decide`, `Score`) over an explicit provider, several questions at once with `text.ask`, and a traced message composition. Offline, a deterministic keyword provider stands in for a model. Set `OPENAI_BASE_URL` and `OPENAI_MODEL` to call an OpenAI-compatible endpoint instead. With `--input tickets.jsonl --policy policy.txt --label ...` it is Python's `support_triage.py` CLI. |
+| [`traceAndTrain.ts`](vectors/traceAndTrain.ts) | A traced `ModuleOperation`, explicit `supervise` targets, `trace.save` / `loadExperience`, `Trainer.fromOps` with an Adam factory, `saveCheckpoint`, and resuming in a **fresh process**. The resumed run restores weights, optimizer, modes, steps, progress and the random generator, then continues exactly. |
+| [`pretrainedLifecycle.ts`](vectors/pretrainedLifecycle.ts) | Your own owned model (extending `PretrainedModule` from `tensorcode/tools`) with a declared objective: `Trainer.fromTool`, `capture`, `fit`, and `savePretrained` / `fromPretrained` (`tensorcode_config.json` + `model.safetensors` + model card). `--push <repo>` publishes with `pushToHub`, only when explicitly asked (token from `HF_TOKEN` or `hf auth login`). |
 
 Tiny authored cases demonstrate mechanisms. They are not evaluations of model
 quality.
@@ -45,23 +51,23 @@ Python examples do; selected file contents are sent to that endpoint.
 
 | Example (Python source) | Input and output |
 |---|---|
-| [`pretrainedLatentLifecycle.ts`](pretrainedLatentLifecycle.ts) (`pretrained_latent_lifecycle.py`) | Pinned FLAN-T5 vectors + four authored targets → trained linear bridge, durable experience, checkpoint and restored weights. Downloads `google/flan-t5-small` unless cached |
-| [`outputEncodingLearning.ts`](outputEncodingLearning.ts) (`output_encoding_learning.py`) | Reviewed `{text, target}` JSONL → trained OUTPUT_ENCODING readout and decoder bridge, reloaded with an exact loss check |
-| [`hypothesisLearning.ts`](hypothesisLearning.ts) (`hypothesis_learning.py`) | `collect` / `train` / `predict` stages: reviewed evidence sequences → revisable interpretations and saved weights |
-| [`planLearning.ts`](planLearning.ts) (`plan_learning.py`) | `collect` / `train` / `predict` stages: observed plan outcomes → learned candidate rankings (never executes a plan) |
-| [`learnActionOutcomes.ts`](learnActionOutcomes.ts) (`learn_action_outcomes.py`) | Executed simulated transitions → sourced outcome feedback, trained Planner, trajectories, session and exact restore checks (offline) |
-| [`banking77Restart.ts`](banking77Restart.ts) (`banking77_restart.py`) | Official Banking77 CSVs → persisted traces, training and held-out evaluation, each stage in its own process |
-| [`trainChatbot.ts`](trainChatbot.ts) (`train_chatbot.py`) | Reviewed input/target JSONL → trained Chatbot, held-out report, ablations and model card |
-| [`pretrainedChatbot.ts`](pretrainedChatbot.ts) (`pretrained_chatbot.py`) | Local or Hub Chatbot → one turn (`--prompt`) or an interactive session, with saved sessions |
-| [`trainCognitiveTools.ts`](trainCognitiveTools.ts) (`train_cognitive_tools.py`) | Pinned HotpotQA support annotations → Investigator and Planner document rankers, workspace ablation and lexical baseline |
-| [`evaluateCognition.ts`](evaluateCognition.ts) (`evaluate_cognition.py`) | Cognitive Chatbot + evidence cases → answers, abstentions, omission/replacement controls, episodic retrieval; optional component assembly |
-| [`evaluateTypedDecisions.ts`](evaluateTypedDecisions.ts) (`evaluate_typed_decisions.py`) | Foundation + Banking77 rows / reviewed candidates → generated-JSON vs likelihood decoding validity, accuracy and calibration |
-| [`trainScene.ts`](trainScene.ts) (`train_scene.py`) | Images + candidate descriptions → trained scene ranker with image/workspace ablations |
-| [`evaluateSceneLanguage.ts`](evaluateSceneLanguage.ts) (`evaluate_scene_language.py`) | Images + spatial yes/no captions → judgments under real, blank and shuffled images (SmolVLM-256M: several seconds per interpretation on a multi-core CPU) |
-| [`documentSearch.ts`](documentSearch.ts) (`document_search.py`) | Text/Markdown directory + question → answer with validated citations of retrieved excerpts |
-| [`researchAssistant.ts`](researchAssistant.ts) (`research_assistant.py`) | Local documents + question → bounded `actionLoop` of search/read/finish actions with receipts |
-| [`imageInspection.ts`](imageInspection.ts) (`image_inspection.py`) | One image + question → answer from a Transformers.js `LocalModel` or an OpenAI-compatible endpoint |
-| [`localMultimodal.ts`](localMultimodal.ts) (`local_multimodal.py`) | One image + a supplied local vision-language model → recorded answers and structured-output failures |
+| [`pretrainedLatentLifecycle.ts`](vectors/pretrainedLatentLifecycle.ts) (`pretrained_latent_lifecycle.py`) | Pinned FLAN-T5 vectors + four authored targets → trained linear bridge, durable experience, checkpoint and restored weights. Downloads `google/flan-t5-small` unless cached |
+| [`outputEncodingLearning.ts`](vectors/outputEncodingLearning.ts) (`output_encoding_learning.py`) | Reviewed `{text, target}` JSONL → trained OUTPUT_ENCODING readout and decoder bridge, reloaded with an exact loss check |
+| [`hypothesisLearning.ts`](cognition/hypothesisLearning.ts) (`hypothesis_learning.py`) | `collect` / `train` / `predict` stages: reviewed evidence sequences → revisable interpretations and saved weights |
+| [`planLearning.ts`](cognition/planLearning.ts) (`plan_learning.py`) | `collect` / `train` / `predict` stages: observed plan outcomes → learned candidate rankings (never executes a plan) |
+| [`learnActionOutcomes.ts`](cognition/learnActionOutcomes.ts) (`learn_action_outcomes.py`) | Executed simulated transitions → sourced outcome feedback, trained Planner, trajectories, session and exact restore checks (offline) |
+| [`banking77Restart.ts`](vectors/banking77Restart.ts) (`banking77_restart.py`) | Official Banking77 CSVs → persisted traces, training and held-out evaluation, each stage in its own process |
+| [`trainChatbot.ts`](cognition/trainChatbot.ts) (`train_chatbot.py`) | Reviewed input/target JSONL → trained Chatbot, held-out report, ablations and model card |
+| [`pretrainedChatbot.ts`](cognition/pretrainedChatbot.ts) (`pretrained_chatbot.py`) | Local or Hub Chatbot → one turn (`--prompt`) or an interactive session, with saved sessions |
+| [`trainCognitiveTools.ts`](cognition/trainCognitiveTools.ts) (`train_cognitive_tools.py`) | Pinned HotpotQA support annotations → Investigator and Planner document rankers, workspace ablation and lexical baseline |
+| [`evaluateCognition.ts`](cognition/evaluateCognition.ts) (`evaluate_cognition.py`) | Cognitive Chatbot + evidence cases → answers, abstentions, omission/replacement controls, episodic retrieval; optional component assembly |
+| [`evaluateTypedDecisions.ts`](cognition/evaluateTypedDecisions.ts) (`evaluate_typed_decisions.py`) | Foundation + Banking77 rows / reviewed candidates → generated-JSON vs likelihood decoding validity, accuracy and calibration |
+| [`trainScene.ts`](vision/trainScene.ts) (`train_scene.py`) | Images + candidate descriptions → trained scene ranker with image/workspace ablations |
+| [`evaluateSceneLanguage.ts`](vision/evaluateSceneLanguage.ts) (`evaluate_scene_language.py`) | Images + spatial yes/no captions → judgments under real, blank and shuffled images (SmolVLM-256M: several seconds per interpretation on a multi-core CPU) |
+| [`documentSearch.ts`](retrieval/documentSearch.ts) (`document_search.py`) | Text/Markdown directory + question → answer with validated citations of retrieved excerpts |
+| [`researchAssistant.ts`](cognition/researchAssistant.ts) (`research_assistant.py`) | Local documents + question → bounded `actionLoop` of search/read/finish actions with receipts |
+| [`imageInspection.ts`](vision/imageInspection.ts) (`image_inspection.py`) | One image + question → answer from a Transformers.js `LocalModel` or an OpenAI-compatible endpoint |
+| [`localMultimodal.ts`](vision/localMultimodal.ts) (`local_multimodal.py`) | One image + a supplied local vision-language model → recorded answers and structured-output failures |
 
 `trainCognitiveTools.ts` reads the pinned HotpotQA rows through the Hugging
 Face dataset viewer (it first checks that the viewer serves the pinned

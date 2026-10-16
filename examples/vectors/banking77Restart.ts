@@ -1,9 +1,9 @@
 /**
  * Persist supervised Banking77 traces, train after the process exits, then
- * evaluate (Python ``examples/banking77_restart.py``).
+ * evaluate (Python ``examples/vectors/banking77_restart.py``).
  *
  *     npm run build
- *     node examples/banking77Restart.ts --train banking_data/train.csv --test banking_data/test.csv \
+ *     node examples/vectors/banking77Restart.ts --train banking_data/train.csv --test banking_data/test.csv \
  *       --artifacts /tmp/banking77 --output /tmp/banking77-results.json
  *
  * Use the official train/test CSV files
