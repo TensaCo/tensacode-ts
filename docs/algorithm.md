@@ -52,3 +52,24 @@ attention graph with Python reference outputs.
 See the [Python algorithm guide](https://tensorcode.dev/docs/python/algorithm/)
 for the algorithm format, conversion contracts and the robotics example. These are
 current-checkout features, not a claim about the latest published package release.
+
+
+## Task prerequisite composition
+
+`compileSchedule` from `tensorcode/algorithm` accepts a mapping from task names
+to prerequisite name arrays. Indices follow `Object.keys` order. Its artifact
+accepts `completed` and `enabled` vectors and outputs `ready`: enabled, unfinished
+tasks whose dependencies are complete. Values >= 0.5 mean true. Dispatch and
+completion verification remain caller responsibilities. Cycles, unknown or
+duplicate dependencies and schedules outside 1–256 tasks are rejected.
+
+```typescript
+import { compileSchedule } from "tensorcode/algorithm";
+const schedule = compileSchedule({ inspect: [], pick: ["inspect"], release: ["pick"] });
+const output = schedule.compile("alg2").forward({
+  completed: [1, 0, 0], enabled: [1, 1, 1]
+}); // output.ready: [0, 1, 0]
+```
+
+The portable format is shared with Python. Regression tests replay the Python
+kitting example's real decision trace through all three TypeScript substrates.

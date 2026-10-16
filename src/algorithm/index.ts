@@ -812,3 +812,67 @@ export function convert(
     options,
   );
 }
+
+/** Compile readiness for a bounded DAG. Indices follow Object.keys(dependencies).
+ * completed/enabled >= .5 mean true. Dispatch and completion evidence are external.
+ */
+export function compileSchedule(
+  dependencies: Record<string, readonly string[]>,
+): Algorithm {
+  if (
+    !dependencies ||
+    typeof dependencies !== "object" ||
+    Array.isArray(dependencies)
+  )
+    throw new Error("schedules require a task mapping");
+  const names = Object.keys(dependencies);
+  if (names.length < 1 || names.length > 256)
+    throw new Error("schedules require 1 to 256 named tasks");
+  names.forEach(name);
+  const indices = new Map(names.map((key, i) => [key, i]));
+  const adjacency = names.map(() => names.map(() => 0));
+  for (const [key, parents] of Object.entries(dependencies)) {
+    if (!Array.isArray(parents))
+      throw new Error("prerequisites must be arrays");
+    if (parents.some((p) => typeof p !== "string" || !indices.has(p)))
+      throw new Error("unknown prerequisite");
+    if (new Set(parents).size !== parents.length)
+      throw new Error("duplicate prerequisite");
+    for (const parent of parents)
+      adjacency[indices.get(key)!]![indices.get(parent)!] = 1;
+  }
+  const visiting = new Set<string>(),
+    visited = new Set<string>();
+  function visit(key: string): void {
+    if (visiting.has(key)) throw new Error("cyclic prerequisites");
+    if (visited.has(key)) return;
+    visiting.add(key);
+    dependencies[key]!.forEach(visit);
+    visiting.delete(key);
+    visited.add(key);
+  }
+  names.forEach(visit);
+  const b = new AlgorithmBuilder({ name: "prerequisite_schedule" }),
+    n = names.length;
+  const completed = b.op("where", [
+    b.op("ge", [b.input("completed", [n]), 0.5]),
+    1,
+    0,
+  ]);
+  const enabled = b.op("where", [
+    b.op("ge", [b.input("enabled", [n]), 0.5]),
+    1,
+    0,
+  ]);
+  const missing = b
+    .constant(adjacency)
+    .matmul(b.constant(1).sub(completed).reshape(n, 1))
+    .reshape(n);
+  return b.build({
+    ready: b.op("where", [
+      b.op("lt", [missing, 0.5]),
+      enabled.mul(b.constant(1).sub(completed)),
+      0,
+    ]),
+  });
+}
